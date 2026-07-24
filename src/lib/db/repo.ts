@@ -13,7 +13,7 @@ import type {
   InvoiceLine,
   Product,
 } from "@/lib/domain/types";
-import { getById, put, remove } from "./database";
+import { getById, put, remove, touch } from "./database";
 
 /* ---------------- Entity ---------------- */
 /* Organizations are created server-side at registration (see /api/auth/register). */
@@ -207,63 +207,36 @@ export async function markReady(inv: Invoice): Promise<Invoice> {
 }
 
 /**
- * Send an invoice. Honest behaviour:
- * - SANDBOX entity → the real state machine runs an end-to-end sandbox exchange
- *   (queued → sending → delivered → reported → completed) with real timestamps.
- * - LIVE entity → queued and held, because no production gateway is wired here.
- * The invoice content is entirely the user's real data; only the network is sandboxed.
+ * Send an invoice through the real server-side pipeline: it validates, generates
+ * the PINT AE UBL + Tax Data Document, submits the exchange leg (buyer's ASP) and
+ * the reporting leg (TDD to the FTA) via the active gateway (mock or Taxilla),
+ * records the transmission, and applies the returned MLS. The mock gateway
+ * completes synchronously (sandbox); a live gateway leaves the invoice SENT until
+ * its webhook confirms delivery + reporting.
  */
-export async function sendInvoice(inv: Invoice, entity: Entity): Promise<Invoice> {
+export async function sendInvoice(inv: Invoice, _entity: Entity): Promise<Invoice> {
+  // Fast client-side check so blocking issues surface without a round-trip.
   const result = validateInvoice(inv);
   if (!result.canSend) {
     throw Object.assign(new Error("Invoice has blocking errors"), { issues: result.issues });
   }
-  const now = new Date().toISOString();
-
-  if (entity.einvoicingStatus === "LIVE") {
-    const queued: Invoice = {
-      ...recalc(inv),
-      lifecycleStatus: "QUEUED",
-      exchangeStatus: "SUBMITTED",
-      reportingStatusC2: "SUBMITTED",
-      sentAt: now,
-    };
-    await put("invoices", queued);
-    await addEvent(queued.id, "queued", "Queued for the live network gateway", "system", "neutral");
-    await notify(entity.orgId, {
-      type: "invoice.queued",
-      title: `${queued.number} queued`,
-      body: "Awaiting the production gateway connection.",
-      href: `/invoices/${queued.id}`,
-      tone: "neutral",
-    });
-    return queued;
-  }
-
-  // SANDBOX end-to-end
-  const completed: Invoice = {
-    ...recalc(inv),
-    lifecycleStatus: "COMPLETED",
-    exchangeStatus: "DELIVERED",
-    reportingStatusC2: "ACCEPTED",
-    sentAt: now,
-    deliveredAt: now,
-    reportedAt: now,
-    lockedAt: inv.lockedAt ?? now,
-  };
-  await put("invoices", completed);
-  await addEvent(completed.id, "queued", "Queued in the send pipeline", "system", "neutral");
-  await addEvent(completed.id, "sending", "Submitted to the Peppol network (sandbox)", "gateway", "neutral");
-  await addEvent(completed.id, "delivered", "Delivered to the buyer's Access Point", "gateway", "success");
-  await addEvent(completed.id, "reported", "Tax Data Document accepted by the FTA (sandbox)", "gateway", "success");
-  await notify(entity.orgId, {
-    type: "invoice.completed",
-    title: `${completed.number} delivered & reported`,
-    body: "Exchange and FTA reporting both succeeded in sandbox.",
-    href: `/invoices/${completed.id}`,
-    tone: "success",
+  const res = await fetch(`/api/invoices/${inv.id}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
   });
-  return completed;
+  if (res.status === 422) {
+    const body = (await res.json().catch(() => ({}))) as { issues?: unknown };
+    throw Object.assign(new Error("Invoice has blocking errors"), { issues: body.issues });
+  }
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Send failed");
+  }
+  const { invoice } = (await res.json()) as { invoice: Invoice };
+  touch("invoices");
+  touch("invoiceEvents");
+  touch("notifications");
+  return invoice;
 }
 
 export async function cancelInvoice(inv: Invoice): Promise<Invoice> {

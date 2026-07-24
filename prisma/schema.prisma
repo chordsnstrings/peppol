@@ -73,6 +73,29 @@ model UserMeta {
   @@id([userId, key])
 }
 
+/// A document transmission through the Peppol gateway. Looked up by gatewayRef
+/// on inbound webhooks (no session), so it carries orgId + invoiceId to route
+/// the status update back to the right tenant's invoice.
+model Transmission {
+  id              String    @id @default(cuid())
+  orgId           String
+  invoiceId       String
+  gatewayRef      String    @unique
+  idempotencyKey  String    @unique
+  driver          String
+  exchangeStatus  String    @default("SUBMITTED")
+  reportingStatus String    @default("SUBMITTED")
+  ublXml          String
+  tddXml          String
+  error           String?
+  lastEventAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([orgId])
+  @@index([invoiceId])
+}
+
 /// Encrypted OAuth tokens for accounting integrations. Server-only, per tenant.
 model IntegrationToken {
   id              String    @id // == Connection id held by the client

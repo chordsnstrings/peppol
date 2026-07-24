@@ -91,6 +91,11 @@ function emitChange(store: StoreName) {
   listeners.get(store)?.forEach((cb) => cb());
 }
 
+/** Notify subscribers that a store changed out-of-band (e.g. after a server-side mutation). */
+export function touch(store: StoreName) {
+  emitChange(store);
+}
+
 /* ------------------------------------------------------------------ */
 /* CRUD (same signatures as the old IndexedDB layer)                   */
 /* ------------------------------------------------------------------ */
