@@ -118,6 +118,44 @@ model Payment {
   @@index([providerRef])
 }
 
+/// The tenant's current billing plan. One row per org.
+model OrgBilling {
+  orgId     String   @id
+  plan      String   @default("FREE_MANDATE")
+  updatedAt DateTime @updatedAt
+}
+
+/// One billable exchange event, written when an invoice is first transmitted.
+/// Idempotent per (invoiceId, kind) so re-sends never double-count. Usage is a
+/// COUNT over these — the authoritative meter behind the billing page.
+model UsageEvent {
+  id        String   @id @default(cuid())
+  orgId     String
+  entityId  String
+  invoiceId String
+  kind      String   @default("EXCHANGE")
+  year      Int
+  createdAt DateTime @default(now())
+
+  @@unique([invoiceId, kind])
+  @@index([orgId, entityId, year])
+}
+
+/// A programmatic API key for the public /api/v1 REST API. Only the SHA-256
+/// hash is stored; the plaintext is shown once at creation. Scoped to one org.
+model ApiKey {
+  id         String    @id @default(cuid())
+  orgId      String
+  name       String
+  prefix     String
+  hash       String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  @@index([orgId])
+}
+
 /// Encrypted OAuth tokens for accounting integrations. Server-only, per tenant.
 model IntegrationToken {
   id              String    @id // == Connection id held by the client

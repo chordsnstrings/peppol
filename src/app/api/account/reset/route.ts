@@ -13,6 +13,8 @@ export async function POST() {
       prisma.integrationToken.deleteMany({ where: { orgId } }),
       prisma.transmission.deleteMany({ where: { orgId } }),
       prisma.payment.deleteMany({ where: { orgId } }),
+      prisma.usageEvent.deleteMany({ where: { orgId } }),
+      prisma.orgBilling.deleteMany({ where: { orgId } }),
       prisma.userMeta.deleteMany({ where: { userId } }),
     ]);
     return json({ ok: true });

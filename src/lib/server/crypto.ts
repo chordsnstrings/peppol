@@ -7,6 +7,13 @@ import {
   createHash,
 } from "node:crypto";
 
+/* ------------------------------- Hashing ----------------------------- */
+
+/** SHA-256 hex digest — used to store API keys (lookup by hash, never plaintext). */
+export function sha256Hex(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
 /* ----------------------------- Passwords ----------------------------- */
 
 /** Hash a password with scrypt. Returns `salt:hash` (hex). */

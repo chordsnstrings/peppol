@@ -2,12 +2,10 @@
 
 import * as React from "react";
 import { KeyRound, Plus, Copy, Trash2, Check, Webhook } from "lucide-react";
-import { id as makeId, timeAgo } from "@/lib/utils";
-import { metaGet, metaSet } from "@/lib/db/database";
+import { timeAgo } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal, ConfirmDialog } from "@/components/ui/modal";
 import { toast } from "sonner";
@@ -17,11 +15,7 @@ interface ApiKey {
   name: string;
   prefix: string;
   createdAt: string;
-}
-
-function randomKey() {
-  const rand = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
-  return `arks_live_${rand}`;
+  lastUsedAt?: string | null;
 }
 
 export default function ApiSettingsPage() {
@@ -30,29 +24,43 @@ export default function ApiSettingsPage() {
   const [name, setName] = React.useState("");
   const [revealed, setRevealed] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
   const [deleting, setDeleting] = React.useState<ApiKey | null>(null);
 
-  React.useEffect(() => {
-    metaGet<ApiKey[]>("apiKeys").then((k) => setKeys(k ?? []));
+  const load = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/api-keys", { credentials: "same-origin" });
+      const body = await res.json();
+      setKeys(body.keys ?? []);
+    } catch {
+      /* ignore */
+    }
   }, []);
 
-  const persist = async (next: ApiKey[]) => {
-    setKeys(next);
-    await metaSet("apiKeys", next);
-  };
+  React.useEffect(() => {
+    load();
+  }, [load]);
 
   const create = async () => {
-    const full = randomKey();
-    const key: ApiKey = {
-      id: makeId("key"),
-      name: name.trim() || "Untitled key",
-      prefix: full.slice(0, 16),
-      createdAt: new Date().toISOString(),
-    };
-    await persist([key, ...keys]);
-    setRevealed(full);
-    setCreating(false);
-    setName("");
+    setBusy(true);
+    try {
+      const res = await fetch("/api/api-keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Couldn't create key");
+      setRevealed(body.plaintext);
+      setCreating(false);
+      setName("");
+      load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't create key");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -127,7 +135,9 @@ export default function ApiSettingsPage() {
             <Button variant="outline" onClick={() => setCreating(false)}>
               Cancel
             </Button>
-            <Button onClick={create}>Generate</Button>
+            <Button onClick={create} loading={busy}>
+              Generate
+            </Button>
           </div>
         </div>
       </Modal>
@@ -163,7 +173,10 @@ export default function ApiSettingsPage() {
         open={Boolean(deleting)}
         onClose={() => setDeleting(null)}
         onConfirm={async () => {
-          if (deleting) await persist(keys.filter((k) => k.id !== deleting.id));
+          if (deleting) {
+            await fetch(`/api/api-keys/${deleting.id}`, { method: "DELETE", credentials: "same-origin" }).catch(() => {});
+            load();
+          }
           toast.success("Key revoked");
           setDeleting(null);
         }}
