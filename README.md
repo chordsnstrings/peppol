@@ -5,10 +5,30 @@ A beautiful, fully responsive, PWA-ready front-end for the **ARKS UAE e-Invoicin
 spreadsheets, validate against the rules, and transmit + report them across the Peppol 5-corner
 network — with compliance on autopilot.
 
-This is a **genuinely functional application**, not a mock-up. There is **no seed/fake data**: the
-app starts empty and everything you see is created by you through real flows and persisted locally
-in **IndexedDB**. All money/tax math, validation, Peppol-ID derivation, numbering and the invoice
-lifecycle are computed by real deterministic code.
+This is a **genuinely functional, multi-tenant application**, not a mock-up. Any company can
+register and gets an **isolated workspace** — data is persisted server-side (Prisma) and every query
+is scoped to the signed-in organization. There is **no seed/fake data**: everything is created
+through real flows, and all money/tax math, validation, Peppol-ID derivation, numbering and the
+invoice lifecycle are computed by real deterministic code.
+
+## Multi-tenancy & auth
+
+- **Registration/login** (email + password, scrypt-hashed) with a signed httpOnly JWT session.
+- `User → Organization (tenant) → Membership`; every `/api/store/*` query is forced to the
+  session's `orgId`. Cross-tenant reads return 404 and cross-tenant writes 403.
+- Domain objects persist as tenant-scoped JSON documents in a single `Record` table, so the whole
+  client keeps its object-store shape while gaining server persistence + isolation.
+- Dev runs on **SQLite** in-container; production swaps to managed **Postgres** (connection string).
+
+## Accounting integrations (per tenant)
+
+- An `AccountingProviderPort` (§8.5) with a **Zoho Books** adapter (real OAuth2 + Books API) and a
+  credential-free **mock driver**, selected by whether provider credentials are configured.
+- Server route handlers do the OAuth secret-exchange + API proxy (`/api/integrations/[provider]/{authorize,callback,sync,disconnect}`);
+  tokens are **AES-256-GCM encrypted at rest**, keyed by `orgId:connectionId` so every client's
+  integration is fully separate.
+- Synced invoices are mapped into the tenant store on the client (idempotent via `SyncLink`), so one
+  provider record never imports twice.
 
 ## Highlights
 

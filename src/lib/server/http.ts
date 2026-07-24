@@ -19,6 +19,7 @@ export const ALLOWED_STORES = new Set([
   "invoices",
   "invoiceEvents",
   "connections",
+  "syncLinks",
   "fixits",
   "inbound",
   "notifications",

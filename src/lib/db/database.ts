@@ -11,6 +11,7 @@ import type {
   InvoiceEvent,
   Member,
   Product,
+  SyncLink,
 } from "@/lib/domain/types";
 
 /**
@@ -27,6 +28,7 @@ export type StoreName =
   | "invoices"
   | "invoiceEvents"
   | "connections"
+  | "syncLinks"
   | "fixits"
   | "inbound"
   | "notifications"
@@ -40,6 +42,7 @@ interface StoreValue {
   invoices: Invoice;
   invoiceEvents: InvoiceEvent;
   connections: Connection;
+  syncLinks: SyncLink;
   fixits: FixitItem;
   inbound: InboundDoc;
   notifications: AppNotification;

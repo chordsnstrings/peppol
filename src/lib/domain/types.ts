@@ -254,11 +254,27 @@ export interface Connection {
   orgId: string;
   entityId: string;
   provider: "ZOHO_BOOKS" | "QBO" | "XERO" | "ODOO" | "TALLY_FILE";
-  status: "CONNECTED" | "EXPIRED" | "REVOKED" | "ERROR" | "PAUSED";
+  status: "CONNECTED" | "EXPIRED" | "REVOKED" | "ERROR" | "PAUSED" | "PENDING";
+  mode?: "live" | "mock";
   autoSend: boolean;
   lastSyncAt?: string;
+  lastError?: string;
+  syncedCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SyncLink {
+  id: string; // `${connectionId}:${externalId}`
+  orgId: string;
+  entityId: string;
+  connectionId: string;
+  provider: string;
+  objectType: "INVOICE" | "CUSTOMER";
+  externalId: string;
+  internalId: string;
+  hash?: string;
+  createdAt: string;
 }
 
 export type FixitKind =
