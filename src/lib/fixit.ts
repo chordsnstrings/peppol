@@ -51,6 +51,44 @@ export function deriveFixits(invoices: Invoice[]): FixitItem[] {
       });
     }
 
+    // Buyer not reachable on the network (REG-07)
+    if (inv.exchangeStatus === "UNDELIVERABLE_NO_PARTICIPANT") {
+      items.push({
+        id: `fx-net-${inv.id}`,
+        orgId: inv.orgId,
+        entityId: inv.entityId,
+        kind: "DELIVERY",
+        ref: inv.id,
+        refLabel: inv.number,
+        severity: "WARNING",
+        title: `${inv.buyer.nameEn || "The buyer"} isn't on the network yet`,
+        body: "You can't deliver until the buyer appoints a service provider. Re-check their status, or notify them to onboard.",
+        status: "OPEN",
+        createdAt: inv.updatedAt,
+      });
+    }
+
+    // Stuck in transit (submitted but no terminal MLS after a while) — live gateway only
+    if (
+      (inv.lifecycleStatus === "SENT" || inv.lifecycleStatus === "SENDING" || inv.lifecycleStatus === "QUEUED") &&
+      inv.sentAt &&
+      Date.now() - new Date(inv.sentAt).getTime() > 30 * 60 * 1000
+    ) {
+      items.push({
+        id: `fx-stuck-${inv.id}`,
+        orgId: inv.orgId,
+        entityId: inv.entityId,
+        kind: "SYSTEM",
+        ref: inv.id,
+        refLabel: inv.number,
+        severity: "WARNING",
+        title: `${inv.number} is taking longer than expected`,
+        body: "No delivery/reporting confirmation yet. We'll keep reconciling — you can also re-check now.",
+        status: "OPEN",
+        createdAt: inv.updatedAt,
+      });
+    }
+
     // Failed sends
     if (inv.lifecycleStatus === "FAILED") {
       items.push({

@@ -20,6 +20,7 @@ import {
   ArrowLeftRight,
   Landmark,
   Archive,
+  RefreshCw,
 } from "lucide-react";
 import { cn, formatDate, timeAgo } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
@@ -91,6 +92,31 @@ export default function InvoiceDetailPage() {
     toast.success("UBL XML exported");
   };
 
+  const downloadEvidence = async () => {
+    try {
+      const res = await fetch(`/api/invoices/${invoice.id}/evidence`);
+      if (!res.ok) throw new Error();
+      const bundle = await res.json();
+      downloadText(`${invoice.number || "invoice"}-evidence.json`, JSON.stringify(bundle, null, 2), "application/json");
+      toast.success("Evidence bundle downloaded", { description: "Audit-ready: CIM, UBL, TDD, timeline + hashes." });
+    } catch {
+      toast.error("Evidence not available yet", { description: "Send the invoice first." });
+    }
+  };
+
+  const reconcile = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/invoices/${invoice.id}/reconcile`, { method: "POST" });
+      const body = await res.json();
+      if (body.changed) toast.success("Status updated");
+      else toast("No change yet", { description: "Still awaiting the gateway." });
+    } catch {
+      toast.error("Couldn't reconcile");
+    }
+    setBusy(false);
+  };
+
   return (
     <div>
       <PageHeader
@@ -132,18 +158,38 @@ export default function InvoiceDetailPage() {
                 <DropdownItem icon={<Printer />} onSelect={() => window.print()}>
                   Print / Save PDF
                 </DropdownItem>
+                {!isDraft && (
+                  <DropdownItem icon={<ShieldCheck />} onSelect={downloadEvidence}>
+                    Download evidence bundle
+                  </DropdownItem>
+                )}
                 <DropdownItem
                   icon={<Copy />}
                   onSelect={() => router.push(`/invoices/new?duplicate=${invoice.id}`)}
                 >
                   Duplicate
                 </DropdownItem>
-                {isCompleted && (
+                {(isCompleted || invoice.lifecycleStatus === "DELIVERED" || invoice.lifecycleStatus === "SENT") && (
                   <DropdownItem
                     icon={<ArrowLeftRight />}
-                    onSelect={() => router.push(`/invoices/new?duplicate=${invoice.id}`)}
+                    onSelect={() => router.push(`/invoices/new?creditFor=${invoice.id}`)}
                   >
                     Create credit note
+                  </DropdownItem>
+                )}
+                {invoice.lifecycleStatus === "FAILED" && (
+                  <DropdownItem
+                    icon={<Copy />}
+                    onSelect={() => router.push(`/invoices/new?duplicate=${invoice.id}`)}
+                  >
+                    Fix &amp; resend as corrected copy
+                  </DropdownItem>
+                )}
+                {(invoice.lifecycleStatus === "SENT" ||
+                  invoice.lifecycleStatus === "SENDING" ||
+                  invoice.lifecycleStatus === "QUEUED") && (
+                  <DropdownItem icon={<RefreshCw />} onSelect={reconcile}>
+                    Re-check status
                   </DropdownItem>
                 )}
                 <DropdownSeparator />
@@ -286,8 +332,9 @@ export default function InvoiceDetailPage() {
               <ArtifactRow
                 icon={<ShieldCheck />}
                 label="Evidence bundle"
-                available={isCompleted}
-                hint={isCompleted ? "Archived immutably" : "After completion"}
+                available={!isDraft}
+                hint={!isDraft ? "CIM + UBL + TDD + hashes" : "After sending"}
+                onClick={downloadEvidence}
               />
             </CardContent>
           </Card>

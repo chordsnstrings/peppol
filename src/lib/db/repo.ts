@@ -166,6 +166,35 @@ export function recalc(inv: Invoice): Invoice {
   };
 }
 
+/** Build a credit note that references a source invoice (§8.2.2 correction path). */
+export function makeCreditNote(entity: Entity, source: Invoice): Invoice {
+  const draft = makeDraft(entity);
+  draft.docType = "TAX_CREDIT_NOTE";
+  draft.buyer = source.buyer;
+  draft.customerId = source.customerId;
+  draft.currency = source.currency;
+  draft.fx = source.fx;
+  draft.lines = source.lines.map((l) => ({ ...l, id: id("ln") }));
+  draft.precedingInvoices = [
+    { number: source.number, issueDate: source.issueDate, invoiceId: source.id },
+  ];
+  draft.creditReason = "PRICE";
+  draft.notes = `Credit note for ${source.number}`;
+  return recalc(draft);
+}
+
+/** Clone a failed/rejected invoice into a fresh corrected draft. */
+export function makeCorrectedCopy(entity: Entity, source: Invoice): Invoice {
+  const draft = makeDraft(entity);
+  draft.buyer = source.buyer;
+  draft.customerId = source.customerId;
+  draft.currency = source.currency;
+  draft.fx = source.fx;
+  draft.lines = source.lines.map((l) => ({ ...l, id: id("ln") }));
+  draft.notes = source.notes;
+  return recalc(draft);
+}
+
 export async function persistInvoice(inv: Invoice): Promise<Invoice> {
   const next = recalc(inv);
   const existing = await getById("invoices", next.id);

@@ -37,7 +37,9 @@ export type TaxProfileCode =
   | "ZERO_OTHER"
   | "EXEMPT"
   | "OUT_OF_SCOPE"
-  | "REVERSE_CHARGE";
+  | "REVERSE_CHARGE"
+  | "DESIGNATED_ZONE"
+  | "MARGIN_SCHEME";
 
 export interface TaxProfile {
   code: TaxProfileCode;

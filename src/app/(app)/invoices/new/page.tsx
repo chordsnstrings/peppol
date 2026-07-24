@@ -28,6 +28,7 @@ import {
   getById,
 } from "@/lib/db/database";
 import {
+  makeCreditNote,
   makeDraft,
   nextInvoiceNumber,
   persistInvoice,
@@ -35,6 +36,9 @@ import {
   saveEntity,
   sendInvoice,
 } from "@/lib/db/repo";
+import { taxAdvisories } from "@/lib/domain/advice";
+import { CREDIT_REASONS } from "@/lib/domain/tax";
+import { Lightbulb } from "lucide-react";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
@@ -60,11 +64,12 @@ export default function InvoiceEditorPage() {
   const [saving, setSaving] = React.useState(false);
   const [sending, setSending] = React.useState(false);
 
-  // Initialise draft (new / edit / duplicate)
+  // Initialise draft (new / edit / duplicate / credit note)
   React.useEffect(() => {
     if (!currentEntity) return;
     const from = params.get("from");
     const dup = params.get("duplicate");
+    const creditFor = params.get("creditFor");
     (async () => {
       if (from) {
         const existing = await getById("invoices", from);
@@ -75,6 +80,16 @@ export default function InvoiceEditorPage() {
         }
       }
       const { number } = await nextInvoiceNumber(currentEntity);
+
+      if (creditFor) {
+        const source = (await getById("invoices", creditFor)) as Invoice | undefined;
+        if (source) {
+          setInv({ ...makeCreditNote(currentEntity, source), number });
+          setIsNew(true);
+          return;
+        }
+      }
+
       const draft = makeDraft(currentEntity, { number });
       if (dup) {
         const source = (await getById("invoices", dup)) as Invoice | undefined;
@@ -93,6 +108,7 @@ export default function InvoiceEditorPage() {
 
   const live = React.useMemo(() => (inv ? recalc(inv) : null), [inv]);
   const validation = React.useMemo(() => (live ? validateInvoice(live) : null), [live]);
+  const advisories = React.useMemo(() => (live ? taxAdvisories(live) : []), [live]);
 
   if (!inv || !live || !currentEntity) {
     return (
@@ -176,6 +192,32 @@ export default function InvoiceEditorPage() {
       <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
         {/* Form column */}
         <div className="space-y-5">
+          {/* Credit-note context */}
+          {live.docType === "TAX_CREDIT_NOTE" && (
+            <Card className="border-gold/25 bg-gold/[0.05]">
+              <CardContent className="grid gap-3 p-4 sm:grid-cols-2">
+                <Field label="Correcting invoice">
+                  <Input
+                    value={live.precedingInvoices?.[0]?.number ?? ""}
+                    onChange={(e) =>
+                      update({ precedingInvoices: [{ number: e.target.value, invoiceId: live.precedingInvoices?.[0]?.invoiceId }] })
+                    }
+                    placeholder="Original invoice number"
+                  />
+                </Field>
+                <Field label="Reason for credit">
+                  <Select value={live.creditReason ?? "PRICE"} onChange={(e) => update({ creditReason: e.target.value })}>
+                    {CREDIT_REASONS.map((r) => (
+                      <option key={r.code} value={r.code}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Customer */}
           <Card>
             <CardHeader className="pb-3">
@@ -343,6 +385,31 @@ export default function InvoiceEditorPage() {
 
           {/* Validation */}
           <ValidationPanel result={validation} />
+
+          {advisories.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Lightbulb className="size-4 text-gold" /> Tax guidance
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2.5">
+                {advisories.map((a) => (
+                  <div key={a.id} className="rounded-lg bg-muted/50 p-2.5">
+                    <p className="flex items-center gap-1.5 text-sm font-medium">
+                      {a.tone === "warning" ? (
+                        <AlertTriangle className="size-3.5 text-[hsl(var(--warning))]" />
+                      ) : (
+                        <Info className="size-3.5 text-info" />
+                      )}
+                      {a.title}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{a.body}</p>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
 

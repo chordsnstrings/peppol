@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Plus, Search, Users, MoreHorizontal, Trash2, Pencil, Check, FileText } from "lucide-react";
+import { Plus, Search, Users, MoreHorizontal, Trash2, Pencil, Check, RefreshCw } from "lucide-react";
 import { cn, id as makeId, timeAgo } from "@/lib/utils";
 import { useAppState } from "@/lib/app-state";
 import { useCustomers } from "@/hooks/use-entity-data";
@@ -30,12 +30,51 @@ const PARTICIPANT_TONE = {
   LOOKUP_FAILED: { tone: "error" as const, label: "Lookup failed" },
 };
 
+async function checkParticipant(c: Customer): Promise<Customer> {
+  try {
+    const res = await fetch("/api/participants/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trn: c.trn, peppolId: c.peppolId }),
+    });
+    const j = (await res.json()) as { onNetwork: boolean; participantId: string | null };
+    return {
+      ...c,
+      participantStatus: j.onNetwork ? "LOOKUP_OK" : "NOT_ON_NETWORK",
+      peppolId: j.participantId ?? c.peppolId,
+    };
+  } catch {
+    return { ...c, participantStatus: "LOOKUP_FAILED" };
+  }
+}
+
 export default function CustomersPage() {
   const { customers, loading } = useCustomers();
   const [q, setQ] = React.useState("");
   const [editing, setEditing] = React.useState<Customer | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [deleting, setDeleting] = React.useState<Customer | null>(null);
+  const [checkingAll, setCheckingAll] = React.useState(false);
+
+  const checkOne = async (c: Customer) => {
+    const updated = await checkParticipant(c);
+    await saveCustomer(updated);
+    toast[updated.participantStatus === "LOOKUP_OK" ? "success" : "message"](
+      updated.participantStatus === "LOOKUP_OK" ? `${c.displayName} is on the network` : `${c.displayName} isn't on the network yet`,
+    );
+  };
+
+  const checkAll = async () => {
+    setCheckingAll(true);
+    let onNet = 0;
+    for (const c of customers) {
+      const updated = await checkParticipant(c);
+      await saveCustomer(updated);
+      if (updated.participantStatus === "LOOKUP_OK") onNet++;
+    }
+    setCheckingAll(false);
+    toast.success(`${onNet} of ${customers.length} customers on the network`);
+  };
 
   const filtered = customers.filter(
     (c) =>
@@ -53,9 +92,16 @@ export default function CustomersPage() {
         description="Your buyers. Master data builds itself as you invoice."
         icon={<Users />}
         actions={
-          <Button icon={<Plus />} onClick={() => setCreating(true)}>
-            New customer
-          </Button>
+          <>
+            {customers.length > 0 && (
+              <Button variant="outline" icon={<RefreshCw className={checkingAll ? "animate-spin" : ""} />} loading={checkingAll} onClick={checkAll}>
+                <span className="hidden sm:inline">Check network</span>
+              </Button>
+            )}
+            <Button icon={<Plus />} onClick={() => setCreating(true)}>
+              New customer
+            </Button>
+          </>
         }
       />
 
@@ -114,6 +160,9 @@ export default function CustomersPage() {
                         </button>
                       </DropdownTrigger>
                       <div className="w-40">
+                        <DropdownItem icon={<RefreshCw />} onSelect={() => checkOne(c)}>
+                          Check network
+                        </DropdownItem>
                         <DropdownItem icon={<Pencil />} onSelect={() => setEditing(c)}>
                           Edit
                         </DropdownItem>

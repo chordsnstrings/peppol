@@ -66,9 +66,39 @@ export const TAX_PROFILES: Record<TaxProfileCode, TaxProfile> = {
     ratePercent: 0,
     requiresExemptionReason: false,
     isTaxable: true,
-    hint: "Buyer accounts for VAT (imported services). Buyer TRN required.",
+    hint: "Buyer accounts for VAT (e.g. certain domestic supplies). Buyer TRN required.",
+  },
+  DESIGNATED_ZONE: {
+    code: "DESIGNATED_ZONE",
+    label: "Designated zone",
+    categoryCode: "O",
+    ratePercent: 0,
+    requiresExemptionReason: true,
+    isTaxable: false,
+    hint: "Supply within/between designated free zones — often out of scope. Check the zone rules.",
+  },
+  MARGIN_SCHEME: {
+    code: "MARGIN_SCHEME",
+    label: "Profit-margin scheme",
+    categoryCode: "S",
+    ratePercent: 5,
+    requiresExemptionReason: true,
+    isTaxable: true,
+    hint: "Used goods (e.g. second-hand vehicles). VAT is on the margin — not yet auto-calculated; enter the tax manually.",
   },
 };
+
+/** Credit-note reason codes (plain-language; UNTDID-aligned) `[VERIFY-LATEST]`. */
+export const CREDIT_REASONS: { code: string; label: string }[] = [
+  { code: "PRICE", label: "Price/quantity correction" },
+  { code: "RETURN", label: "Goods returned" },
+  { code: "CANCEL", label: "Order cancelled" },
+  { code: "DISCOUNT", label: "Post-invoice discount / rebate" },
+  { code: "DUPLICATE", label: "Duplicate invoice issued" },
+  { code: "WRONG_CUSTOMER", label: "Issued to the wrong customer" },
+  { code: "WRONG_TAX", label: "Incorrect tax treatment" },
+  { code: "OTHER", label: "Other (explain in notes)" },
+];
 
 export const TAX_PROFILE_LIST = Object.values(TAX_PROFILES);
 

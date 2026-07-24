@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { Building2, BadgeCheck, Hash, AlertTriangle, Save, Trash2 } from "lucide-react";
+import { Building2, BadgeCheck, Hash, AlertTriangle, Save, Trash2, Download } from "lucide-react";
 import { useAppState } from "@/lib/app-state";
 import { saveEntity } from "@/lib/db/repo";
 import { resetWorkspace } from "@/lib/db/database";
+import { downloadText } from "@/lib/domain/ubl";
 import { derivePeppolId, EMIRATES, validateTRN } from "@/lib/domain/peppol";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,7 +19,26 @@ export default function EntitySettingsPage() {
   const { currentEntity, refresh } = useAppState();
   const [form, setForm] = React.useState(currentEntity);
   const [saving, setSaving] = React.useState(false);
+  const [exporting, setExporting] = React.useState(false);
   const [confirmReset, setConfirmReset] = React.useState(false);
+
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const res = await fetch("/api/account/export");
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      downloadText(
+        `arks-export-${new Date().toISOString().slice(0, 10)}.json`,
+        JSON.stringify(data, null, 2),
+        "application/json",
+      );
+      toast.success("Data exported", { description: "All records + UBL/TDD documents." });
+    } catch {
+      toast.error("Export failed");
+    }
+    setExporting(false);
+  };
 
   React.useEffect(() => setForm(currentEntity), [currentEntity]);
 
@@ -125,6 +145,26 @@ export default function EntitySettingsPage() {
           Save changes
         </Button>
       </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Download className="size-4" /> Your data &amp; records
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <p className="text-sm font-medium">Export everything</p>
+            <p className="text-sm text-muted-foreground">
+              Download all your invoices, customers, products and the underlying UBL + Tax Data
+              Documents. Your statutory records are always yours to keep.
+            </p>
+          </div>
+          <Button variant="outline" icon={<Download />} onClick={exportData} loading={exporting}>
+            Export data
+          </Button>
+        </CardContent>
+      </Card>
 
       <Card className="border-destructive/30">
         <CardHeader className="pb-3">

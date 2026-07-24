@@ -31,6 +31,7 @@ const KIND_META: Record<string, { label: string; icon: React.ReactNode }> = {
   CLOCK: { label: "Compliance clock", icon: <Clock /> },
   DELIVERY: { label: "Delivery", icon: <Send /> },
   REPORTING: { label: "Reporting", icon: <Info /> },
+  SYSTEM: { label: "In transit", icon: <Clock /> },
 };
 
 export default function FixitPage() {
