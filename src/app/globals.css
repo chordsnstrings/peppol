@@ -1,0 +1,305 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 33% 98%;
+    --foreground: 215 45% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 45% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 45% 12%;
+
+    /* Primary = deep navy in light, inverts to cream in dark */
+    --primary: 213 62% 12%;
+    --primary-foreground: 40 33% 98%;
+
+    --secondary: 214 32% 94%;
+    --secondary-foreground: 215 40% 20%;
+
+    --muted: 214 28% 95%;
+    --muted-foreground: 215 16% 42%;
+
+    --accent: 214 32% 93%;
+    --accent-foreground: 215 45% 15%;
+
+    /* Brand navy + gold */
+    --brand: 213 62% 12%;
+    --brand-soft: 213 40% 22%;
+    --brand-foreground: 40 33% 98%;
+    --gold: 43 55% 52%;
+    --gold-soft: 43 60% 62%;
+
+    --success: 152 55% 38%;
+    --success-foreground: 0 0% 100%;
+    --warning: 36 92% 46%;
+    --warning-foreground: 30 40% 12%;
+    --destructive: 352 68% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --info: 205 82% 44%;
+    --info-foreground: 0 0% 100%;
+
+    --border: 214 24% 88%;
+    --input: 214 24% 86%;
+    --ring: 43 55% 52%;
+
+    --shadow-color: 215 40% 20%;
+    --radius: 0.75rem;
+
+    /* Sidebar stays deep navy in both themes — brand signature */
+    --sidebar: 214 54% 9%;
+    --sidebar-foreground: 210 24% 78%;
+    --sidebar-muted: 213 22% 54%;
+    --sidebar-border: 213 40% 18%;
+    --sidebar-accent: 43 55% 55%;
+  }
+
+  .dark {
+    --background: 215 40% 6%;
+    --foreground: 210 24% 92%;
+
+    --card: 215 36% 9%;
+    --card-foreground: 210 24% 92%;
+
+    --popover: 215 38% 8%;
+    --popover-foreground: 210 24% 92%;
+
+    /* Inverted primary: cream button on dark */
+    --primary: 40 30% 95%;
+    --primary-foreground: 215 45% 10%;
+
+    --secondary: 214 28% 15%;
+    --secondary-foreground: 210 24% 90%;
+
+    --muted: 214 26% 14%;
+    --muted-foreground: 214 16% 60%;
+
+    --accent: 214 28% 16%;
+    --accent-foreground: 210 24% 92%;
+
+    --brand: 40 30% 95%;
+    --brand-soft: 213 30% 30%;
+    --brand-foreground: 215 45% 10%;
+    --gold: 43 62% 58%;
+    --gold-soft: 43 66% 66%;
+
+    --success: 152 52% 44%;
+    --success-foreground: 0 0% 100%;
+    --warning: 36 92% 54%;
+    --warning-foreground: 30 40% 10%;
+    --destructive: 352 70% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --info: 205 80% 56%;
+    --info-foreground: 215 45% 10%;
+
+    --border: 214 26% 17%;
+    --input: 214 24% 20%;
+    --ring: 43 62% 58%;
+
+    --shadow-color: 215 60% 2%;
+
+    --sidebar: 216 48% 7%;
+    --sidebar-foreground: 210 22% 76%;
+    --sidebar-muted: 213 18% 50%;
+    --sidebar-border: 214 34% 15%;
+    --sidebar-accent: 43 62% 60%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+    overscroll-behavior-y: none;
+  }
+
+  /* Respect reduced motion globally */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  ::selection {
+    background: hsl(var(--gold) / 0.28);
+    color: hsl(var(--foreground));
+  }
+
+  /* Refined scrollbars */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.25);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.4);
+    background-clip: content-box;
+  }
+
+  [dir="rtl"] {
+    letter-spacing: 0;
+  }
+}
+
+@layer components {
+  /* Frosted glass surface */
+  .glass {
+    background: hsl(var(--card) / 0.7);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+  }
+
+  .glass-strong {
+    background: hsl(var(--card) / 0.85);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+
+  /* Gold gradient text for hero brand moments */
+  .text-gold-gradient {
+    background: linear-gradient(
+      100deg,
+      hsl(var(--gold-soft)),
+      hsl(var(--gold)) 45%,
+      hsl(var(--gold-soft))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Subtle dotted grid backdrop */
+  .bg-dotgrid {
+    background-image: radial-gradient(
+      circle at 1px 1px,
+      hsl(var(--border)) 1px,
+      transparent 0
+    );
+    background-size: 22px 22px;
+  }
+
+  /* Shimmer skeleton */
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-muted;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0;
+    transform: translateX(-100%);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      hsl(var(--foreground) / 0.06),
+      transparent
+    );
+    animation: shimmer 1.8s infinite;
+  }
+
+  /* Focus ring used across interactive elements */
+  .focus-ring {
+    @apply outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2;
+  }
+
+  /* Number tabular figures for money columns */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* Card hover lift primitive */
+  .hover-lift {
+    @apply transition-all duration-300;
+  }
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    @apply shadow-elevated;
+  }
+
+  /* Animated underline for links */
+  .link-underline {
+    background-image: linear-gradient(hsl(var(--gold)), hsl(var(--gold)));
+    background-size: 0% 1.5px;
+    background-repeat: no-repeat;
+    background-position: left bottom;
+    transition: background-size 0.3s ease;
+  }
+  .link-underline:hover {
+    background-size: 100% 1.5px;
+  }
+}
+
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .mask-fade-r {
+    -webkit-mask-image: linear-gradient(to right, black 82%, transparent);
+    mask-image: linear-gradient(to right, black 82%, transparent);
+  }
+}
+
+/* Print — show only the invoice document */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0;
+    padding: 0;
+  }
+  .print-area .shadow-soft {
+    box-shadow: none !important;
+  }
+}
+
+/* cmdk group headings */
+[cmdk-group-heading] {
+  padding: 0.5rem 0.625rem 0.25rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+[cmdk-group]:not(:first-child) {
+  margin-top: 0.25rem;
+}

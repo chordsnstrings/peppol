@@ -1,0 +1,20 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ARKS">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#12294A"/>
+      <stop offset="1" stop-color="#0B1A2E"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="150" y1="120" x2="380" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E6C978"/>
+      <stop offset="0.5" stop-color="#C9A84C"/>
+      <stop offset="1" stop-color="#B08F38"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="1" y="1" width="510" height="510" rx="111" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2"/>
+  <!-- Stylised A monogram -->
+  <path d="M256 108 L360 404 L300 404 L281 346 L231 346 L212 404 L152 404 L256 108 Z M248 232 L248 292 L268 292 L258 262 Z" fill="url(#gold)"/>
+  <!-- compliance check spark -->
+  <circle cx="352" cy="150" r="26" fill="url(#gold)"/>
+  <path d="M340 150 l8 9 l16 -18" stroke="#0B1A2E" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
