@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { KeyRound, Plus, Copy, Trash2, Check, Webhook } from "lucide-react";
+import { KeyRound, Plus, Copy, Trash2, Check, Webhook, Bot } from "lucide-react";
 import { timeAgo } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ export default function ApiSettingsPage() {
   const [copied, setCopied] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [deleting, setDeleting] = React.useState<ApiKey | null>(null);
+  const [mcpCopied, setMcpCopied] = React.useState(false);
+  const mcpUrl = typeof window !== "undefined" ? `${window.location.origin}/api/mcp` : "/api/mcp";
 
   const load = React.useCallback(async () => {
     try {
@@ -121,6 +123,41 @@ export default function ApiSettingsPage() {
             Subscribe to <code className="rounded bg-muted px-1 text-xs">invoice.status.changed</code>,{" "}
             <code className="rounded bg-muted px-1 text-xs">invoice.reported</code> and more. Each delivery
             is HMAC-signed. Configure endpoints when you connect your systems.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* MCP server */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Bot className="size-4" /> Connect your AI (MCP)
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Connect Claude, ChatGPT or Gemini directly to your workspace. They can create, validate and
+            send invoices for you — authenticated with an API key above.
+          </p>
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-muted p-3">
+            <code className="flex-1 break-all font-mono text-xs">{mcpUrl}</code>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => {
+                navigator.clipboard?.writeText(mcpUrl);
+                setMcpCopied(true);
+                setTimeout(() => setMcpCopied(false), 1500);
+              }}
+              aria-label="Copy MCP endpoint"
+            >
+              {mcpCopied ? <Check className="size-4 text-success" /> : <Copy className="size-4" />}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Add it as a remote MCP server with header{" "}
+            <code className="rounded bg-muted px-1 text-xs">Authorization: Bearer &lt;your key&gt;</code>. Tools:
+            list/get/create/validate/send invoices, list entities &amp; customers, usage.
           </p>
         </CardContent>
       </Card>
