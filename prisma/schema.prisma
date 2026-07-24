@@ -3,15 +3,15 @@
 // documents in `Record`, so the existing client keeps its object-store shape while
 // gaining server-side persistence + org isolation. Auth and secrets are typed tables.
 //
-// Dev uses SQLite (runs in-container). Production swaps `provider` to "postgresql"
-// and points DATABASE_URL at managed Postgres — the app code is unchanged.
+// PostgreSQL. Dev runs a local cluster in-container; production points
+// DATABASE_URL at managed Postgres — the app code and migrations are identical.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

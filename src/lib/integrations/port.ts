@@ -46,8 +46,15 @@ export interface AccountingProviderPort {
   id: ProviderId;
   /** Build the OAuth consent URL to redirect the user to. */
   authorizeUrl(params: { redirectUri: string; state: string }): string;
-  /** Exchange an authorization code for tokens. */
-  completeAuth(params: { code: string; redirectUri: string }): Promise<TokenSet>;
+  /**
+   * Exchange an authorization code for tokens. `query` carries any extra params
+   * the provider adds to the callback (e.g. QuickBooks `realmId`).
+   */
+  completeAuth(params: {
+    code: string;
+    redirectUri: string;
+    query?: Record<string, string>;
+  }): Promise<TokenSet>;
   /** Refresh an expired access token. */
   refresh(token: TokenSet): Promise<TokenSet>;
   /** Pull invoices (+ embedded customers) since an optional cursor. */

@@ -26,7 +26,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ provider: strin
   try {
     const redirectUri = `${url.origin}/api/integrations/${provider}/callback`;
     const { driver, mode } = getDriver(id);
-    const token = await driver.completeAuth({ code, redirectUri });
+    const query = Object.fromEntries(url.searchParams.entries());
+    const token = await driver.completeAuth({ code, redirectUri, query });
     await saveToken(connectionId, session.orgId, id, token);
     return NextResponse.redirect(
       new URL(`/integrations?connected=${connectionId}&provider=${provider}&mode=${mode}`, req.url),

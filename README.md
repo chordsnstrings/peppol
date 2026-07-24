@@ -18,12 +18,14 @@ invoice lifecycle are computed by real deterministic code.
   session's `orgId`. Cross-tenant reads return 404 and cross-tenant writes 403.
 - Domain objects persist as tenant-scoped JSON documents in a single `Record` table, so the whole
   client keeps its object-store shape while gaining server persistence + isolation.
-- Dev runs on **SQLite** in-container; production swaps to managed **Postgres** (connection string).
+- **PostgreSQL** everywhere (Prisma migrations in `prisma/migrations/`); production just points
+  `DATABASE_URL` at a managed instance.
 
 ## Accounting integrations (per tenant)
 
-- An `AccountingProviderPort` (§8.5) with a **Zoho Books** adapter (real OAuth2 + Books API) and a
-  credential-free **mock driver**, selected by whether provider credentials are configured.
+- An `AccountingProviderPort` (§8.5) with real adapters for **Zoho Books**, **QuickBooks Online**,
+  **Xero** and **Odoo**, each with a credential-free **mock driver**, selected by whether that
+  provider's credentials are configured.
 - Server route handlers do the OAuth secret-exchange + API proxy (`/api/integrations/[provider]/{authorize,callback,sync,disconnect}`);
   tokens are **AES-256-GCM encrypted at rest**, keyed by `orgId:connectionId` so every client's
   integration is fully separate.

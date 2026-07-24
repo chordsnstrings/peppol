@@ -1,25 +1,46 @@
 import type { AccountingProviderPort, ProviderId } from "./port";
 import { makeMockDriver } from "./mock";
 import { zohoDriver } from "./zoho";
+import { qboDriver } from "./qbo";
+import { xeroDriver } from "./xero";
+import { odooDriver } from "./odoo";
 
-/** Provider config: whether live credentials are present for each. */
+const LIVE_DRIVERS: Record<ProviderId, AccountingProviderPort> = {
+  ZOHO_BOOKS: zohoDriver,
+  QBO: qboDriver,
+  XERO: xeroDriver,
+  ODOO: odooDriver,
+};
+
+/** Whether live credentials are configured for a provider. */
 export function providerHasCredentials(id: ProviderId): boolean {
   switch (id) {
     case "ZOHO_BOOKS":
       return Boolean(process.env.ZOHO_CLIENT_ID && process.env.ZOHO_CLIENT_SECRET);
+    case "QBO":
+      return Boolean(process.env.QBO_CLIENT_ID && process.env.QBO_CLIENT_SECRET);
+    case "XERO":
+      return Boolean(process.env.XERO_CLIENT_ID && process.env.XERO_CLIENT_SECRET);
+    case "ODOO":
+      return Boolean(
+        process.env.ODOO_URL &&
+          process.env.ODOO_DB &&
+          process.env.ODOO_USERNAME &&
+          process.env.ODOO_API_KEY,
+      );
     default:
-      return false; // QBO/Xero/Odoo adapters land next; mock until then
+      return false;
   }
 }
 
 /**
- * Resolve the active driver for a provider. Uses the real adapter when its
+ * Resolve the active driver for a provider: the real adapter when its
  * credentials are configured, otherwise the credential-free mock driver so the
  * flow is always runnable.
  */
 export function getDriver(id: ProviderId): { driver: AccountingProviderPort; mode: "live" | "mock" } {
-  if (id === "ZOHO_BOOKS" && providerHasCredentials("ZOHO_BOOKS")) {
-    return { driver: zohoDriver, mode: "live" };
+  if (providerHasCredentials(id)) {
+    return { driver: LIVE_DRIVERS[id], mode: "live" };
   }
   return { driver: makeMockDriver(id), mode: "mock" };
 }
