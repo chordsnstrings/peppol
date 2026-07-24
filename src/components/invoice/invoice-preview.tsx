@@ -22,6 +22,11 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
           <LogoMark size={40} />
           <div>
             <p className="text-sm font-bold">{seller.nameEn || "Your company"}</p>
+            {seller.nameAr && (
+              <p dir="rtl" className="text-sm font-bold" lang="ar">
+                {seller.nameAr}
+              </p>
+            )}
             {seller.trn && <p className="text-xs opacity-60">TRN {seller.trn}</p>}
             {seller.peppolId && <p className="font-mono text-[11px] opacity-50">{seller.peppolId}</p>}
           </div>
@@ -39,6 +44,11 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide opacity-40">Bill to</p>
           <p className="mt-1 font-semibold">{buyer.nameEn || "—"}</p>
+          {buyer.nameAr && (
+            <p dir="rtl" className="font-semibold" lang="ar">
+              {buyer.nameAr}
+            </p>
+          )}
           {buyer.trn && <p className="text-xs opacity-60">TRN {buyer.trn}</p>}
           {buyer.address?.emirate && <p className="text-xs opacity-60">{buyer.address.emirate}, UAE</p>}
         </div>

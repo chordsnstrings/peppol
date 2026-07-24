@@ -14,7 +14,7 @@ Status: ✅ done · 🟡 partial/scaffolded · 🔜 planned next · 🔒 needs [
 | 7 | Tax-treatment traps (RCM, export, exempt, DZ) | ✅ | tax advisories in editor + smarter validation warnings; official schematron 🔒 |
 | 8 | Inbound / receiver surface | 🟡 | webhook inbound ingestion + MLS + inbox actions (accept/reject/export/dispute) |
 | 9 | Invoice patterns (proforma, advance, recurring) | ✅ | proforma doc type (convert-to-tax-invoice, never transmitted) + recurring templates (cadence, auto-send, due-run, metered); advance/deposit via a proforma→tax-invoice workflow |
-| 10 | Human/operational (Arabic RTL, offline, accountant) | 🔜 | full AR i18n, accountant consolidated views |
+| 10 | Human/operational (Arabic RTL, offline, accountant) | 🟡 | RTL layout toggle + bilingual (EN/AR) invoice document; PWA offline; full UI-chrome translation + accountant consolidated views still 🔜 |
 | 11 | Billing/metering (free-100, gaming, what's billable) | 🔜 | usage events, correct billable counting, allowance enforcement |
 | 12 | Getting paid / AR (invoice ≠ cash) | ✅ | hosted pay links, `/payments` AR page (aging, DSO), reminders/dunning, mark-paid, part-payments; card rails 🟡 (assumed contracts) |
 | 13 | Payment gateways (card, wallet) | 🟡 | `PaymentProviderPort` + Network International (N-Genius) + noqodi drivers behind mock; live keys 🔒 |
