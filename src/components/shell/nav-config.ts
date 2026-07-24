@@ -9,6 +9,7 @@ import {
   BarChart3,
   Wrench,
   Settings,
+  CreditCard,
   type LucideIcon,
 } from "lucide-react";
 
@@ -25,6 +26,7 @@ export interface NavItem {
 export const MAIN_NAV: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, mobile: true },
   { label: "Invoices", href: "/invoices", icon: FileText, mobile: true },
+  { label: "Get paid", href: "/payments", icon: CreditCard },
   { label: "Inbox", href: "/inbox", icon: Inbox, badge: "inbox" },
   { label: "Uploads", href: "/uploads", icon: Sheet },
   { label: "Customers", href: "/customers", icon: Users },

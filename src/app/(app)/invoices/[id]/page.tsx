@@ -21,7 +21,15 @@ import {
   Landmark,
   Archive,
   RefreshCw,
+  CreditCard,
+  Bell,
+  Link2,
+  MessageCircle,
 } from "lucide-react";
+import { createPaymentLink, markPaid, sendReminder } from "@/lib/payments-client";
+import { sendInvoiceWhatsApp } from "@/lib/whatsapp-client";
+import { outstandingMinor } from "@/lib/domain/ar";
+import { PaymentBadge } from "@/components/invoice/status";
 import { cn, formatDate, timeAgo } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
 import { DOC_TYPE_LABEL } from "@/lib/domain/tax";
@@ -113,6 +121,54 @@ export default function InvoiceDetailPage() {
       else toast("No change yet", { description: "Still awaiting the gateway." });
     } catch {
       toast.error("Couldn't reconcile");
+    }
+    setBusy(false);
+  };
+
+  const getPaidLink = async () => {
+    setBusy(true);
+    try {
+      const { url, driver } = await createPaymentLink(invoice.id);
+      await navigator.clipboard?.writeText(url).catch(() => {});
+      toast.success("Payment link ready", {
+        description: driver === "mock" ? "Copied — opens a sandbox checkout." : "Copied to clipboard.",
+      });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't create link");
+    }
+    setBusy(false);
+  };
+
+  const doMarkPaid = async () => {
+    setBusy(true);
+    try {
+      await markPaid(invoice.id, "Bank transfer");
+      toast.success("Marked as paid");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't mark paid");
+    }
+    setBusy(false);
+  };
+
+  const doRemind = async () => {
+    await sendReminder(invoice.id);
+    toast.success("Reminder sent", { description: `Chased ${invoice.buyer.nameEn || "the customer"}.` });
+  };
+
+  const doWhatsApp = async () => {
+    setBusy(true);
+    try {
+      const { to } = await sendInvoiceWhatsApp(invoice.id);
+      toast.success("Sent on WhatsApp", { description: `Delivered to ${to} with a pay link.` });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Couldn't send";
+      if (msg.includes("not connected")) {
+        toast.error("WhatsApp not connected", { description: "Connect your number in Integrations first." });
+      } else if (msg.includes("No WhatsApp number")) {
+        toast.error("No customer number", { description: "Add a phone number to this customer first." });
+      } else {
+        toast.error(msg);
+      }
     }
     setBusy(false);
   };
@@ -313,6 +369,65 @@ export default function InvoiceDetailPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Get paid */}
+          {invoice.direction === "OUTBOUND" && !isDraft && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <CreditCard className="size-4" /> Get paid
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {invoice.paymentStatus === "PAID" ? (
+                  <div className="flex items-center gap-2.5 rounded-lg bg-success/[0.08] p-3 text-success">
+                    <CheckCircle2 className="size-5" />
+                    <div>
+                      <p className="text-sm font-semibold">Paid</p>
+                      <p className="text-xs opacity-80">
+                        {formatMoney(invoice.amountPaidMinor ?? invoice.totals.taxInclusiveMinor, invoice.currency)}
+                        {invoice.paidAt ? ` · ${timeAgo(invoice.paidAt)}` : ""}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Outstanding</span>
+                      <span className="font-semibold tnum">
+                        {formatMoney(outstandingMinor(invoice), invoice.currency)}
+                      </span>
+                    </div>
+                    <PaymentBadge invoice={invoice} />
+                    <Button size="sm" className="w-full" icon={<Link2 />} loading={busy} onClick={getPaidLink}>
+                      Create &amp; copy pay link
+                    </Button>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button size="sm" variant="outline" icon={<Bell />} onClick={doRemind}>
+                        Remind
+                      </Button>
+                      <Button size="sm" variant="outline" icon={<CheckCircle2 />} loading={busy} onClick={doMarkPaid}>
+                        Mark paid
+                      </Button>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full text-[#128C7E] hover:text-[#128C7E]"
+                      icon={<MessageCircle />}
+                      loading={busy}
+                      onClick={doWhatsApp}
+                    >
+                      Send on WhatsApp
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      Pay by card via Network International / noqodi, or record a bank transfer.
+                    </p>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Artifacts */}
           <Card>

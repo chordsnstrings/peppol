@@ -12,6 +12,7 @@ import type {
   Member,
   Product,
   SyncLink,
+  WhatsAppConfig,
 } from "@/lib/domain/types";
 
 /**
@@ -33,6 +34,7 @@ export type StoreName =
   | "inbound"
   | "notifications"
   | "members"
+  | "whatsapp"
   | "meta";
 
 interface StoreValue {
@@ -47,6 +49,7 @@ interface StoreValue {
   inbound: InboundDoc;
   notifications: AppNotification;
   members: Member;
+  whatsapp: WhatsAppConfig;
   meta: { key: string; [k: string]: unknown };
 }
 
@@ -177,6 +180,7 @@ export async function resetWorkspace(): Promise<void> {
       "inbound",
       "notifications",
       "members",
+      "whatsapp",
       "meta",
     ] as StoreName[]
   ).forEach(emitChange);

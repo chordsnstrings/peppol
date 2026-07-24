@@ -4,12 +4,16 @@ import { zohoDriver } from "./zoho";
 import { qboDriver } from "./qbo";
 import { xeroDriver } from "./xero";
 import { odooDriver } from "./odoo";
+import { shopifyDriver } from "./shopify";
+import { wooDriver } from "./woocommerce";
 
 const LIVE_DRIVERS: Record<ProviderId, AccountingProviderPort> = {
   ZOHO_BOOKS: zohoDriver,
   QBO: qboDriver,
   XERO: xeroDriver,
   ODOO: odooDriver,
+  SHOPIFY: shopifyDriver,
+  WOOCOMMERCE: wooDriver,
 };
 
 /** Whether live credentials are configured for a provider. */
@@ -28,6 +32,10 @@ export function providerHasCredentials(id: ProviderId): boolean {
           process.env.ODOO_USERNAME &&
           process.env.ODOO_API_KEY,
       );
+    case "SHOPIFY":
+      return Boolean(process.env.SHOPIFY_API_KEY && process.env.SHOPIFY_API_SECRET && process.env.SHOPIFY_SHOP);
+    case "WOOCOMMERCE":
+      return Boolean(process.env.WOO_URL && process.env.WOO_KEY && process.env.WOO_SECRET);
     default:
       return false;
   }
@@ -50,6 +58,8 @@ const SLUG_TO_PROVIDER: Record<string, ProviderId> = {
   qbo: "QBO",
   xero: "XERO",
   odoo: "ODOO",
+  shopify: "SHOPIFY",
+  woo: "WOOCOMMERCE",
 };
 
 export function providerFromSlug(slug: string): ProviderId | null {

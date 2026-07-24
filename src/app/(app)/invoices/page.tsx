@@ -31,7 +31,7 @@ import { Checkbox } from "@/components/ui/controls";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Skeleton } from "@/components/ui/feedback";
-import { InvoiceStatus } from "@/components/invoice/status";
+import { InvoiceStatus, PaymentBadge } from "@/components/invoice/status";
 import { Dropdown, DropdownItem, DropdownSeparator, DropdownTrigger } from "@/components/ui/dropdown";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { toast } from "sonner";
@@ -278,7 +278,10 @@ export default function InvoicesPage() {
                       {formatDate(inv.issueDate)}
                     </td>
                     <td className="py-3">
-                      <InvoiceStatus invoice={inv} size="sm" />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <InvoiceStatus invoice={inv} size="sm" />
+                        <PaymentBadge invoice={inv} size="sm" />
+                      </div>
                     </td>
                     <td className="py-3 text-end text-sm font-semibold tnum">
                       {formatMoney(inv.totals.taxInclusiveMinor, inv.currency)}

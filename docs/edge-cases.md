@@ -16,7 +16,13 @@ Status: ✅ done · 🟡 partial/scaffolded · 🔜 planned next · 🔒 needs [
 | 9 | Invoice patterns (proforma, advance, recurring) | 🔜 | proforma doc type, deposit/advance, recurring templates |
 | 10 | Human/operational (Arabic RTL, offline, accountant) | 🔜 | full AR i18n, accountant consolidated views |
 | 11 | Billing/metering (free-100, gaming, what's billable) | 🔜 | usage events, correct billable counting, allowance enforcement |
+| 12 | Getting paid / AR (invoice ≠ cash) | ✅ | hosted pay links, `/payments` AR page (aging, DSO), reminders/dunning, mark-paid, part-payments; card rails 🟡 (assumed contracts) |
+| 13 | Payment gateways (card, wallet) | 🟡 | `PaymentProviderPort` + Network International (N-Genius) + noqodi drivers behind mock; live keys 🔒 |
+| 14 | Storefront sales (e-commerce) | 🟡 | Shopify + WooCommerce order → compliant invoice connectors behind mock; live app creds 🔒 |
+| 15 | Customer delivery channel (WhatsApp) | 🟡 | per-tenant WhatsApp send of invoice + pay link via `WhatsAppPort`; Meta Cloud API driver behind mock, live token 🔒 |
 
 🔒 **Needs the business/infra program (cannot be completed in code):** UAE-region
 data residency, real TRN ownership verification (EmaraTax), ASP accreditation or a
-signed Taxilla contract, official PINT AE schematron/XSD artefacts, insurance/SLA.
+signed Taxilla contract, official PINT AE schematron/XSD artefacts, insurance/SLA,
+live gateway credentials (N-Genius / noqodi), Meta WhatsApp Business system-user
+token, and Shopify/WooCommerce app credentials.

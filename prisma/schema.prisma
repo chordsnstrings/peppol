@@ -96,6 +96,28 @@ model Transmission {
   @@index([invoiceId])
 }
 
+/// A payment attempt/collection against an invoice. `id` doubles as the public
+/// pay-link token. Looked up by providerRef on gateway webhooks (no session).
+model Payment {
+  id          String    @id @default(cuid())
+  orgId       String
+  invoiceId   String
+  provider    String
+  providerRef String?
+  amountMinor Int
+  currency    String
+  status      String    @default("PENDING") // PENDING | PAID | FAILED | REFUNDED | EXPIRED
+  method      String?
+  paymentUrl  String?
+  paidAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([orgId])
+  @@index([invoiceId])
+  @@index([providerRef])
+}
+
 /// Encrypted OAuth tokens for accounting integrations. Server-only, per tenant.
 model IntegrationToken {
   id              String    @id // == Connection id held by the client

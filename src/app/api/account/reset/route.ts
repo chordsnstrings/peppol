@@ -11,6 +11,8 @@ export async function POST() {
     await prisma.$transaction([
       prisma.record.deleteMany({ where: { orgId } }),
       prisma.integrationToken.deleteMany({ where: { orgId } }),
+      prisma.transmission.deleteMany({ where: { orgId } }),
+      prisma.payment.deleteMany({ where: { orgId } }),
       prisma.userMeta.deleteMany({ where: { userId } }),
     ]);
     return json({ ok: true });

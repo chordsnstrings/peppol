@@ -4,7 +4,7 @@
  * driver (./mock.ts) makes the whole OAuth+sync flow runnable without setup.
  */
 
-export type ProviderId = "ZOHO_BOOKS" | "QBO" | "XERO" | "ODOO";
+export type ProviderId = "ZOHO_BOOKS" | "QBO" | "XERO" | "ODOO" | "SHOPIFY" | "WOOCOMMERCE";
 
 export interface TokenSet {
   accessToken: string;

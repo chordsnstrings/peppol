@@ -152,6 +152,12 @@ export interface Invoice {
   sentAt?: string;
   deliveredAt?: string;
   reportedAt?: string;
+  // Payment / AR
+  paymentStatus?: "UNPAID" | "PARTIAL" | "PAID";
+  amountPaidMinor?: number;
+  paidAt?: string;
+  paymentLinkUrl?: string;
+  lastReminderAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -255,7 +261,7 @@ export interface Connection {
   id: string;
   orgId: string;
   entityId: string;
-  provider: "ZOHO_BOOKS" | "QBO" | "XERO" | "ODOO" | "TALLY_FILE";
+  provider: "ZOHO_BOOKS" | "QBO" | "XERO" | "ODOO" | "TALLY_FILE" | "SHOPIFY" | "WOOCOMMERCE";
   status: "CONNECTED" | "EXPIRED" | "REVOKED" | "ERROR" | "PAUSED" | "PENDING";
   mode?: "live" | "mock";
   autoSend: boolean;
@@ -277,6 +283,18 @@ export interface SyncLink {
   internalId: string;
   hash?: string;
   createdAt: string;
+}
+
+export interface WhatsAppConfig {
+  id: string; // `wa:<entityId>` — namespaced so it never collides with the entity row
+  orgId: string;
+  entityId: string;
+  connected: boolean;
+  displayNumber: string;
+  phoneNumberId?: string;
+  provider: "mock" | "meta";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type FixitKind =

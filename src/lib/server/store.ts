@@ -27,6 +27,11 @@ export async function putRecord<T extends { id: string; entityId?: string; invoi
   obj: T,
 ): Promise<T> {
   const data = JSON.stringify({ ...obj, orgId });
+  // Guard against cross-tenant overwrites even on trusted paths.
+  const existing = await prisma.record.findUnique({ where: { id: obj.id } });
+  if (existing && existing.orgId !== orgId) {
+    throw new Error("Forbidden: record belongs to another tenant");
+  }
   await prisma.record.upsert({
     where: { id: obj.id },
     create: { id: obj.id, orgId, store, entityId: obj.entityId ?? null, invoiceId: obj.invoiceId ?? null, data },
