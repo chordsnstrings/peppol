@@ -30,7 +30,10 @@ export default function LoginPage() {
         setLoading(false);
         return;
       }
-      window.location.href = "/dashboard";
+      // Honor a safe same-origin ?next= (e.g. the OAuth consent screen).
+      const next = new URLSearchParams(window.location.search).get("next");
+      const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
+      window.location.href = safeNext;
     } catch {
       setError("Network error. Please try again.");
       setLoading(false);

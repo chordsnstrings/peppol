@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { authenticateApiKey, ApiKeyError } from "@/lib/server/api-key";
+import { authenticateApiKey } from "@/lib/server/api-key";
+import { verifyAccessToken, originOf } from "@/lib/server/oauth";
 import { MCP_TOOLS, MCP_TOOL_BY_NAME } from "@/lib/mcp/tools";
 
 export const runtime = "nodejs";
@@ -85,17 +86,33 @@ async function dispatch(msg: RpcMessage, orgId: string): Promise<object | null> 
   }
 }
 
-export async function POST(req: Request) {
-  // Authenticate every call with the workspace API key (bearer token).
-  let orgId: string;
+/**
+ * Authenticate a request by bearer token — either an OAuth 2.1 access token
+ * (JWT, from the sign-in flow) or a workspace API key. Returns the tenant orgId.
+ */
+async function authenticate(req: Request): Promise<string | null> {
+  const header = req.headers.get("authorization") ?? "";
+  const token = header.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!token) return null;
+  const jwt = await verifyAccessToken(token);
+  if (jwt) return jwt.orgId;
   try {
-    ({ orgId } = await authenticateApiKey(req));
-  } catch (e) {
-    const status = e instanceof ApiKeyError ? e.status : 401;
-    return NextResponse.json(
-      error(null, -32001, e instanceof Error ? e.message : "Unauthorized"),
-      { status, headers: { ...CORS, "WWW-Authenticate": 'Bearer realm="ARKS MCP"' } },
-    );
+    const { orgId } = await authenticateApiKey(req);
+    return orgId;
+  } catch {
+    return null;
+  }
+}
+
+export async function POST(req: Request) {
+  const orgId = await authenticate(req);
+  if (!orgId) {
+    // Advertise the OAuth authorization server per RFC 9728 so sign-in clients discover it.
+    const resourceMeta = `${originOf(req)}/.well-known/oauth-protected-resource`;
+    return NextResponse.json(error(null, -32001, "Unauthorized"), {
+      status: 401,
+      headers: { ...CORS, "WWW-Authenticate": `Bearer resource_metadata="${resourceMeta}"` },
+    });
   }
 
   let body: unknown;

@@ -155,7 +155,8 @@ export default function ApiSettingsPage() {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Add it as a remote MCP server with header{" "}
+            Connect with <span className="font-medium text-foreground">OAuth sign-in</span> (just paste this
+            URL in a Claude/ChatGPT connector) or an API key header{" "}
             <code className="rounded bg-muted px-1 text-xs">Authorization: Bearer &lt;your key&gt;</code>. Tools:
             list/get/create/validate/send invoices, list entities &amp; customers, usage.
           </p>

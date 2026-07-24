@@ -15,6 +15,8 @@ export async function POST() {
       prisma.payment.deleteMany({ where: { orgId } }),
       prisma.usageEvent.deleteMany({ where: { orgId } }),
       prisma.orgBilling.deleteMany({ where: { orgId } }),
+      prisma.oAuthRefreshToken.deleteMany({ where: { orgId } }),
+      prisma.oAuthAuthCode.deleteMany({ where: { orgId } }),
       prisma.userMeta.deleteMany({ where: { userId } }),
     ]);
     return json({ ok: true });

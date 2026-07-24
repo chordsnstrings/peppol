@@ -7,11 +7,33 @@ language.
 
 - **Endpoint:** `https://<your-arks-host>/api/mcp`
 - **Transport:** Streamable HTTP (stateless), JSON-RPC 2.0
-- **Auth:** a workspace **API key** as a bearer token
-  (`Authorization: Bearer arks_live_…`). Create one in **Settings → API**.
+- **Auth (two options):**
+  1. **Sign in with OAuth** — for connector UIs (Claude, ChatGPT) that offer a
+     "Connect / Sign in" button. Just paste the endpoint URL; the client
+     discovers the OAuth server, registers itself, and walks you through a
+     consent screen. Nothing to copy.
+  2. **API key** as a bearer token (`Authorization: Bearer arks_live_…`) — for
+     API/SDK integrations. Create one in **Settings → API**.
 
-The AI acts as your workspace: every tool call is scoped to the org that owns the
-key. Revoke the key to cut access instantly.
+The AI acts as your workspace: every tool call is scoped to your org, and you can
+revoke an API key (or, for OAuth, the refresh token) to cut access instantly.
+
+## OAuth 2.1 (sign-in)
+
+The endpoint is a full OAuth 2.1 authorization server built for MCP:
+
+- **Discovery:** `GET /.well-known/oauth-protected-resource` (RFC 9728) and
+  `GET /.well-known/oauth-authorization-server` (RFC 8414). An unauthenticated
+  call to `/api/mcp` returns `401` with a `WWW-Authenticate: … resource_metadata=…`
+  header so clients find these automatically.
+- **Dynamic Client Registration** (RFC 7591) at `/api/oauth/register` — clients
+  self-register; no manual client_id/secret setup.
+- **Authorization code + PKCE (S256)** at `/oauth/authorize` — you sign in to
+  ARKS and approve the client on a consent screen.
+- **Tokens** at `/api/oauth/token` — short-lived JWT access tokens (1h) and
+  rotating refresh tokens.
+
+Most connector UIs need only the endpoint URL; they handle the rest.
 
 ## Tools exposed
 
@@ -84,11 +106,10 @@ Once connected, ask your assistant things like:
 
 ## Notes
 
-- Auth is **bearer token** (the API key). This works with Claude (API + desktop),
-  Gemini (API), and ChatGPT (Responses API). Clients that require an OAuth 2.1
-  *sign-in* flow instead of a header token aren't covered yet — an OAuth
-  authorization server is a planned addition.
+- Two auth paths are supported: **OAuth 2.1 sign-in** (for connector UIs) and a
+  **bearer API key** (for API/SDK use). Both resolve to the same tenant-scoped
+  tools.
 - The endpoint is stateless and does not open a server→client SSE stream (`GET`
   returns 405); it's a request/response tool server, which is all these tools need.
-- CORS is open so browser-based MCP clients can connect; tools are always
-  key-scoped, so an open origin can't reach data without a valid key.
+- CORS is open so browser-based MCP clients can connect; tools always require a
+  valid OAuth token or API key, so an open origin can't reach data on its own.

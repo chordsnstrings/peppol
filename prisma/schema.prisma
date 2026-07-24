@@ -144,6 +144,48 @@ model UsageEvent {
   @@index([orgId, entityId, year])
 }
 
+/// OAuth 2.1 client, created via Dynamic Client Registration (RFC 7591) so MCP
+/// clients (Claude, ChatGPT, Gemini) can self-register and sign in. Public
+/// (PKCE) clients have no secret.
+model OAuthClient {
+  id              String   @id // client_id
+  secretHash      String? // null for public PKCE clients
+  name            String
+  redirectUris    String // JSON array
+  grantTypes      String   @default("authorization_code,refresh_token")
+  tokenAuthMethod String   @default("none")
+  createdAt       DateTime @default(now())
+}
+
+/// A short-lived authorization code (PKCE). Stored hashed; single-use.
+model OAuthAuthCode {
+  codeHash      String    @id
+  clientId      String
+  orgId         String
+  userId        String
+  redirectUri   String
+  codeChallenge String
+  scope         String    @default("mcp")
+  resource      String?
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+}
+
+/// A refresh token (opaque, stored hashed, revocable, rotated on use).
+model OAuthRefreshToken {
+  tokenHash String    @id
+  clientId  String
+  orgId     String
+  userId    String
+  scope     String    @default("mcp")
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
 /// A programmatic API key for the public /api/v1 REST API. Only the SHA-256
 /// hash is stored; the plaintext is shown once at creation. Scoped to one org.
 model ApiKey {
