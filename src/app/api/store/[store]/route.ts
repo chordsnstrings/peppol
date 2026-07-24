@@ -38,13 +38,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ store: string 
     const data = JSON.stringify({ ...body, orgId });
 
     // Guard against cross-tenant overwrites: a record id may only be written by its owner.
-    const existing = await prisma.record.findUnique({ where: { id } });
+    const existing = await prisma.record.findUnique({ where: { store_id: { store, id } } });
     if (existing && existing.orgId !== orgId) return json({ error: "Forbidden" }, 403);
 
     const saved = await prisma.record.upsert({
-      where: { id },
+      where: { store_id: { store, id } },
       create: { id, orgId, store, entityId, invoiceId, data },
-      update: { data, entityId, invoiceId, store },
+      update: { data, entityId, invoiceId },
     });
     return json({ item: JSON.parse(saved.data) });
   } catch (e) {
