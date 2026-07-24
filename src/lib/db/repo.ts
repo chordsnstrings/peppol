@@ -11,26 +11,12 @@ import type {
   Invoice,
   InvoiceEvent,
   InvoiceLine,
-  Organization,
   Product,
 } from "@/lib/domain/types";
 import { getById, put, remove } from "./database";
 
-/* ---------------- Organization & entity ---------------- */
-
-export async function createOrganization(name: string, locale: "en" | "ar"): Promise<Organization> {
-  const now = new Date().toISOString();
-  const org: Organization = {
-    id: id("org"),
-    name,
-    slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "org",
-    defaultLocale: locale,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await put("organizations", org);
-  return org;
-}
+/* ---------------- Entity ---------------- */
+/* Organizations are created server-side at registration (see /api/auth/register). */
 
 export interface EntityInput {
   legalNameEn: string;

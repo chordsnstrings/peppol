@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/dropdown";
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {
-  const { org, currentEntity, locale, setLocale } = useAppState();
+  const { org, user, currentEntity, locale, setLocale, logout } = useAppState();
   const router = useRouter();
 
   return (
@@ -85,10 +85,10 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         </DropdownTrigger>
         <div className="w-[240px]">
           <div className="flex items-center gap-2.5 px-2.5 py-2">
-            <Avatar name={org?.name ?? "ARKS"} size={36} />
+            <Avatar name={user?.name ?? org?.name ?? "ARKS"} size={36} />
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold">{org?.name ?? "Workspace"}</p>
-              <p className="truncate text-xs text-muted-foreground">Organization</p>
+              <p className="truncate text-sm font-semibold">{user?.name ?? "Account"}</p>
+              <p className="truncate text-xs text-muted-foreground">{user?.email ?? org?.name}</p>
             </div>
           </div>
           <DropdownSeparator />
@@ -106,8 +106,8 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
             Settings
           </DropdownItem>
           <DropdownSeparator />
-          <DropdownItem icon={<LogOut />} tone="destructive" onSelect={() => router.push("/settings/billing")}>
-            Manage workspace
+          <DropdownItem icon={<LogOut />} tone="destructive" onSelect={() => logout()}>
+            Sign out
           </DropdownItem>
         </div>
       </Dropdown>

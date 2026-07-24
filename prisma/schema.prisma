@@ -1,0 +1,89 @@
+// ARKS e-Invoicing — multi-tenant server schema.
+// Domain data (invoices, customers, entities…) is stored as tenant-scoped JSON
+// documents in `Record`, so the existing client keeps its object-store shape while
+// gaining server-side persistence + org isolation. Auth and secrets are typed tables.
+//
+// Dev uses SQLite (runs in-container). Production swaps `provider` to "postgresql"
+// and points DATABASE_URL at managed Postgres — the app code is unchanged.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime     @default(now())
+  memberships  Membership[]
+  meta         UserMeta[]
+}
+
+model Organization {
+  id            String       @id @default(cuid())
+  name          String
+  slug          String
+  defaultLocale String       @default("en")
+  createdAt     DateTime     @default(now())
+  memberships   Membership[]
+}
+
+model Membership {
+  id        String       @id @default(cuid())
+  userId    String
+  orgId     String
+  role      String       @default("OWNER")
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+/// Generic tenant-scoped document store. One row per domain object.
+model Record {
+  id        String   @id
+  orgId     String
+  store     String
+  entityId  String?
+  invoiceId String?
+  data      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId, store])
+  @@index([orgId, store, entityId])
+  @@index([orgId, invoiceId])
+}
+
+/// Per-user preferences (current entity, locale, notification prefs, API keys…).
+model UserMeta {
+  userId String
+  key    String
+  data   String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, key])
+}
+
+/// Encrypted OAuth tokens for accounting integrations. Server-only, per tenant.
+model IntegrationToken {
+  id              String    @id // == Connection id held by the client
+  orgId           String
+  provider        String
+  accessTokenEnc  String
+  refreshTokenEnc String?
+  expiresAt       DateTime?
+  meta            String? // JSON: providerAccountId, apiDomain, etc.
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([orgId])
+}

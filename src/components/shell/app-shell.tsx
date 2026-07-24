@@ -32,14 +32,16 @@ function Splash() {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { ready, onboarded } = useAppState();
+  const { ready, authenticated, onboarded, entities } = useAppState();
   const router = useRouter();
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = React.useState(false);
 
   React.useEffect(() => {
-    if (ready && !onboarded) router.replace("/onboarding");
-  }, [ready, onboarded, router]);
+    if (!ready) return;
+    if (!authenticated) router.replace("/login");
+    else if (entities.length === 0) router.replace("/onboarding");
+  }, [ready, authenticated, entities.length, router]);
 
   // close drawer on route change
   React.useEffect(() => setDrawerOpen(false), [pathname]);

@@ -1,4 +1,5 @@
-import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+"use client";
+
 import type {
   AppNotification,
   Connection,
@@ -9,12 +10,17 @@ import type {
   Invoice,
   InvoiceEvent,
   Member,
-  Organization,
   Product,
 } from "@/lib/domain/types";
 
+/**
+ * Client data layer. Talks to the tenant-scoped server API (`/api/store/*`,
+ * `/api/meta`) — the browser no longer owns the data. The exported surface is
+ * kept identical to the previous IndexedDB layer so repositories, hooks and
+ * pages are unchanged.
+ */
+
 export type StoreName =
-  | "organizations"
   | "entities"
   | "customers"
   | "products"
@@ -27,77 +33,42 @@ export type StoreName =
   | "members"
   | "meta";
 
-interface ArksDB extends DBSchema {
-  organizations: { key: string; value: Organization };
-  entities: { key: string; value: Entity; indexes: { orgId: string } };
-  customers: { key: string; value: Customer; indexes: { entityId: string } };
-  products: { key: string; value: Product; indexes: { entityId: string } };
-  invoices: {
-    key: string;
-    value: Invoice;
-    indexes: { entityId: string; direction: string; status: string };
-  };
-  invoiceEvents: { key: string; value: InvoiceEvent; indexes: { invoiceId: string } };
-  connections: { key: string; value: Connection; indexes: { entityId: string } };
-  fixits: { key: string; value: FixitItem; indexes: { entityId: string; status: string } };
-  inbound: { key: string; value: InboundDoc; indexes: { entityId: string } };
-  notifications: { key: string; value: AppNotification; indexes: { orgId: string } };
-  members: { key: string; value: Member; indexes: { orgId: string } };
-  meta: { key: string; value: { key: string; [k: string]: unknown } };
+interface StoreValue {
+  entities: Entity;
+  customers: Customer;
+  products: Product;
+  invoices: Invoice;
+  invoiceEvents: InvoiceEvent;
+  connections: Connection;
+  fixits: FixitItem;
+  inbound: InboundDoc;
+  notifications: AppNotification;
+  members: Member;
+  meta: { key: string; [k: string]: unknown };
 }
 
-const DB_NAME = "arks-einvoicing";
-const DB_VERSION = 1;
+/* ------------------------------------------------------------------ */
+/* Fetch helper                                                        */
+/* ------------------------------------------------------------------ */
 
-let dbPromise: Promise<IDBPDatabase<ArksDB>> | null = null;
-
-export function getDB(): Promise<IDBPDatabase<ArksDB>> {
-  if (typeof window === "undefined") {
-    return Promise.reject(new Error("IndexedDB is only available in the browser"));
+async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    credentials: "same-origin",
+  });
+  if (res.status === 401) {
+    // Session expired — send them to sign in.
+    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
+    throw new Error("Unauthorized");
   }
-  if (!dbPromise) {
-    dbPromise = openDB<ArksDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore("organizations", { keyPath: "id" });
-
-        const entities = db.createObjectStore("entities", { keyPath: "id" });
-        entities.createIndex("orgId", "orgId");
-
-        const customers = db.createObjectStore("customers", { keyPath: "id" });
-        customers.createIndex("entityId", "entityId");
-
-        const products = db.createObjectStore("products", { keyPath: "id" });
-        products.createIndex("entityId", "entityId");
-
-        const invoices = db.createObjectStore("invoices", { keyPath: "id" });
-        invoices.createIndex("entityId", "entityId");
-        invoices.createIndex("direction", "direction");
-        invoices.createIndex("status", "lifecycleStatus");
-
-        const events = db.createObjectStore("invoiceEvents", { keyPath: "id" });
-        events.createIndex("invoiceId", "invoiceId");
-
-        const connections = db.createObjectStore("connections", { keyPath: "id" });
-        connections.createIndex("entityId", "entityId");
-
-        const fixits = db.createObjectStore("fixits", { keyPath: "id" });
-        fixits.createIndex("entityId", "entityId");
-        fixits.createIndex("status", "status");
-
-        const inbound = db.createObjectStore("inbound", { keyPath: "id" });
-        inbound.createIndex("entityId", "entityId");
-
-        const notifications = db.createObjectStore("notifications", { keyPath: "id" });
-        notifications.createIndex("orgId", "orgId");
-
-        const members = db.createObjectStore("members", { keyPath: "id" });
-        members.createIndex("orgId", "orgId");
-
-        db.createObjectStore("meta", { keyPath: "key" });
-      },
-    });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
   }
-  return dbPromise;
+  return res.json() as Promise<T>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,41 +89,41 @@ function emitChange(store: StoreName) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Generic CRUD                                                        */
+/* CRUD (same signatures as the old IndexedDB layer)                   */
 /* ------------------------------------------------------------------ */
 
-type ValueOf<S extends StoreName> = ArksDB[S]["value"];
-
-export async function all<S extends StoreName>(store: S): Promise<ValueOf<S>[]> {
-  const db = await getDB();
-  return db.getAll(store) as Promise<ValueOf<S>[]>;
+export async function all<S extends StoreName>(store: S): Promise<StoreValue[S][]> {
+  const { items } = await api<{ items: StoreValue[S][] }>(`/api/store/${store}`);
+  return items;
 }
 
 export async function getById<S extends StoreName>(
   store: S,
   key: string,
-): Promise<ValueOf<S> | undefined> {
-  const db = await getDB();
-  return db.get(store, key) as Promise<ValueOf<S> | undefined>;
+): Promise<StoreValue[S] | undefined> {
+  try {
+    const { item } = await api<{ item: StoreValue[S] }>(`/api/store/${store}/${encodeURIComponent(key)}`);
+    return item;
+  } catch {
+    return undefined;
+  }
 }
 
-export async function put<S extends StoreName>(store: S, value: ValueOf<S>): Promise<ValueOf<S>> {
-  const db = await getDB();
-  await db.put(store, value as never);
+export async function put<S extends StoreName>(store: S, value: StoreValue[S]): Promise<StoreValue[S]> {
+  await api(`/api/store/${store}`, { method: "POST", body: JSON.stringify(value) });
   emitChange(store);
   return value;
 }
 
-export async function bulkPut<S extends StoreName>(store: S, values: ValueOf<S>[]): Promise<void> {
-  const db = await getDB();
-  const tx = db.transaction(store, "readwrite");
-  await Promise.all([...values.map((v) => tx.store.put(v as never)), tx.done]);
+export async function bulkPut<S extends StoreName>(store: S, values: StoreValue[S][]): Promise<void> {
+  for (const value of values) {
+    await api(`/api/store/${store}`, { method: "POST", body: JSON.stringify(value) });
+  }
   emitChange(store);
 }
 
 export async function remove(store: StoreName, key: string): Promise<void> {
-  const db = await getDB();
-  await db.delete(store, key);
+  await api(`/api/store/${store}/${encodeURIComponent(key)}`, { method: "DELETE" });
   emitChange(store);
 }
 
@@ -160,41 +131,45 @@ export async function byIndex<S extends StoreName>(
   store: S,
   index: string,
   value: string,
-): Promise<ValueOf<S>[]> {
-  const db = await getDB();
-  return db.getAllFromIndex(store, index as never, value as never) as Promise<ValueOf<S>[]>;
+): Promise<StoreValue[S][]> {
+  // orgId is implicit (tenant scope); only entityId / invoiceId narrow further.
+  const qs =
+    index === "entityId" || index === "invoiceId"
+      ? `?${index}=${encodeURIComponent(value)}`
+      : "";
+  const { items } = await api<{ items: StoreValue[S][] }>(`/api/store/${store}${qs}`);
+  return items;
 }
 
+/* ------------------------------------------------------------------ */
+/* Per-user meta                                                       */
+/* ------------------------------------------------------------------ */
+
 export async function metaGet<T = unknown>(key: string): Promise<T | undefined> {
-  const db = await getDB();
-  const row = await db.get("meta", key);
-  return row?.value as T | undefined;
+  const { value } = await api<{ value: T | undefined }>(`/api/meta?key=${encodeURIComponent(key)}`);
+  return value;
 }
 
 export async function metaSet(key: string, value: unknown): Promise<void> {
-  const db = await getDB();
-  await db.put("meta", { key, value } as never);
+  await api(`/api/meta`, { method: "PUT", body: JSON.stringify({ key, value }) });
   emitChange("meta");
 }
 
-/** Wipe everything (used by "reset workspace" in settings). */
 export async function resetWorkspace(): Promise<void> {
-  const db = await getDB();
-  const stores: StoreName[] = [
-    "organizations",
-    "entities",
-    "customers",
-    "products",
-    "invoices",
-    "invoiceEvents",
-    "connections",
-    "fixits",
-    "inbound",
-    "notifications",
-    "members",
-    "meta",
-  ];
-  const tx = db.transaction(stores, "readwrite");
-  await Promise.all([...stores.map((s) => tx.objectStore(s).clear()), tx.done]);
-  stores.forEach(emitChange);
+  await api(`/api/account/reset`, { method: "POST" });
+  (
+    [
+      "entities",
+      "customers",
+      "products",
+      "invoices",
+      "invoiceEvents",
+      "connections",
+      "fixits",
+      "inbound",
+      "notifications",
+      "members",
+      "meta",
+    ] as StoreName[]
+  ).forEach(emitChange);
 }

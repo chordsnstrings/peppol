@@ -15,10 +15,13 @@ import {
   Plug,
   Sparkles,
   Loader2,
+  Mail,
+  Lock,
 } from "lucide-react";
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useAppState } from "@/lib/app-state";
-import { createEntity, createOrganization } from "@/lib/db/repo";
+import { createEntity } from "@/lib/db/repo";
 import { metaSet } from "@/lib/db/database";
 import { derivePeppolId, EMIRATES, validateTIN, validateTRN } from "@/lib/domain/peppol";
 import { Logo } from "@/components/shell/logo";
@@ -32,6 +35,8 @@ type Locale = "en" | "ar";
 
 interface Draft {
   yourName: string;
+  email: string;
+  password: string;
   orgName: string;
   locale: Locale;
   legalNameEn: string;
@@ -55,12 +60,15 @@ const STEPS = [
 
 export default function OnboardingPage() {
   const router = useRouter();
-  const { ready, onboarded } = useAppState();
+  const { ready, onboarded, authenticated, org, refresh } = useAppState();
   const [step, setStep] = React.useState(0);
   const [dir, setDir] = React.useState(1);
   const [submitting, setSubmitting] = React.useState(false);
+  const [regError, setRegError] = React.useState<string | null>(null);
   const [d, setD] = React.useState<Draft>({
     yourName: "",
+    email: "",
+    password: "",
     orgName: "",
     locale: "en",
     legalNameEn: "",
@@ -76,8 +84,11 @@ export default function OnboardingPage() {
   });
 
   React.useEffect(() => {
-    if (ready && onboarded) router.replace("/dashboard");
-  }, [ready, onboarded, router]);
+    if (!ready) return;
+    if (onboarded) router.replace("/dashboard");
+    // Already signed in but no entity yet → skip the account step.
+    else if (authenticated && step === 0) setStep(1);
+  }, [ready, onboarded, authenticated, step, router]);
 
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((p) => ({ ...p, [k]: v }));
 
@@ -85,9 +96,17 @@ export default function OnboardingPage() {
   const tinCheck = validateTIN(d.tin);
   const taxId = d.vatRegistered ? d.trn : d.tin;
   const peppolId = derivePeppolId(taxId);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email);
+  const minStep = authenticated ? 1 : 0;
 
   const canNext = (): boolean => {
-    if (step === 0) return d.orgName.trim().length > 1 && d.yourName.trim().length > 0;
+    if (step === 0)
+      return (
+        d.orgName.trim().length > 1 &&
+        d.yourName.trim().length > 0 &&
+        emailValid &&
+        d.password.length >= 8
+      );
     if (step === 1) return d.legalNameEn.trim().length > 1;
     if (step === 2) return d.vatRegistered ? trnCheck.ok : tinCheck.ok;
     return true;
@@ -103,14 +122,39 @@ export default function OnboardingPage() {
   };
   const back = () => {
     setDir(-1);
-    setStep((s) => Math.max(0, s - 1));
+    setStep((s) => Math.max(minStep, s - 1));
   };
 
   const finish = async () => {
     setSubmitting(true);
+    setRegError(null);
     try {
-      const org = await createOrganization(d.orgName, d.locale);
-      const entity = await createEntity(org.id, {
+      // 1) Create the account + organization (tenant) unless already signed in.
+      let orgId = org?.id;
+      if (!authenticated) {
+        const res = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: d.yourName,
+            email: d.email,
+            password: d.password,
+            orgName: d.orgName,
+            locale: d.locale,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setRegError(body.error ?? "Couldn't create your account.");
+          setSubmitting(false);
+          setStep(0);
+          return;
+        }
+        orgId = ((await res.json()) as { org: { id: string } }).org.id;
+      }
+
+      // 2) Create the first entity (server forces the tenant from the session).
+      const entity = await createEntity(orgId ?? "self", {
         legalNameEn: d.legalNameEn,
         legalNameAr: d.legalNameAr || undefined,
         tradeLicenseNo: d.tradeLicenseNo || undefined,
@@ -125,11 +169,14 @@ export default function OnboardingPage() {
       await metaSet("currentEntityId", entity.id);
       await metaSet("locale", d.locale);
       await metaSet("invoiceStyle", d.invoiceStyle);
-      await metaSet("onboardedAt", new Date().toISOString());
+      await refresh();
       // brief celebratory beat before entering the app
       setStep(STEPS.length);
-      setTimeout(() => router.replace("/dashboard"), 1400);
+      setTimeout(() => {
+        window.location.href = "/dashboard";
+      }, 1400);
     } catch {
+      setRegError("Something went wrong. Please try again.");
       setSubmitting(false);
     }
   };
@@ -256,6 +303,28 @@ export default function OnboardingPage() {
                           autoFocus
                         />
                       </Field>
+                      <Field label="Work email" required>
+                        <Input
+                          type="email"
+                          leading={<Mail />}
+                          value={d.email}
+                          onChange={(e) => set("email", e.target.value)}
+                          placeholder="you@company.ae"
+                        />
+                      </Field>
+                      <Field
+                        label="Password"
+                        required
+                        help={d.password && d.password.length < 8 ? "At least 8 characters." : undefined}
+                      >
+                        <Input
+                          type="password"
+                          leading={<Lock />}
+                          value={d.password}
+                          onChange={(e) => set("password", e.target.value)}
+                          placeholder="At least 8 characters"
+                        />
+                      </Field>
                       <Field label="Organization name" required help="Your company or practice name.">
                         <Input
                           value={d.orgName}
@@ -273,6 +342,12 @@ export default function OnboardingPage() {
                           ]}
                         />
                       </Field>
+                      <p className="text-center text-sm text-muted-foreground">
+                        Already have an account?{" "}
+                        <Link href="/login" className="font-medium text-foreground link-underline">
+                          Sign in
+                        </Link>
+                      </p>
                     </StepShell>
                   )}
 
@@ -482,27 +557,34 @@ export default function OnboardingPage() {
 
             {/* Controls */}
             {step < STEPS.length && (
-              <div className="mt-8 flex items-center justify-between">
-                <Button
-                  variant="ghost"
-                  onClick={back}
-                  disabled={step === 0}
-                  icon={<ArrowLeft className="rtl:rotate-180" />}
-                  className={cn(step === 0 && "invisible")}
-                >
-                  Back
-                </Button>
-                <Button
-                  onClick={next}
-                  disabled={!canNext() || submitting}
-                  loading={submitting}
-                  size="lg"
-                  className="min-w-[140px]"
-                >
-                  {step === STEPS.length - 1 ? "Create workspace" : "Continue"}
-                  {!submitting && <ArrowRight className="rtl:rotate-180" />}
-                </Button>
-              </div>
+              <>
+                {regError && (
+                  <p className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {regError}
+                  </p>
+                )}
+                <div className="mt-8 flex items-center justify-between">
+                  <Button
+                    variant="ghost"
+                    onClick={back}
+                    disabled={step === minStep}
+                    icon={<ArrowLeft className="rtl:rotate-180" />}
+                    className={cn(step === minStep && "invisible")}
+                  >
+                    Back
+                  </Button>
+                  <Button
+                    onClick={next}
+                    disabled={!canNext() || submitting}
+                    loading={submitting}
+                    size="lg"
+                    className="min-w-[140px]"
+                  >
+                    {step === STEPS.length - 1 ? "Create workspace" : "Continue"}
+                    {!submitting && <ArrowRight className="rtl:rotate-180" />}
+                  </Button>
+                </div>
+              </>
             )}
           </div>
         </div>

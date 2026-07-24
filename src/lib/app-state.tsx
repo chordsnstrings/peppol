@@ -12,22 +12,38 @@ import {
 import { all, metaGet, metaSet, onChange } from "@/lib/db/database";
 import type { Entity, Locale, Organization } from "@/lib/domain/types";
 
+export interface SessionUser {
+  id: string;
+  email: string;
+  name: string;
+}
+
 interface AppStateValue {
   ready: boolean;
+  authenticated: boolean;
   onboarded: boolean;
+  user?: SessionUser;
   org?: Organization;
   entities: Entity[];
   currentEntity?: Entity;
   locale: Locale;
-  setCurrentEntityId: (idv: string) => Promise<void>;
+  setCurrentEntityId: (id: string) => Promise<void>;
   setLocale: (l: Locale) => Promise<void>;
   refresh: () => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
 
+interface MeResponse {
+  user: SessionUser;
+  org: Organization;
+}
+
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [user, setUser] = useState<SessionUser | undefined>();
   const [org, setOrg] = useState<Organization | undefined>();
   const [entities, setEntities] = useState<Entity[]>([]);
   const [currentEntityId, setCurrentEntityIdState] = useState<string | undefined>();
@@ -35,19 +51,29 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const load = useCallback(async () => {
     try {
-      const [orgs, ents, curId, loc] = await Promise.all([
-        all("organizations"),
+      const res = await fetch("/api/auth/me", { credentials: "same-origin" });
+      if (!res.ok) {
+        setAuthenticated(false);
+        setUser(undefined);
+        setOrg(undefined);
+        setEntities([]);
+        return;
+      }
+      const me = (await res.json()) as MeResponse;
+      setAuthenticated(true);
+      setUser(me.user);
+      setOrg(me.org);
+
+      const [ents, curId, loc] = await Promise.all([
         all("entities"),
         metaGet<string>("currentEntityId"),
         metaGet<Locale>("locale"),
       ]);
-      setOrg(orgs[0]);
       setEntities(ents);
-      const validId = ents.find((e) => e.id === curId)?.id ?? ents[0]?.id;
-      setCurrentEntityIdState(validId);
-      if (loc) setLocaleState(loc);
+      setCurrentEntityIdState(ents.find((e) => e.id === curId)?.id ?? ents[0]?.id);
+      setLocaleState(loc ?? (me.org.defaultLocale as Locale) ?? "en");
     } catch {
-      /* fresh workspace */
+      setAuthenticated(false);
     } finally {
       setReady(true);
     }
@@ -55,29 +81,29 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     load();
-    const offEnt = onChange("entities", load);
-    const offOrg = onChange("organizations", load);
-    return () => {
-      offEnt();
-      offOrg();
-    };
+    const off = onChange("entities", load);
+    return off;
   }, [load]);
 
-  // keep dir + lang on <html>
   useEffect(() => {
     if (typeof document === "undefined") return;
     document.documentElement.lang = locale;
     document.documentElement.dir = locale === "ar" ? "rtl" : "ltr";
   }, [locale]);
 
-  const setCurrentEntityId = useCallback(async (idv: string) => {
-    setCurrentEntityIdState(idv);
-    await metaSet("currentEntityId", idv);
+  const setCurrentEntityId = useCallback(async (id: string) => {
+    setCurrentEntityIdState(id);
+    await metaSet("currentEntityId", id);
   }, []);
 
   const setLocale = useCallback(async (l: Locale) => {
     setLocaleState(l);
     await metaSet("locale", l);
+  }, []);
+
+  const logout = useCallback(async () => {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    window.location.href = "/login";
   }, []);
 
   const currentEntity = useMemo(
@@ -87,7 +113,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const value: AppStateValue = {
     ready,
-    onboarded: entities.length > 0 && Boolean(org),
+    authenticated,
+    onboarded: authenticated && entities.length > 0,
+    user,
     org,
     entities,
     currentEntity,
@@ -95,6 +123,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setCurrentEntityId,
     setLocale,
     refresh: load,
+    logout,
   };
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
