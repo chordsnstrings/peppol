@@ -81,6 +81,7 @@ export default function InvoiceDetailPage() {
 
   const isDraft = invoice.lifecycleStatus === "DRAFT" || invoice.lifecycleStatus === "READY";
   const isCompleted = invoice.lifecycleStatus === "COMPLETED";
+  const isProforma = invoice.docType === "PROFORMA";
 
   const doSend = async () => {
     if (!currentEntity) return;
@@ -191,9 +192,15 @@ export default function InvoiceDetailPage() {
                 <Button variant="outline" onClick={() => router.push(`/invoices/new?from=${invoice.id}`)}>
                   Edit
                 </Button>
-                <Button icon={<Send />} onClick={() => setConfirmSend(true)}>
-                  Send
-                </Button>
+                {isProforma ? (
+                  <Button icon={<FileText />} onClick={() => router.push(`/invoices/new?convertFrom=${invoice.id}`)}>
+                    Convert to tax invoice
+                  </Button>
+                ) : (
+                  <Button icon={<Send />} onClick={() => setConfirmSend(true)}>
+                    Send
+                  </Button>
+                )}
               </>
             )}
             {!isDraft && (

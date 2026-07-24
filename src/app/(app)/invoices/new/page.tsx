@@ -29,6 +29,8 @@ import {
 } from "@/lib/db/database";
 import {
   makeCreditNote,
+  makeProformaDraft,
+  convertProformaToInvoice,
   makeDraft,
   nextInvoiceNumber,
   persistInvoice,
@@ -70,6 +72,8 @@ export default function InvoiceEditorPage() {
     const from = params.get("from");
     const dup = params.get("duplicate");
     const creditFor = params.get("creditFor");
+    const proforma = params.get("proforma");
+    const convertFrom = params.get("convertFrom");
     (async () => {
       if (from) {
         const existing = await getById("invoices", from);
@@ -88,6 +92,21 @@ export default function InvoiceEditorPage() {
           setIsNew(true);
           return;
         }
+      }
+
+      if (convertFrom) {
+        const source = (await getById("invoices", convertFrom)) as Invoice | undefined;
+        if (source) {
+          setInv({ ...convertProformaToInvoice(currentEntity, source), number });
+          setIsNew(true);
+          return;
+        }
+      }
+
+      if (proforma) {
+        setInv({ ...makeProformaDraft(currentEntity), number });
+        setIsNew(true);
+        return;
       }
 
       const draft = makeDraft(currentEntity, { number });

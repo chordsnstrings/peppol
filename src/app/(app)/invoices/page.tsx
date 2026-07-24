@@ -9,6 +9,7 @@ import {
   Upload,
   Search,
   FileText,
+  FileClock,
   Send,
   Download,
   MoreHorizontal,
@@ -140,9 +141,19 @@ export default function InvoicesPage() {
             <Button variant="outline" icon={<Upload />} onClick={() => router.push("/uploads")}>
               <span className="hidden sm:inline">Import</span>
             </Button>
-            <Button icon={<Plus />} onClick={() => router.push("/invoices/new")}>
-              New invoice
-            </Button>
+            <Dropdown align="end">
+              <DropdownTrigger>
+                <Button icon={<Plus />}>New invoice</Button>
+              </DropdownTrigger>
+              <div className="w-52">
+                <DropdownItem icon={<FileText />} onSelect={() => router.push("/invoices/new")}>
+                  Tax invoice
+                </DropdownItem>
+                <DropdownItem icon={<FileClock />} onSelect={() => router.push("/invoices/new?proforma=1")}>
+                  Proforma invoice
+                </DropdownItem>
+              </div>
+            </Dropdown>
           </>
         }
       />

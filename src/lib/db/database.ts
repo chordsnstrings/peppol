@@ -11,6 +11,7 @@ import type {
   InvoiceEvent,
   Member,
   Product,
+  RecurringTemplate,
   SyncLink,
   WhatsAppConfig,
 } from "@/lib/domain/types";
@@ -35,6 +36,7 @@ export type StoreName =
   | "notifications"
   | "members"
   | "whatsapp"
+  | "recurring"
   | "meta";
 
 interface StoreValue {
@@ -50,6 +52,7 @@ interface StoreValue {
   notifications: AppNotification;
   members: Member;
   whatsapp: WhatsAppConfig;
+  recurring: RecurringTemplate;
   meta: { key: string; [k: string]: unknown };
 }
 
@@ -181,6 +184,7 @@ export async function resetWorkspace(): Promise<void> {
       "notifications",
       "members",
       "whatsapp",
+      "recurring",
       "meta",
     ] as StoreName[]
   ).forEach(emitChange);

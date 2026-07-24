@@ -189,6 +189,7 @@ export const DOC_TYPE_LABEL: Record<DocType, string> = {
   TAX_INVOICE: "Tax invoice",
   TAX_CREDIT_NOTE: "Credit note",
   COMMERCIAL_INVOICE: "Commercial invoice",
+  PROFORMA: "Proforma invoice",
 };
 
 /** Common UN/ECE Rec 20 unit codes surfaced in the editor. */

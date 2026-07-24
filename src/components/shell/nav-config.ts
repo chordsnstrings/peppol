@@ -10,6 +10,7 @@ import {
   Wrench,
   Settings,
   CreditCard,
+  Repeat,
   type LucideIcon,
 } from "lucide-react";
 
@@ -26,6 +27,7 @@ export interface NavItem {
 export const MAIN_NAV: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, mobile: true },
   { label: "Invoices", href: "/invoices", icon: FileText, mobile: true },
+  { label: "Recurring", href: "/recurring", icon: Repeat },
   { label: "Get paid", href: "/payments", icon: CreditCard },
   { label: "Inbox", href: "/inbox", icon: Inbox, badge: "inbox" },
   { label: "Uploads", href: "/uploads", icon: Sheet },

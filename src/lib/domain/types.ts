@@ -5,7 +5,7 @@
 
 export type Locale = "en" | "ar";
 
-export type DocType = "TAX_INVOICE" | "TAX_CREDIT_NOTE" | "COMMERCIAL_INVOICE";
+export type DocType = "TAX_INVOICE" | "TAX_CREDIT_NOTE" | "COMMERCIAL_INVOICE" | "PROFORMA";
 
 export type Direction = "OUTBOUND" | "INBOUND";
 
@@ -283,6 +283,29 @@ export interface SyncLink {
   internalId: string;
   hash?: string;
   createdAt: string;
+}
+
+export type RecurringCadence = "WEEKLY" | "MONTHLY" | "QUARTERLY" | "YEARLY";
+
+/** A template that generates invoices on a schedule. */
+export interface RecurringTemplate {
+  id: string;
+  orgId: string;
+  entityId: string;
+  name: string;
+  customerId?: string;
+  buyer: Party;
+  currency: string;
+  lines: InvoiceLine[];
+  notes?: string;
+  cadence: RecurringCadence;
+  nextRunDate: string; // ISO date (YYYY-MM-DD)
+  autoSend: boolean;
+  active: boolean;
+  lastRunAt?: string;
+  generatedCount?: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface WhatsAppConfig {

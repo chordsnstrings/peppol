@@ -12,6 +12,8 @@ import type {
   InvoiceEvent,
   InvoiceLine,
   Product,
+  RecurringCadence,
+  RecurringTemplate,
 } from "@/lib/domain/types";
 import { getById, put, remove, touch } from "./database";
 
@@ -154,8 +156,9 @@ export function makeDraft(entity: Entity, opts: { direction?: "OUTBOUND"; number
 export function recalc(inv: Invoice): Invoice {
   const lines: InvoiceLine[] = recomputeLines(inv.lines);
   const totals = computeTotals(lines);
-  const isCredit = inv.docType === "TAX_CREDIT_NOTE";
-  const docType = isCredit ? "TAX_CREDIT_NOTE" : deriveDocType(lines);
+  // Credit notes and proformas are explicit user choices — never re-derived.
+  const pinned = inv.docType === "TAX_CREDIT_NOTE" || inv.docType === "PROFORMA";
+  const docType = pinned ? inv.docType : deriveDocType(lines);
   return {
     ...inv,
     lines,
@@ -183,6 +186,27 @@ export function makeCreditNote(entity: Entity, source: Invoice): Invoice {
   return recalc(draft);
 }
 
+/** Build a proforma draft — a quote/pre-invoice that is never transmitted to the FTA. */
+export function makeProformaDraft(entity: Entity): Invoice {
+  const draft = makeDraft(entity);
+  draft.docType = "PROFORMA";
+  draft.notes = "Proforma — not a tax invoice. Convert once the customer commits.";
+  return recalc(draft);
+}
+
+/** Convert a proforma into a fresh tax-invoice draft (buyer + lines carried over). */
+export function convertProformaToInvoice(entity: Entity, source: Invoice): Invoice {
+  const draft = makeDraft(entity);
+  draft.docType = "TAX_INVOICE";
+  draft.buyer = source.buyer;
+  draft.customerId = source.customerId;
+  draft.currency = source.currency;
+  draft.fx = source.fx;
+  draft.lines = source.lines.map((l) => ({ ...l, id: id("ln") }));
+  draft.notes = source.notes?.startsWith("Proforma") ? undefined : source.notes;
+  return recalc(draft);
+}
+
 /** Clone a failed/rejected invoice into a fresh corrected draft. */
 export function makeCorrectedCopy(entity: Entity, source: Invoice): Invoice {
   const draft = makeDraft(entity);
@@ -207,6 +231,62 @@ export async function persistInvoice(inv: Invoice): Promise<Invoice> {
 
 export async function deleteInvoice(invId: string): Promise<void> {
   await remove("invoices", invId);
+}
+
+/* ---------------- Recurring templates ---------------- */
+
+export async function saveTemplate(t: RecurringTemplate): Promise<RecurringTemplate> {
+  const next = { ...t, updatedAt: new Date().toISOString() };
+  await put("recurring", next);
+  return next;
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  await remove("recurring", id);
+}
+
+/** Seed a recurring template from an existing invoice's buyer + lines. */
+export function makeTemplateFromInvoice(
+  entity: Entity,
+  inv: Invoice,
+  opts: { name: string; cadence: RecurringCadence; nextRunDate: string; autoSend?: boolean },
+): RecurringTemplate {
+  const now = new Date().toISOString();
+  return {
+    id: id("rec"),
+    orgId: entity.orgId,
+    entityId: entity.id,
+    name: opts.name,
+    customerId: inv.customerId,
+    buyer: inv.buyer,
+    currency: inv.currency,
+    lines: inv.lines.map((l) => ({ ...l })),
+    notes: inv.notes,
+    cadence: opts.cadence,
+    nextRunDate: opts.nextRunDate,
+    autoSend: opts.autoSend ?? false,
+    active: true,
+    generatedCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/** Generate a fresh draft invoice from a template, consuming an invoice number. */
+export async function makeInvoiceFromTemplate(entity: Entity, t: RecurringTemplate): Promise<Invoice> {
+  const { number, seq } = await nextInvoiceNumber(entity);
+  await saveEntity({ ...entity, numberingSeq: seq });
+  const draft = makeDraft(entity, { number });
+  const inv: Invoice = {
+    ...draft,
+    currency: t.currency,
+    customerId: t.customerId,
+    buyer: t.buyer,
+    lines: t.lines.map((l) => ({ ...l, id: id("line") })),
+    notes: t.notes,
+    source: "API",
+  };
+  return persistInvoice(inv);
 }
 
 export async function addEvent(

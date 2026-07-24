@@ -31,6 +31,9 @@ export interface SendOutcome {
 export async function runSendPipeline(orgId: string, invoiceId: string): Promise<SendOutcome> {
   const invoice = await getRecord<Invoice>(orgId, "invoices", invoiceId);
   if (!invoice) return { ok: false, status: 404, error: "Invoice not found" };
+  if (invoice.docType === "PROFORMA") {
+    return { ok: false, status: 422, error: "Proforma invoices aren't transmitted. Convert it to a tax invoice first." };
+  }
   const entity = await getRecord<Entity>(orgId, "entities", invoice.entityId);
   if (!entity) return { ok: false, status: 400, error: "Entity not found" };
 

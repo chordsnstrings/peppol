@@ -29,6 +29,7 @@ export const ALLOWED_STORES = new Set([
   "notifications",
   "members",
   "whatsapp",
+  "recurring",
 ]);
 
 export function assertStore(store: string) {
