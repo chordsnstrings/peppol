@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { requireSession } from "@/lib/server/session";
 import { json, handleError, assertStore } from "@/lib/server/http";
+import { assertOrgWritable } from "@/lib/server/org-status";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ store: string 
     const { store } = await ctx.params;
     assertStore(store);
     const { orgId } = await requireSession();
+    await assertOrgWritable(orgId);
     const body = (await req.json()) as Record<string, unknown>;
     const id = body.id as string | undefined;
     if (!id) return json({ error: "Record must have an id" }, 400);

@@ -8,6 +8,7 @@ import { getGateway } from "@/lib/gateway/registry";
 import { PINT_AE } from "@/lib/gateway/port";
 import { applyGatewayEvents, eventNarratives } from "@/lib/gateway/apply";
 import { recordExchange } from "@/lib/server/billing";
+import { isOrgWritable } from "@/lib/server/org-status";
 import type { AppNotification, Entity, Invoice, InvoiceEvent } from "@/lib/domain/types";
 
 export interface SendOutcome {
@@ -29,6 +30,9 @@ export interface SendOutcome {
  * `orgId` must be the authoritative tenant id (session or authenticated API key).
  */
 export async function runSendPipeline(orgId: string, invoiceId: string): Promise<SendOutcome> {
+  if (!(await isOrgWritable(orgId))) {
+    return { ok: false, status: 423, error: "This workspace is locked (suspended or read-only). Contact support." };
+  }
   const invoice = await getRecord<Invoice>(orgId, "invoices", invoiceId);
   if (!invoice) return { ok: false, status: 404, error: "Invoice not found" };
   if (invoice.docType === "PROFORMA") {

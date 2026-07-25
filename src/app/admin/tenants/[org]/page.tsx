@@ -10,6 +10,7 @@ import { formatDate } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/feedback";
+import { TenantActions } from "@/components/admin/tenant-actions";
 
 interface Detail {
   org: { id: string; name: string; slug: string; status: string; suspendedReason: string | null; createdAt: string };
@@ -18,10 +19,11 @@ interface Detail {
   invoiceCount: number;
   transmissions: Record<string, number>;
   payments: { status: string; count: number; amountMinor: number }[];
-  connections: { provider: string; status: string; mode?: string }[];
-  apiKeys: number;
+  connections: { id: string; provider: string; status: string; mode?: string }[];
+  apiKeys: { id: string; name: string; prefix: string; lastUsedAt: string | null }[];
   integrationTokens: number;
-  billing: { plan: PlanCode; usage: number; allowance: number; overage: number };
+  oauthGrants: number;
+  billing: { plan: PlanCode; usage: number; allowance: number; override: number | null; overage: number };
 }
 
 function Panel({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
@@ -42,13 +44,22 @@ export default function TenantDetailPage() {
   const { org } = useParams<{ org: string }>();
   const [d, setD] = React.useState<Detail | null>(null);
   const [notFound, setNotFound] = React.useState(false);
+  const [role, setRole] = React.useState<string>("read_only");
 
-  React.useEffect(() => {
+  const refetch = React.useCallback(() => {
     fetch(`/api/admin/tenants/${org}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then(setD)
       .catch(() => setNotFound(true));
   }, [org]);
+
+  React.useEffect(() => {
+    refetch();
+    fetch("/api/admin/me", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((b) => setRole(b.admin?.role ?? "read_only"))
+      .catch(() => {});
+  }, [refetch]);
 
   if (notFound) return <p className="text-sm text-muted-foreground">Workspace not found.</p>;
   if (!d) return <div className="space-y-3"><Skeleton className="h-10 w-64" /><Skeleton className="h-40 w-full" /></div>;
@@ -156,8 +167,9 @@ export default function TenantDetailPage() {
 
         <Panel icon={<Plug className="size-4" />} title="Integrations & keys">
           <div className="space-y-1.5 text-sm">
-            <div className="flex items-center justify-between"><span className="text-muted-foreground">API keys</span><span className="tabular-nums">{d.apiKeys}</span></div>
-            <div className="flex items-center justify-between"><span className="text-muted-foreground">OAuth tokens</span><span className="tabular-nums">{d.integrationTokens}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">API keys</span><span className="tabular-nums">{d.apiKeys.length}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">OAuth grants</span><span className="tabular-nums">{d.oauthGrants}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">Integration tokens</span><span className="tabular-nums">{d.integrationTokens}</span></div>
             {d.connections.map((c, i) => (
               <div key={i} className="flex items-center justify-between">
                 <span className="font-mono text-xs text-muted-foreground">{c.provider}</span>
@@ -166,6 +178,10 @@ export default function TenantDetailPage() {
             ))}
           </div>
         </Panel>
+      </div>
+
+      <div className="mt-4">
+        <TenantActions orgId={d.org.id} detail={d} canWrite={role === "super" || role === "support"} onDone={refetch} />
       </div>
 
       <p className="mt-4 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">

@@ -161,7 +161,7 @@ export async function tenantDetail(orgId: string) {
   if (!org) return null;
   const year = currentYear();
 
-  const [memberships, entityRecords, invoiceCount, txByExchange, payByStatus, connectionRecords, apiKeys, billing, usage, integrationTokens] =
+  const [memberships, entityRecords, invoiceCount, txByExchange, payByStatus, connectionRecords, apiKeyRows, billing, usage, integrationTokens, oauthGrants] =
     await Promise.all([
       prisma.membership.findMany({ where: { orgId }, orderBy: { createdAt: "asc" } }),
       prisma.record.findMany({ where: { orgId, store: "entities" } }),
@@ -169,10 +169,11 @@ export async function tenantDetail(orgId: string) {
       prisma.transmission.groupBy({ by: ["exchangeStatus"], where: { orgId }, _count: { _all: true } }),
       prisma.payment.groupBy({ by: ["status"], where: { orgId }, _count: { _all: true }, _sum: { amountMinor: true } }),
       prisma.record.findMany({ where: { orgId, store: "connections" } }),
-      prisma.apiKey.count({ where: { orgId, revokedAt: null } }),
+      prisma.apiKey.findMany({ where: { orgId, revokedAt: null }, orderBy: { createdAt: "desc" } }),
       prisma.orgBilling.findUnique({ where: { orgId } }),
       prisma.usageEvent.count({ where: { orgId, year } }),
       prisma.integrationToken.count({ where: { orgId } }),
+      prisma.oAuthRefreshToken.count({ where: { orgId, revokedAt: null } }),
     ]);
 
   const userIds = memberships.map((m) => m.userId);
@@ -180,6 +181,7 @@ export async function tenantDetail(orgId: string) {
   const userMap = new Map(users.map((u) => [u.id, u]));
 
   const plan: PlanCode = billing && isPlanCode(billing.plan) ? (billing.plan as PlanCode) : "FREE_MANDATE";
+  const allowance = billing?.allowanceOverride ?? includedFor(plan);
   const parse = <T>(r: { data: string }): T | null => {
     try {
       return JSON.parse(r.data) as T;
@@ -199,11 +201,12 @@ export async function tenantDetail(orgId: string) {
     transmissions: Object.fromEntries(txByExchange.map((r) => [r.exchangeStatus, r._count._all])),
     payments: payByStatus.map((r) => ({ status: r.status, count: r._count._all, amountMinor: r._sum.amountMinor ?? 0 })),
     connections: connectionRecords.map((r) => {
-      const c = parse<{ provider: string; status: string; mode?: string }>(r);
-      return c ? { provider: c.provider, status: c.status, mode: c.mode } : null;
+      const c = parse<{ id: string; provider: string; status: string; mode?: string }>(r);
+      return c ? { id: c.id, provider: c.provider, status: c.status, mode: c.mode } : null;
     }).filter(Boolean),
-    apiKeys,
+    apiKeys: apiKeyRows.map((k) => ({ id: k.id, name: k.name, prefix: k.prefix, lastUsedAt: k.lastUsedAt?.toISOString() ?? null })),
     integrationTokens,
-    billing: { plan, usage, allowance: includedFor(plan), overage: Math.max(0, usage - includedFor(plan)) },
+    oauthGrants,
+    billing: { plan, usage, allowance, override: billing?.allowanceOverride ?? null, overage: Math.max(0, usage - allowance) },
   };
 }

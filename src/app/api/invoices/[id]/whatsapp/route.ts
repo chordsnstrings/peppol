@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { requireSession } from "@/lib/server/session";
+import { requireWritableSession } from "@/lib/server/org-status";
 import { json, handleError } from "@/lib/server/http";
 import { getRecord, putRecord } from "@/lib/server/store";
 import { prisma } from "@/lib/server/prisma";
@@ -21,7 +21,7 @@ export const runtime = "nodejs";
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await ctx.params;
-    const { orgId } = await requireSession();
+    const { orgId } = await requireWritableSession();
     const body = (await req.json().catch(() => ({}))) as { to?: string };
 
     const invoice = await getRecord<Invoice>(orgId, "invoices", id);

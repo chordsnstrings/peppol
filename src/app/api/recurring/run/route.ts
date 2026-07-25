@@ -1,4 +1,4 @@
-import { requireSession } from "@/lib/server/session";
+import { requireWritableSession } from "@/lib/server/org-status";
 import { json, handleError } from "@/lib/server/http";
 import { getRecord, listRecords, putRecord } from "@/lib/server/store";
 import { buildInvoiceFromApi } from "@/lib/server/invoice-build";
@@ -20,7 +20,7 @@ function nextNumber(entity: Entity, seq: number): string {
  */
 export async function POST() {
   try {
-    const { orgId } = await requireSession();
+    const { orgId } = await requireWritableSession();
     const templates = await listRecords<RecurringTemplate>(orgId, "recurring");
     const entities = await listRecords<Entity>(orgId, "entities");
     const entityById = new Map(entities.map((e) => [e.id, e]));

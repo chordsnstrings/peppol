@@ -94,6 +94,14 @@ export function isSuper(role: PlatformRole): boolean {
   return role === "super";
 }
 
+/** Guard for admin WRITE routes: platform admin + write role + same-origin. */
+export async function requireAdminWrite(req: Request): Promise<PlatformAdminContext> {
+  const admin = await requirePlatformAdmin();
+  if (!canWrite(admin.role)) throw new PlatformForbiddenError();
+  await assertSameOrigin(req);
+  return admin;
+}
+
 /* ------------------------------ Bootstrap ----------------------------- */
 
 export type ClaimResult = "ok" | "already" | "bad_token" | "not_allowlisted" | "no_session";

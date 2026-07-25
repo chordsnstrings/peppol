@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { requireSession } from "@/lib/server/session";
+import { requireWritableSession } from "@/lib/server/org-status";
 import { json, handleError } from "@/lib/server/http";
 import { listRecords, putRecord } from "@/lib/server/store";
 import { remindable } from "@/lib/domain/ar";
@@ -14,7 +14,7 @@ export const runtime = "nodejs";
  */
 export async function POST() {
   try {
-    const { orgId } = await requireSession();
+    const { orgId } = await requireWritableSession();
     const invoices = await listRecords<Invoice>(orgId, "invoices");
     const due = remindable(invoices);
     const at = new Date().toISOString();

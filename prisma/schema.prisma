@@ -161,9 +161,10 @@ model Payment {
 
 /// The tenant's current billing plan. One row per org.
 model OrgBilling {
-  orgId     String   @id
-  plan      String   @default("FREE_MANDATE")
-  updatedAt DateTime @updatedAt
+  orgId             String   @id
+  plan              String   @default("FREE_MANDATE")
+  allowanceOverride Int? // operator comp: overrides the plan's included exchanges
+  updatedAt         DateTime @updatedAt
 }
 
 /// One billable exchange event, written when an invoice is first transmitted.

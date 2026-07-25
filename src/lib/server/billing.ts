@@ -51,10 +51,18 @@ export interface UsageSummary {
   overage: number;
 }
 
+/** Effective allowance for an org: an operator comp override, else the plan's. */
+export async function effectiveAllowance(orgId: string): Promise<{ plan: PlanCode; included: number; override: number | null }> {
+  const row = await prisma.orgBilling.findUnique({ where: { orgId } });
+  const plan = row && isPlanCode(row.plan) ? row.plan : "FREE_MANDATE";
+  const override = row?.allowanceOverride ?? null;
+  return { plan, included: override ?? includedFor(plan), override };
+}
+
 export async function usageSummary(orgId: string, entityId: string): Promise<UsageSummary> {
   const year = currentBillingYear();
-  const [used, plan] = await Promise.all([usageFor(orgId, entityId, year), getPlan(orgId)]);
-  const included = includedFor(plan);
+  const [used, alw] = await Promise.all([usageFor(orgId, entityId, year), effectiveAllowance(orgId)]);
+  const { plan, included } = alw;
   return {
     entityId,
     year,

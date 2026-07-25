@@ -1,4 +1,4 @@
-import { requireSession } from "@/lib/server/session";
+import { requireWritableSession } from "@/lib/server/org-status";
 import { json, handleError } from "@/lib/server/http";
 import { getRecord, putRecord } from "@/lib/server/store";
 import { getWhatsApp } from "@/lib/whatsapp/registry";
@@ -14,7 +14,7 @@ export const runtime = "nodejs";
  */
 export async function POST(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId } = await requireWritableSession();
     const body = (await req.json().catch(() => ({}))) as {
       entityId?: string;
       displayNumber?: string;
