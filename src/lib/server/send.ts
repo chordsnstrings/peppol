@@ -9,6 +9,7 @@ import { PINT_AE } from "@/lib/gateway/port";
 import { applyGatewayEvents, eventNarratives } from "@/lib/gateway/apply";
 import { recordExchange } from "@/lib/server/billing";
 import { isOrgWritable } from "@/lib/server/org-status";
+import { isFlagOn } from "@/lib/server/flags";
 import type { AppNotification, Entity, Invoice, InvoiceEvent } from "@/lib/domain/types";
 
 export interface SendOutcome {
@@ -30,6 +31,9 @@ export interface SendOutcome {
  * `orgId` must be the authoritative tenant id (session or authenticated API key).
  */
 export async function runSendPipeline(orgId: string, invoiceId: string): Promise<SendOutcome> {
+  if (await isFlagOn("sending_paused")) {
+    return { ok: false, status: 503, error: "Sending is temporarily paused platform-wide. Please try again shortly." };
+  }
   if (!(await isOrgWritable(orgId))) {
     return { ok: false, status: 423, error: "This workspace is locked (suspended or read-only). Contact support." };
   }

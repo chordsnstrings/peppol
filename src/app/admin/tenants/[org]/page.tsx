@@ -181,7 +181,7 @@ export default function TenantDetailPage() {
       </div>
 
       <div className="mt-4">
-        <TenantActions orgId={d.org.id} detail={d} canWrite={role === "super" || role === "support"} onDone={refetch} />
+        <TenantActions orgId={d.org.id} orgName={d.org.name} detail={d} canWrite={role === "super" || role === "support"} isSuper={role === "super"} onDone={refetch} />
       </div>
 
       <p className="mt-4 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">

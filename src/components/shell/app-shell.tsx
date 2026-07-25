@@ -3,6 +3,7 @@
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
+import { cn } from "@/lib/utils";
 import { useAppState } from "@/lib/app-state";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
@@ -32,10 +33,15 @@ function Splash() {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { ready, authenticated, onboarded, entities } = useAppState();
+  const { ready, authenticated, onboarded, entities, impersonating } = useAppState();
   const router = useRouter();
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = React.useState(false);
+
+  const stopImpersonating = async () => {
+    await fetch("/api/admin/impersonate/stop", { method: "POST", credentials: "same-origin" }).catch(() => {});
+    window.location.href = "/admin";
+  };
 
   React.useEffect(() => {
     if (!ready) return;
@@ -50,8 +56,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh bg-background">
+      {impersonating && (
+        <div className="fixed inset-x-0 top-0 z-[100] flex items-center justify-center gap-3 bg-destructive px-4 py-1.5 text-center text-xs font-medium text-white">
+          <span>
+            Viewing <b>{impersonating.orgName}</b> as staff — read only. Actions are audited.
+          </span>
+          <button onClick={stopImpersonating} className="rounded bg-white/20 px-2 py-0.5 font-semibold hover:bg-white/30">
+            Exit
+          </button>
+        </div>
+      )}
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className={cn("flex min-w-0 flex-1 flex-col", impersonating && "pt-8")}>
         <Topbar onMenu={() => setDrawerOpen(true)} />
         <main className="flex-1 px-4 pb-24 pt-6 md:px-6 md:pb-10 lg:px-8">
           <div className="mx-auto w-full max-w-[1200px]">{children}</div>

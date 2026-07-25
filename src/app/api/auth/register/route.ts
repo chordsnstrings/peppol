@@ -3,6 +3,7 @@ import { prisma } from "@/lib/server/prisma";
 import { hashPassword } from "@/lib/server/crypto";
 import { createSession } from "@/lib/server/session";
 import { json, handleError } from "@/lib/server/http";
+import { isFlagOn } from "@/lib/server/flags";
 
 export const runtime = "nodejs";
 
@@ -22,6 +23,10 @@ export async function POST(req: Request) {
   try {
     const body = schema.parse(await req.json());
     const email = body.email.toLowerCase().trim();
+
+    if (await isFlagOn("signups_frozen")) {
+      return json({ error: "New signups are temporarily paused. Please try again later." }, 403);
+    }
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return json({ error: "An account with this email already exists." }, 409);

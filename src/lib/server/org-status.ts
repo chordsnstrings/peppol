@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { requireSession, type Session } from "./session";
+import { isImpersonating } from "./impersonation";
 
 /** Thrown when a workspace is suspended/read-only and a write is attempted. */
 export class OrgLockedError extends Error {
@@ -24,9 +25,12 @@ export async function assertOrgWritable(orgId: string): Promise<void> {
   throw new OrgLockedError("This workspace is read-only. Contact support.");
 }
 
-/** requireSession + writable check, for tenant-initiated write routes. */
+/** requireSession + writable check + no-impersonation, for tenant write routes. */
 export async function requireWritableSession(): Promise<Session> {
   const session = await requireSession();
+  if (await isImpersonating()) {
+    throw new OrgLockedError("Read-only while viewing as a tenant. Exit impersonation to make changes.");
+  }
   await assertOrgWritable(session.orgId);
   return session;
 }

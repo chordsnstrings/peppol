@@ -24,6 +24,7 @@ interface AppStateValue {
   onboarded: boolean;
   user?: SessionUser;
   org?: Organization;
+  impersonating?: { orgId: string; orgName: string } | null;
   entities: Entity[];
   currentEntity?: Entity;
   locale: Locale;
@@ -38,6 +39,7 @@ const AppStateContext = createContext<AppStateValue | null>(null);
 interface MeResponse {
   user: SessionUser;
   org: Organization;
+  impersonating?: { orgId: string; orgName: string } | null;
 }
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
@@ -45,6 +47,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [authenticated, setAuthenticated] = useState(false);
   const [user, setUser] = useState<SessionUser | undefined>();
   const [org, setOrg] = useState<Organization | undefined>();
+  const [impersonating, setImpersonating] = useState<{ orgId: string; orgName: string } | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [currentEntityId, setCurrentEntityIdState] = useState<string | undefined>();
   const [locale, setLocaleState] = useState<Locale>("en");
@@ -63,6 +66,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setAuthenticated(true);
       setUser(me.user);
       setOrg(me.org);
+      setImpersonating(me.impersonating ?? null);
 
       const [ents, curId, loc] = await Promise.all([
         all("entities"),
@@ -117,6 +121,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     onboarded: authenticated && entities.length > 0,
     user,
     org,
+    impersonating,
     entities,
     currentEntity,
     locale,

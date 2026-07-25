@@ -1,16 +1,16 @@
 import { prisma } from "@/lib/server/prisma";
-import { requireSession } from "@/lib/server/session";
 import { json, handleError, assertStore } from "@/lib/server/http";
-import { assertOrgWritable } from "@/lib/server/org-status";
+import { requireWritableSession } from "@/lib/server/org-status";
+import { requireEffectiveSession } from "@/lib/server/effective-session";
 
 export const runtime = "nodejs";
 
-/** List records in a store for the current tenant, optionally filtered. */
+/** List records in a store for the current tenant (or the impersonated tenant). */
 export async function GET(req: Request, ctx: { params: Promise<{ store: string }> }) {
   try {
     const { store } = await ctx.params;
     assertStore(store);
-    const { orgId } = await requireSession();
+    const { orgId } = await requireEffectiveSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId") ?? undefined;
     const invoiceId = url.searchParams.get("invoiceId") ?? undefined;
@@ -29,8 +29,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ store: string 
   try {
     const { store } = await ctx.params;
     assertStore(store);
-    const { orgId } = await requireSession();
-    await assertOrgWritable(orgId);
+    const { orgId } = await requireWritableSession();
     const body = (await req.json()) as Record<string, unknown>;
     const id = body.id as string | undefined;
     if (!id) return json({ error: "Record must have an id" }, 400);

@@ -156,6 +156,55 @@ export async function listTenants(opts: { search?: string; limit?: number } = {}
   });
 }
 
+/* ------------------------------- Audit -------------------------------- */
+
+export async function auditLog(opts: { limit?: number; action?: string; orgId?: string } = {}) {
+  const rows = await prisma.adminAuditLog.findMany({
+    where: {
+      ...(opts.action ? { action: { startsWith: opts.action } } : {}),
+      ...(opts.orgId ? { targetOrgId: opts.orgId } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.min(opts.limit ?? 100, 500),
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    adminEmail: r.adminEmail,
+    action: r.action,
+    targetOrgId: r.targetOrgId,
+    targetId: r.targetId,
+    metadata: r.metadata,
+    reason: r.reason,
+    ip: r.ip,
+    at: r.createdAt.toISOString(),
+  }));
+}
+
+/* --------------------------- Abuse signals ---------------------------- */
+
+export async function abuseSignals() {
+  // TRNs registered by more than one workspace — a fraud/misuse signal.
+  const dupTrn = await prisma.$queryRaw<{ trn: string; orgs: bigint }[]>`
+    SELECT data::jsonb->>'trn' AS trn, COUNT(DISTINCT "orgId") AS orgs
+    FROM "Record"
+    WHERE store = 'entities'
+      AND data::jsonb->>'trn' IS NOT NULL
+      AND data::jsonb->>'trn' <> ''
+    GROUP BY data::jsonb->>'trn'
+    HAVING COUNT(DISTINCT "orgId") > 1
+    ORDER BY COUNT(DISTINCT "orgId") DESC
+    LIMIT 50`;
+  const [suspended, newLast24h] = await Promise.all([
+    prisma.organization.count({ where: { status: { not: "active" } } }),
+    prisma.organization.count({ where: { createdAt: { gte: daysAgo(1) } } }),
+  ]);
+  return {
+    duplicateTrn: dupTrn.map((d) => ({ trn: d.trn, orgCount: Number(d.orgs) })),
+    suspendedCount: suspended,
+    newSignups24h: newLast24h,
+  };
+}
+
 export async function tenantDetail(orgId: string) {
   const org = await prisma.organization.findUnique({ where: { id: orgId } });
   if (!org) return null;

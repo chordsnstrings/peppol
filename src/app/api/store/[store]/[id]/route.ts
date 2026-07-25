@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
-import { requireSession } from "@/lib/server/session";
 import { json, handleError, assertStore } from "@/lib/server/http";
-import { assertOrgWritable } from "@/lib/server/org-status";
+import { requireWritableSession } from "@/lib/server/org-status";
+import { requireEffectiveSession } from "@/lib/server/effective-session";
 
 export const runtime = "nodejs";
 
@@ -9,7 +9,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ store: string; 
   try {
     const { store, id } = await ctx.params;
     assertStore(store);
-    const { orgId } = await requireSession();
+    const { orgId } = await requireEffectiveSession();
     const row = await prisma.record.findFirst({ where: { id, orgId, store } });
     if (!row) return json({ error: "Not found" }, 404);
     return json({ item: JSON.parse(row.data) });
@@ -22,8 +22,7 @@ export async function DELETE(req: Request, ctx: { params: Promise<{ store: strin
   try {
     const { store, id } = await ctx.params;
     assertStore(store);
-    const { orgId } = await requireSession();
-    await assertOrgWritable(orgId);
+    const { orgId } = await requireWritableSession();
     // deleteMany scoped by orgId → cannot delete another tenant's record
     await prisma.record.deleteMany({ where: { id, orgId, store } });
     return json({ ok: true });
