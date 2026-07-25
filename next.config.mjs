@@ -1,9 +1,12 @@
 const isProd = process.env.NODE_ENV === "production";
 
 // Content-Security-Policy. `unsafe-inline` is required for Next's inline
-// bootstrap + Tailwind styles; `unsafe-eval` only in dev (HMR). There are no
-// XSS sinks (no dangerouslySetInnerHTML; React escapes), so the high-value
-// protections here are frame-ancestors/object-src/base-uri/form-action.
+// bootstrap + Tailwind styles; `unsafe-eval` only in dev (HMR). The only
+// dangerouslySetInnerHTML sink is the marketing JSON-LD, which serialises
+// static, server-derived data with `<` escaped (no user input) — so the
+// high-value protections here remain frame-ancestors/object-src/base-uri/
+// form-action. (To drop `'unsafe-inline'` from script-src later, CSP-hash the
+// JSON-LD blocks and add a nonce to Next's bootstrap.)
 const csp = [
   "default-src 'self'",
   "base-uri 'self'",

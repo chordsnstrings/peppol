@@ -58,25 +58,34 @@ export function entitlementFrom(row: Row, now = Date.now()): { entitled: boolean
   return { entitled: false, until: null }; // canceled | none
 }
 
+/**
+ * Trial end anchored to the org's creation date. If the org row is missing
+ * (an orphaned billing row), returns the epoch so no fresh trial is ever minted
+ * — fail-closed, never a re-trial vector.
+ */
+async function trialEndFor(orgId: string): Promise<Date> {
+  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { createdAt: true } });
+  if (!org) return new Date(0);
+  return new Date(org.createdAt.getTime() + TRIAL_DAYS * DAY);
+}
+
 /** Read (and lazily initialise) the org's billing row, starting a trial if new. */
 export async function ensureBilling(orgId: string): Promise<Row & { orgId: string }> {
   const existing = await prisma.orgBilling.findUnique({ where: { orgId } });
-  const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { createdAt: true } });
-  const base = org?.createdAt ?? new Date();
-  const trialEndsAt = new Date(base.getTime() + TRIAL_DAYS * DAY);
   if (existing) {
     // Heal rows migrated in with a trialing status but no trial end (would
     // otherwise read as not-entitled). Anchored to createdAt, so an already
     // expired trial stays expired — this only restores a legitimately-live one.
+    // The org lookup stays off the common (already-populated) hot path.
     if (existing.subStatus === "trialing" && !existing.trialEndsAt) {
-      return prisma.orgBilling.update({ where: { orgId }, data: { trialEndsAt } });
+      return prisma.orgBilling.update({ where: { orgId }, data: { trialEndsAt: await trialEndFor(orgId) } });
     }
     return existing;
   }
   // No row yet — start a trial anchored to the org's creation date.
   return prisma.orgBilling.upsert({
     where: { orgId },
-    create: { orgId, subStatus: "trialing", trialEndsAt },
+    create: { orgId, subStatus: "trialing", trialEndsAt: await trialEndFor(orgId) },
     update: {},
   });
 }

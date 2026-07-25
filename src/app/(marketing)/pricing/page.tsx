@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Check, ArrowRight, ShieldCheck, Infinity as InfinityIcon, FileCheck2 } from "lucide-react";
 import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
-import { SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
+import { OrganizationJsonLd, SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { HOME_FAQ } from "@/lib/marketing/content";
 
 export const metadata: Metadata = {
@@ -11,6 +11,7 @@ export const metadata: Metadata = {
   description:
     "Simple, flat pricing for UAE FTA e-invoicing. AED 299/month, AED 1,500/6 months, or AED 2,400/year — all with unlimited invoicing and every feature. 14-day free trial, no card required.",
   alternates: { canonical: "/pricing" },
+  openGraph: { title: "Pricing — unlimited UAE e-invoicing from AED 299/mo" },
 };
 
 const INCLUDED = [
@@ -33,6 +34,7 @@ const TRUST = [
 export default function PricingPage() {
   return (
     <>
+      <OrganizationJsonLd />
       <SoftwareApplicationJsonLd />
       <FaqJsonLd items={HOME_FAQ} />
       <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }, { name: "Pricing", path: "/pricing" }]} />

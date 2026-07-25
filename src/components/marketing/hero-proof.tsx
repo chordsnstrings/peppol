@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { motion, useAnimationControls } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Check, ShieldCheck, Radio, FileCheck2 } from "lucide-react";
 
 const STEPS = [
@@ -15,10 +15,15 @@ const STEPS = [
  * delivery + reporting ticking green. Loops. Subject-specific, not a stock hero.
  */
 export function HeroProof() {
+  const reduce = useReducedMotion();
   const [active, setActive] = React.useState(0);
-  const controls = useAnimationControls();
 
   React.useEffect(() => {
+    // Respect prefers-reduced-motion: show the completed proof, no looping.
+    if (reduce) {
+      setActive(STEPS.length);
+      return;
+    }
     let alive = true;
     const run = async () => {
       while (alive) {
@@ -37,7 +42,7 @@ export function HeroProof() {
     return () => {
       alive = false;
     };
-  }, [controls]);
+  }, [reduce]);
 
   return (
     <div className="relative">
@@ -114,7 +119,7 @@ export function HeroProof() {
                 </div>
                 {lit && (
                   <motion.span
-                    initial={{ opacity: 0, y: 3 }}
+                    initial={reduce ? false : { opacity: 0, y: 3 }}
                     animate={{ opacity: 1, y: 0 }}
                     className="mkt-mono text-[11px]"
                     style={{ color: "var(--signal-2)" }}

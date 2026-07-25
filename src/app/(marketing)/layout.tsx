@@ -1,12 +1,10 @@
-import type { Metadata } from "next";
 import { MarketingNav } from "@/components/marketing/nav";
 import { MarketingFooter } from "@/components/marketing/footer";
 import "./marketing.css";
 
-export const metadata: Metadata = {
-  // Marketing pages are statically rendered for SEO/CWV.
-  alternates: { canonical: "/" },
-};
+// Each marketing page sets its OWN canonical (via metadata). We deliberately do
+// NOT set a layout-level canonical here — a shared canonical:"/" would silently
+// mis-canonicalize every child route to the homepage.
 
 export default function MarketingLayout({ children }: { children: React.ReactNode }) {
   return (

@@ -6,11 +6,12 @@ function aed(minor: number) {
   return (minor / 100).toLocaleString("en-AE", { maximumFractionDigits: 0 });
 }
 
-const BILLED: Record<string, string> = {
-  MONTHLY: "billed every month",
-  SEMIANNUAL: "AED 1,500 billed every 6 months",
-  ANNUAL: "AED 2,400 billed once a year",
-};
+/** Billing cadence line, derived from the tier so it can't drift from the price. */
+function billedLine(priceMinor: number, months: number) {
+  if (months === 1) return "billed every month";
+  if (months === 12) return `AED ${aed(priceMinor)} billed once a year`;
+  return `AED ${aed(priceMinor)} billed every ${months} months`;
+}
 
 const EVERYTHING = [
   "Unlimited invoices & credit notes",
@@ -70,7 +71,7 @@ export function PricingCards({ compact = false }: { compact?: boolean }) {
               </span>
             </div>
             <p className="mkt-mono mt-2 text-[11px]" style={{ color: "var(--on-ink-faint)" }}>
-              {BILLED[t.tier]} · incl. 5% VAT
+              {billedLine(t.priceMinor, t.months)} · incl. 5% VAT
             </p>
 
             <Link

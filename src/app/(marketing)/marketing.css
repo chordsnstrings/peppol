@@ -15,7 +15,8 @@
   --paper-line: #dde3ea;
   --on-ink: #eaeef3;
   --on-ink-soft: #94a2b1;
-  --on-ink-faint: #5f6d7c;
+  /* AA-compliant (>=4.5:1) on both --ink and --ink-2 even at 11px. */
+  --on-ink-faint: #8b98a7;
   --on-paper: #0c1219;
   --on-paper-soft: #55616e;
   --signal: #23d3a8;
@@ -69,17 +70,25 @@
   background: radial-gradient(60% 60% at 50% 40%, color-mix(in srgb, var(--signal) 22%, transparent), transparent 70%);
 }
 
-/* status tick reveal */
-@keyframes mkt-tick {
-  0% { opacity: 0; transform: translateY(4px); }
-  100% { opacity: 1; transform: translateY(0); }
-}
-@keyframes mkt-flow {
-  0% { stroke-dashoffset: 100; }
-  100% { stroke-dashoffset: 0; }
-}
 @media (prefers-reduced-motion: reduce) {
   .mkt * { animation: none !important; }
+}
+
+/* nav links: inline color needs an explicit hover affordance */
+.mkt-navlink {
+  color: var(--on-ink-soft);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.mkt-navlink:hover {
+  color: var(--on-ink);
+  background: color-mix(in srgb, var(--on-ink) 8%, transparent);
+}
+
+/* signup inputs: keyboard-visible focus ring (not color-only) */
+.mkt-input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 1px;
+  border-color: var(--signal) !important;
 }
 
 .mkt-btn {

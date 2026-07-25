@@ -15,6 +15,7 @@ export const metadata: Metadata = {
   description:
     "Become UAE FTA e-invoicing compliant the moment your phase begins. Validate PINT AE invoices, transmit over Peppol, and prove FTA reporting — unlimited invoicing from AED 299/month. 14-day free trial, no card.",
   alternates: { canonical: "/" },
+  openGraph: { title: "UAE e-invoicing, engineered — validate & reach the FTA" },
 };
 
 const STEPS = [

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { FaqList } from "@/components/marketing/faq";
-import { ArticleJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
+import { OrganizationJsonLd, ArticleJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { MANDATE_FAQ, REGIME_FACTS } from "@/lib/marketing/content";
 
 const PUBLISHED = "2026-01-01";
@@ -28,6 +28,7 @@ const TOC = [
 export default function MandateGuide() {
   return (
     <>
+      <OrganizationJsonLd />
       <ArticleJsonLd
         headline="UAE e-invoicing explained: the FTA mandate, PINT AE and Peppol"
         description="A plain-English guide to UAE mandatory e-invoicing under Ministerial Decision 64 — the Peppol 5-corner model, the PINT AE format, the Tax Data Document, and the rollout timeline."

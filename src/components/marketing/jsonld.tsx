@@ -36,7 +36,6 @@ export function OrganizationJsonLd() {
 }
 
 export function SoftwareApplicationJsonLd() {
-  const lowest = Math.min(...SUB_TIERS.map((t) => t.perMonthMinor)) / 100;
   return (
     <JsonLd
       data={{
@@ -57,7 +56,6 @@ export function SoftwareApplicationJsonLd() {
           url: `${SITE_URL}/pricing`,
           category: "subscription",
         })),
-        aggregateRating: undefined,
         provider: { "@id": `${SITE_URL}/#org` },
         featureList: [
           "PINT AE UBL validation",
@@ -66,7 +64,6 @@ export function SoftwareApplicationJsonLd() {
           "Unlimited invoicing",
           "REST API and MCP for AI agents",
         ],
-        lowPrice: lowest.toFixed(2),
       }}
     />
   );
