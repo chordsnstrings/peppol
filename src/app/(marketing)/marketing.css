@@ -1,0 +1,155 @@
+/*
+ * ARKS marketing — "precision infrastructure".
+ * A deliberate, single visual world (ink ground + cool-paper sections + one teal
+ * signal accent + mono for data), intentionally diverging from the app's
+ * cream/navy/gold. Scoped under .mkt so it never touches the authenticated app.
+ */
+.mkt {
+  --ink: #0a0e13;
+  --ink-2: #10161d;
+  --ink-3: #161e27;
+  --ink-line: rgba(255, 255, 255, 0.09);
+  --ink-line-2: rgba(255, 255, 255, 0.055);
+  --paper: #f4f6f8;
+  --paper-2: #e9edf1;
+  --paper-line: #dde3ea;
+  --on-ink: #eaeef3;
+  --on-ink-soft: #94a2b1;
+  --on-ink-faint: #5f6d7c;
+  --on-paper: #0c1219;
+  --on-paper-soft: #55616e;
+  --signal: #23d3a8;
+  --signal-2: #4ee0bf;
+  --signal-deep: #0e9c7c;
+  --signal-ink: #05392e;
+  --amber: #f4a723;
+
+  font-family: var(--font-marketing), var(--font-display), system-ui, sans-serif;
+  color: var(--on-ink);
+  background: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.mkt ::selection {
+  background: var(--signal);
+  color: var(--signal-ink);
+}
+
+.mkt-display {
+  font-family: var(--font-marketing), var(--font-display), system-ui, sans-serif;
+  letter-spacing: -0.03em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+.mkt-mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.mkt-eyebrow {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+/* engineered grid texture */
+.mkt-grid {
+  background-image: radial-gradient(var(--ink-line-2) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.mkt-hairline {
+  background-image: linear-gradient(var(--ink-line) 1px, transparent 1px), linear-gradient(90deg, var(--ink-line) 1px, transparent 1px);
+  background-size: 100% 100%, 88px 100%;
+}
+
+/* the signal glow behind the hero proof */
+.mkt-signal-glow {
+  background: radial-gradient(60% 60% at 50% 40%, color-mix(in srgb, var(--signal) 22%, transparent), transparent 70%);
+}
+
+/* status tick reveal */
+@keyframes mkt-tick {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes mkt-flow {
+  0% { stroke-dashoffset: 100; }
+  100% { stroke-dashoffset: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mkt * { animation: none !important; }
+}
+
+.mkt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 0.72rem 1.15rem;
+  transition: transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease;
+  white-space: nowrap;
+}
+.mkt-btn:active { transform: translateY(1px); }
+.mkt-btn-primary {
+  background: var(--signal);
+  color: var(--signal-ink);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--signal) 60%, transparent), 0 12px 30px -12px color-mix(in srgb, var(--signal) 60%, transparent);
+}
+.mkt-btn-primary:hover { background: var(--signal-2); box-shadow: 0 0 0 1px var(--signal-2), 0 16px 36px -12px color-mix(in srgb, var(--signal) 70%, transparent); }
+.mkt-btn-ghost { color: var(--on-ink); border: 1px solid var(--ink-line); }
+.mkt-btn-ghost:hover { background: var(--ink-2); border-color: color-mix(in srgb, var(--on-ink) 22%, transparent); }
+.mkt-btn-dark {
+  background: var(--on-paper);
+  color: var(--paper);
+}
+.mkt-btn-dark:hover { background: #000; }
+
+.mkt a:focus-visible,
+.mkt button:focus-visible,
+.mkt summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* a cool-paper section — the editorial contrast against the ink ground */
+.mkt-paper {
+  background: var(--paper);
+  color: var(--on-paper);
+}
+.mkt-paper .mkt-eyebrow {
+  color: var(--signal-deep);
+}
+.mkt-paper .mkt-soft {
+  color: var(--on-paper-soft);
+}
+.mkt-soft {
+  color: var(--on-ink-soft);
+}
+
+/* native <details> marker off — FaqList draws its own +/× */
+.mkt-faq summary::-webkit-details-marker {
+  display: none;
+}
+.mkt-faq summary {
+  outline-offset: 4px;
+}
+
+/* section vertical rhythm */
+.mkt-section {
+  padding-top: clamp(4rem, 8vw, 7rem);
+  padding-bottom: clamp(4rem, 8vw, 7rem);
+}
+
+/* subtle card lift on hover for feature tiles */
+.mkt-card {
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+.mkt-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--signal) 40%, transparent);
+}

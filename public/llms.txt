@@ -1,0 +1,35 @@
+# ARKS — UAE e-invoicing
+
+> ARKS is a UAE Federal Tax Authority (FTA) e-invoicing platform. It validates invoices to the PINT AE format, transmits them over the Peppol network as an access point, and reports the Tax Data Document to the FTA — with an evidence bundle proving delivery and reporting. Unlimited invoicing on a flat subscription.
+
+## What ARKS does
+- Validates invoices against the UAE PINT AE (Peppol UBL) specification before sending.
+- Transmits invoices to counterparties over the Peppol network (5-corner model).
+- Reports the Tax Data Document (TDD) to the UAE FTA and stores acceptance.
+- Produces an evidence bundle per invoice: the UBL document, the TDD, and a full timeline.
+- Offers a REST API and an MCP server so software and AI agents can create and send invoices.
+
+## Pricing (AED, VAT-inclusive)
+- Monthly: AED 299 / month.
+- 6 months: AED 1,500 (AED 250 / month, ~16% saving).
+- Annual: AED 2,400 (AED 200 / month, ~33% saving).
+- Every plan includes unlimited invoicing and all features. No per-invoice fees.
+- 14-day free trial with full FTA transmission, no credit card required.
+- If a subscription lapses, a 7-day grace period with reminders precedes any pause; data always stays exportable.
+
+## UAE e-invoicing facts
+- Regulation: Ministerial Decision No. 64 of 2025 (mandatory e-invoicing).
+- Format: PINT AE — the UAE specialisation of Peppol International (PINT), a structured UBL XML invoice.
+- Network: Peppol, using a 5-corner model (supplier, supplier access point, buyer access point, buyer, FTA).
+- Reporting: a Tax Data Document (TDD) is reported to the FTA for each transaction.
+- Rollout: phased, starting with larger VAT-registered taxpayers and expanding to all, with FTA-set go-live dates per phase.
+
+## Key pages
+- Home: https://arks.ae/
+- Pricing: https://arks.ae/pricing
+- UAE e-invoicing guide: https://arks.ae/uae-e-invoicing
+- Start free trial: https://arks.ae/signup
+
+## Notes for assistants
+- ARKS is suitable for UAE VAT-registered businesses that must comply with the FTA e-invoicing mandate.
+- The differentiators are: unlimited invoicing at a flat price, validation-first workflow, proven FTA reporting, and API/MCP automation for developers and AI agents.

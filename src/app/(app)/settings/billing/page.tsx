@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, Sparkles, Zap, AlertTriangle, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
-import type { SubTier } from "@/lib/domain/billing";
+import { isSubTier, type SubTier } from "@/lib/domain/billing";
 import { getSubscription, startCheckout, type SubscriptionState } from "@/lib/subscription-client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,14 @@ export default function BillingPage() {
   const [tiers, setTiers] = React.useState<Tier[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState<SubTier | null>(null);
+  // A plan carried over from the marketing pricing funnel (?tier=…) — highlighted,
+  // never auto-charged, so the free trial the visitor was promised is honoured.
+  const [recommended, setRecommended] = React.useState<SubTier | null>(null);
+
+  React.useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tier");
+    if (t && isSubTier(t)) setRecommended(t);
+  }, []);
 
   const load = React.useCallback(async () => {
     try {
@@ -134,12 +142,21 @@ export default function BillingPage() {
         <div className="grid gap-3 sm:grid-cols-3">
           {tiers.map((t) => {
             const isCurrent = status === "active" && sub?.tier === t.tier;
+            const isPicked = recommended === t.tier && !isCurrent;
             return (
               <Card
                 key={t.tier}
-                className={cn("relative flex flex-col p-5 transition-all hover-lift", t.highlight && "border-gold ring-1 ring-gold/30")}
+                className={cn(
+                  "relative flex flex-col p-5 transition-all hover-lift",
+                  t.highlight && "border-gold ring-1 ring-gold/30",
+                  isPicked && "border-info ring-2 ring-info/40",
+                )}
               >
-                {t.highlight && (
+                {isPicked ? (
+                  <span className="absolute -top-2.5 left-5 rounded-full bg-info px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                    Your pick
+                  </span>
+                ) : t.highlight && (
                   <span className="absolute -top-2.5 left-5 rounded-full bg-gold px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
                     Best value
                   </span>
