@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 import { authSecretKey } from "./secret";
+import { prisma } from "./prisma";
 
 const COOKIE = "arks_session";
 const ALG = "HS256";
@@ -52,9 +53,21 @@ export async function clearSession(): Promise<void> {
 }
 
 /** Throwing guard for API routes. */
+/** The session's (userId, orgId) still corresponds to a real membership. */
+export async function membershipValid(userId: string, orgId: string): Promise<boolean> {
+  const m = await prisma.membership.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { userId: true },
+  });
+  return Boolean(m);
+}
+
 export async function requireSession(): Promise<Session> {
   const session = await getSession();
   if (!session) throw new UnauthorizedError();
+  // A 30-day token outlives membership changes; re-check so a removed member
+  // (or deleted org) loses access immediately rather than at token expiry.
+  if (!(await membershipValid(session.userId, session.orgId))) throw new UnauthorizedError();
   return session;
 }
 

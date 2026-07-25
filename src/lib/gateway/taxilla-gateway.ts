@@ -106,15 +106,15 @@ export const taxillaGateway: PeppolGatewayPort = {
   },
 
   async parseWebhook(hdrs, rawBody): Promise<GatewayEvent[]> {
+    // Fail-closed: a live gateway webhook must be signed and verified.
     const secret = process.env.TAXILLA_WEBHOOK_SECRET;
-    if (secret) {
-      const sig = hdrs["x-taxilla-signature"] ?? hdrs["X-Taxilla-Signature"] ?? "";
-      const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-      const a = Buffer.from(sig);
-      const b = Buffer.from(expected);
-      if (a.length !== b.length || !timingSafeEqual(a, b)) {
-        throw new Error("Invalid Taxilla webhook signature");
-      }
+    if (!secret) throw new Error("TAXILLA_WEBHOOK_SECRET is not configured");
+    const sig = hdrs["x-taxilla-signature"] ?? hdrs["X-Taxilla-Signature"] ?? "";
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new Error("Invalid Taxilla webhook signature");
     }
     return mapStatus(JSON.parse(rawBody) as TaxillaStatus);
   },

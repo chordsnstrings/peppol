@@ -73,14 +73,14 @@ export const noqodiPayments: PaymentProviderPort = {
   },
 
   async parseWebhook(hdrs, rawBody): Promise<PaymentEvent[]> {
+    // Fail-closed: never trust an unsigned webhook on a live gateway.
     const secret = process.env.NOQODI_WEBHOOK_SECRET;
-    if (secret) {
-      const sig = hdrs["x-noqodi-signature"] ?? "";
-      const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-      const a = Buffer.from(sig);
-      const b = Buffer.from(expected);
-      if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("Invalid noqodi signature");
-    }
+    if (!secret) throw new Error("NOQODI_WEBHOOK_SECRET is not configured");
+    const sig = hdrs["x-noqodi-signature"] ?? "";
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("Invalid noqodi signature");
     const j = JSON.parse(rawBody) as { referenceId?: string; id?: string; status?: string; method?: string; amount?: string };
     return [
       {

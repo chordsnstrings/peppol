@@ -6,6 +6,7 @@ import {
   createDecipheriv,
   createHash,
 } from "node:crypto";
+import { encryptionSecret } from "./secret";
 
 /* ------------------------------- Hashing ----------------------------- */
 
@@ -35,9 +36,8 @@ export function verifyPassword(password: string, stored: string): boolean {
 /* --------------------------- Token encryption --------------------------- */
 
 function key(): Buffer {
-  const secret = process.env.ENCRYPTION_KEY ?? "dev-insecure-token-encryption-key-change-in-prod-02";
-  // Derive a stable 32-byte key from whatever secret is configured.
-  return createHash("sha256").update(secret).digest();
+  // Derive a stable 32-byte key from the configured secret (fail-closed in prod).
+  return createHash("sha256").update(encryptionSecret()).digest();
 }
 
 /** Encrypt a secret (e.g. an OAuth token) → `iv:tag:ciphertext` (hex). */

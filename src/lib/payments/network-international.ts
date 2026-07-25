@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { PaymentEvent, PaymentProviderPort, PaymentRequest } from "./port";
 
 /**
@@ -85,7 +86,17 @@ export const networkPayments: PaymentProviderPort = {
     return { providerRef, status: mapState(state), at: new Date().toISOString() };
   },
 
-  async parseWebhook(_headers, rawBody): Promise<PaymentEvent[]> {
+  async parseWebhook(headers, rawBody): Promise<PaymentEvent[]> {
+    // Fail-closed: a live gateway MUST have a webhook secret, and the HMAC over
+    // the raw body must match. Without this, anyone could POST a forged "PAID".
+    const secret = process.env.NETWORK_WEBHOOK_SECRET ?? "";
+    if (!secret) throw new Error("NETWORK_WEBHOOK_SECRET is not configured");
+    const provided = headers["x-ngenius-signature"] ?? headers["x-webhook-signature"] ?? "";
+    const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
+    const a = Buffer.from(provided, "utf8");
+    const b = Buffer.from(expected, "utf8");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new Error("Bad webhook signature");
+
     const j = JSON.parse(rawBody) as { order?: { reference?: string; amount?: { value?: number } }; eventName?: string; state?: string };
     const providerRef = j.order?.reference;
     return [

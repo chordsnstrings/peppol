@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/server/session";
+import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { getClient, redirectUriAllowed, createAuthCode, SCOPE } from "@/lib/server/oauth";
 
@@ -57,6 +58,7 @@ function appendParams(uri: string, params: Record<string, string | undefined>): 
 /** Mint the authorization code (or deny). Requires a logged-in ARKS user. */
 export async function POST(req: Request) {
   try {
+    await assertSameOrigin(req); // consent mints an MCP grant — enforce same-origin
     const { userId, orgId } = await requireSession();
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const p = readParams(body);

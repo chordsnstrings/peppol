@@ -4,6 +4,7 @@ import { hashPassword } from "@/lib/server/crypto";
 import { createSession } from "@/lib/server/session";
 import { json, handleError } from "@/lib/server/http";
 import { isFlagOn } from "@/lib/server/flags";
+import { clientIp, enforce } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -21,6 +22,10 @@ function slugify(s: string) {
 
 export async function POST(req: Request) {
   try {
+    // Abuse control: cap new-account creation per IP.
+    const ipBlock = enforce(`register:ip:${clientIp(req)}`, 10, 60 * 60_000); // 10 / hour / IP
+    if (ipBlock) return ipBlock;
+
     const body = schema.parse(await req.json());
     const email = body.email.toLowerCase().trim();
 

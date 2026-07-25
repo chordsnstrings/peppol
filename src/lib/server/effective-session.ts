@@ -1,4 +1,4 @@
-import { getSession, UnauthorizedError } from "./session";
+import { getSession, membershipValid, UnauthorizedError } from "./session";
 import { getImpersonation } from "./impersonation";
 import { resolvePlatformRole } from "./platform-admin";
 
@@ -24,6 +24,8 @@ export async function getEffectiveSession(): Promise<EffectiveSession | null> {
     const role = await resolvePlatformRole(session.userId); // re-check: revocation is immediate
     if (role) return { userId: session.userId, orgId: imp.orgId, impersonating: true, realOrgId: session.orgId };
   }
+  // Normal tenant read: verify the membership still exists (immediate revocation).
+  if (!(await membershipValid(session.userId, session.orgId))) return null;
   return { userId: session.userId, orgId: session.orgId, impersonating: false, realOrgId: session.orgId };
 }
 

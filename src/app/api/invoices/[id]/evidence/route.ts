@@ -45,8 +45,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       generatedAt: new Date().toISOString(),
       gatewayRef: tx?.gatewayRef ?? null,
       driver: tx?.driver ?? null,
-      exchangeStatus: invoice.exchangeStatus,
-      reportingStatus: invoice.reportingStatusC2,
+      // Authoritative compliance status comes from the Transmission row (set by
+      // the gateway), NOT the client-writable invoice record. With no
+      // transmission, the invoice was never actually sent — say so plainly.
+      exchangeStatus: tx?.exchangeStatus ?? "NOT_SENT",
+      reportingStatus: tx?.reportingStatus ?? "NOT_REPORTED",
+      transmitted: Boolean(tx),
       retention: { basisYears: 5, note: "Baseline statutory retention; 15 years for real-estate-related." },
       parts: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, { sha256: sha(v), bytes: Buffer.byteLength(v) }])),
     };

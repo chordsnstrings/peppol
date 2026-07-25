@@ -1,6 +1,7 @@
 import { requireWritableSession } from "@/lib/server/org-status";
 import { json, handleError } from "@/lib/server/http";
 import { getRecord, putRecord } from "@/lib/server/store";
+import { prisma } from "@/lib/server/prisma";
 import { getWhatsApp } from "@/lib/whatsapp/registry";
 import { waConfigId } from "@/lib/whatsapp/port";
 import type { Entity, WhatsAppConfig } from "@/lib/domain/types";
@@ -33,13 +34,24 @@ export async function POST(req: Request) {
     const existing = await getRecord<WhatsAppConfig>(orgId, "whatsapp", configId);
     const driver = getWhatsApp().driver;
 
+    // Ownership: a phone-number id may not be claimed by two different tenants
+    // (it sends with the platform token, so cross-claim = sending as someone else).
+    const phoneNumberId = body.phoneNumberId?.trim() || existing?.phoneNumberId;
+    if (phoneNumberId) {
+      const clash = await prisma.record.findFirst({
+        where: { store: "whatsapp", data: { contains: `"phoneNumberId":"${phoneNumberId}"` }, orgId: { not: orgId } },
+        select: { id: true },
+      });
+      if (clash) return json({ error: "This WhatsApp number is already connected to another workspace." }, 409);
+    }
+
     const config: WhatsAppConfig = {
       id: configId,
       orgId,
       entityId,
       connected: true,
       displayNumber,
-      phoneNumberId: body.phoneNumberId?.trim() || existing?.phoneNumberId,
+      phoneNumberId,
       provider: driver,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,

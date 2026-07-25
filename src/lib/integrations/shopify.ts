@@ -6,7 +6,20 @@ import { hashInvoice, type AccountingProviderPort, type ExternalInvoice, type Sy
  * when SHOPIFY_API_KEY / SHOPIFY_API_SECRET / SHOPIFY_SHOP are configured.
  */
 const SHOP = () => process.env.SHOPIFY_SHOP ?? "";
-const shopHost = (shop: string) => `https://${shop}.myshopify.com`;
+
+/**
+ * A Shopify store handle is a single DNS label. Reject anything containing `/`,
+ * `@`, `:`, `#`, `.` etc. so an attacker-supplied `shop` from the OAuth callback
+ * can't break out the host (SSRF) while carrying the store access token.
+ */
+function safeShop(shop: string): string {
+  const handle = shop.replace(/\.myshopify\.com$/i, "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,59}$/.test(handle)) {
+    throw new Error("Invalid Shopify store handle");
+  }
+  return handle;
+}
+const shopHost = (shop: string) => `https://${safeShop(shop)}.myshopify.com`;
 
 function toMinor(v: unknown): number {
   const n = parseFloat(String(v ?? "0"));
@@ -27,7 +40,7 @@ export const shopifyDriver: AccountingProviderPort = {
   },
 
   async completeAuth({ code, query }) {
-    const shop = query?.shop?.replace(".myshopify.com", "") ?? SHOP();
+    const shop = safeShop(query?.shop ?? SHOP()); // reject host-breakout values up front
     const res = await fetch(`${shopHost(shop)}/admin/oauth/access_token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

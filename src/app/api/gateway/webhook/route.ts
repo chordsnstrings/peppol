@@ -4,6 +4,7 @@ import { getRecord, putRecord } from "@/lib/server/store";
 import { prisma } from "@/lib/server/prisma";
 import { getGateway } from "@/lib/gateway/registry";
 import { applyGatewayEvents, eventNarratives } from "@/lib/gateway/apply";
+import { isFirstDelivery } from "@/lib/server/webhook-dedup";
 import type { AppNotification, Invoice, InvoiceEvent } from "@/lib/domain/types";
 
 export const runtime = "nodejs";
@@ -24,6 +25,11 @@ export async function POST(req: Request) {
       events = await gw.parseWebhook(headers, rawBody);
     } catch {
       return json({ error: "Invalid signature" }, 401);
+    }
+
+    // Replay protection: process a given signed body at most once.
+    if (!(await isFirstDelivery(`gateway:${gw.driver}`, rawBody))) {
+      return json({ ok: true, deduped: true });
     }
 
     for (const e of events) {

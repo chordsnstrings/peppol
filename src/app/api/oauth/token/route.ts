@@ -11,6 +11,7 @@ import {
   SCOPE,
   ACCESS_TTL_SECONDS,
 } from "@/lib/server/oauth";
+import { clientIp, rateLimit, tooManyResponse } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -35,6 +36,10 @@ async function readBody(req: Request): Promise<Record<string, string>> {
 /** RFC 6749 §3.2 token endpoint: authorization_code (PKCE) + refresh_token. */
 export async function POST(req: Request) {
   try {
+    // Throttle code/secret guessing per IP.
+    const rl = rateLimit(`oauth:token:${clientIp(req)}`, 30, 5 * 60_000);
+    if (!rl.ok) return tooManyResponse(rl.retryAfter, CORS);
+
     const body = await readBody(req);
     const grant = body.grant_type;
 
@@ -94,7 +99,8 @@ export async function POST(req: Request) {
 
     return oauthError("unsupported_grant_type", `Unsupported grant_type: ${grant}`);
   } catch (e) {
-    return oauthError("server_error", e instanceof Error ? e.message : "error", 500);
+    console.error("[oauth/token]", e);
+    return oauthError("server_error", "Token request failed", 500);
   }
 }
 

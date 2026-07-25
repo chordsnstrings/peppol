@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/server/session";
 import { getDriver, providerFromSlug } from "@/lib/integrations/registry";
 import { saveToken } from "@/lib/integrations/token-store";
+import { verifyIntegrationState } from "@/lib/integrations/oauth-state";
 
 export const runtime = "nodejs";
 
@@ -16,12 +17,19 @@ export async function GET(req: Request, ctx: { params: Promise<{ provider: strin
 
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
-  const connectionId = url.searchParams.get("state"); // we set state = connectionId
+  const state = url.searchParams.get("state");
   const err = url.searchParams.get("error");
 
-  if (err || !code || !connectionId) {
+  if (err || !code || !state) {
     return NextResponse.redirect(new URL(`/integrations?error=${err ?? "denied"}`, req.url));
   }
+
+  // Anti-CSRF: the signed state must be valid AND bound to THIS session/provider.
+  const verified = await verifyIntegrationState(state);
+  if (!verified || verified.userId !== session.userId || verified.orgId !== session.orgId || verified.provider !== provider) {
+    return NextResponse.redirect(new URL(`/integrations?error=bad_state`, req.url));
+  }
+  const connectionId = verified.connectionId;
 
   try {
     const redirectUri = `${url.origin}/api/integrations/${provider}/callback`;

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/server/prisma";
 import { verifyPassword } from "@/lib/server/crypto";
 import { createSession } from "@/lib/server/session";
 import { json, handleError } from "@/lib/server/http";
+import { clientIp, enforce } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -13,8 +14,16 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
+    // Brute-force protection: cap attempts per IP and per email.
+    const ip = clientIp(req);
+    const ipBlock = enforce(`login:ip:${ip}`, 20, 5 * 60_000); // 20 / 5 min / IP
+    if (ipBlock) return ipBlock;
+
     const body = schema.parse(await req.json());
     const email = body.email.toLowerCase().trim();
+
+    const emailBlock = enforce(`login:email:${email}`, 8, 5 * 60_000); // 8 / 5 min / account
+    if (emailBlock) return emailBlock;
 
     const user = await prisma.user.findUnique({
       where: { email },

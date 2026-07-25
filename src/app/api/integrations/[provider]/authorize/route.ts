@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/server/session";
 import { getDriver, providerFromSlug } from "@/lib/integrations/registry";
+import { signIntegrationState } from "@/lib/integrations/oauth-state";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ provider: strin
 
   const redirectUri = `${url.origin}/api/integrations/${provider}/callback`;
   const { driver } = getDriver(id);
-  const consentUrl = driver.authorizeUrl({ redirectUri, state: connectionId });
+  // Anti-CSRF: state is a signed, session-bound token (not a caller-chosen id).
+  const state = await signIntegrationState({ userId: session.userId, orgId: session.orgId, connectionId, provider });
+  const consentUrl = driver.authorizeUrl({ redirectUri, state });
   return NextResponse.redirect(consentUrl);
 }

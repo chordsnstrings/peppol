@@ -225,6 +225,16 @@ model OAuthRefreshToken {
   @@index([userId])
 }
 
+/// Idempotency ledger for inbound webhooks — dedup key is a hash of the source
+/// + raw signed body, so a replayed (even validly-signed) webhook is a no-op.
+model ProcessedWebhook {
+  id        String   @id // sha256(source + rawBody)
+  source    String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 /// A programmatic API key for the public /api/v1 REST API. Only the SHA-256
 /// hash is stored; the plaintext is shown once at creation. Scoped to one org.
 model ApiKey {

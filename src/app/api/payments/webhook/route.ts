@@ -2,6 +2,7 @@ import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
 import { getPaymentProvider } from "@/lib/payments/registry";
 import { applyPaymentToInvoice } from "@/lib/payments/apply";
+import { isFirstDelivery } from "@/lib/server/webhook-dedup";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,11 @@ export async function POST(req: Request) {
       events = await provider.parseWebhook(headers, rawBody);
     } catch {
       return json({ error: "Invalid signature" }, 401);
+    }
+
+    // Replay protection: process a given signed body at most once.
+    if (!(await isFirstDelivery(`payments:${provider.driver}`, rawBody))) {
+      return json({ ok: true, deduped: true });
     }
 
     for (const e of events) {
