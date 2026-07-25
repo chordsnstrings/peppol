@@ -38,36 +38,48 @@ export async function POST(req: Request) {
     let trialsEnded = 0, grace = 0, cutoff = 0;
 
     // 1. Active subscriptions whose period has fully lapsed → grace + dunning.
+    // The transition is conditional (see enterGrace): a customer who renews
+    // between this read and the write is not clobbered, and only a real
+    // transition sends the dunning notice.
     const lapsed = await prisma.orgBilling.findMany({
       where: { subStatus: "active", currentPeriodEnd: { lt: now } },
-      select: { orgId: true },
+      select: { orgId: true, currentPeriodEnd: true },
     });
     for (const r of lapsed) {
-      await enterGrace(r.orgId);
-      await notify(r.orgId, "Payment needed", "Your ARKS subscription lapsed. Renew within 7 days to keep transmitting to the FTA.", "warning");
-      grace++;
+      if (!r.currentPeriodEnd) continue;
+      if (await enterGrace(r.orgId, r.currentPeriodEnd)) {
+        await notify(r.orgId, "Payment needed", "Your ARKS subscription lapsed. Renew within 7 days to keep transmitting to the FTA.", "warning");
+        grace++;
+      }
     }
 
-    // 2. Grace exhausted → cut off.
+    // 2. Grace exhausted → cut off (also conditional on still being in grace).
     const expired = await prisma.orgBilling.findMany({
       where: { subStatus: "grace", currentPeriodEnd: { lt: graceCutoff } },
       select: { orgId: true },
     });
     for (const r of expired) {
-      await cancelSubscription(r.orgId);
-      await notify(r.orgId, "FTA transmission paused", "Your subscription ended and transmission is now paused. Subscribe to resume.", "error");
-      cutoff++;
+      if (await cancelSubscription(r.orgId, graceCutoff)) {
+        await notify(r.orgId, "FTA transmission paused", "Your subscription ended and transmission is now paused. Subscribe to resume.", "error");
+        cutoff++;
+      }
     }
 
     // 3. Trials that have ended → mark none + nudge (no grace after a trial).
+    // Conditional updateMany so a mid-run subscribe (trialing → active) is safe.
     const trials = await prisma.orgBilling.findMany({
       where: { subStatus: "trialing", trialEndsAt: { lt: now } },
       select: { orgId: true },
     });
     for (const r of trials) {
-      await prisma.orgBilling.update({ where: { orgId: r.orgId }, data: { subStatus: "none" } });
-      await notify(r.orgId, "Trial ended", "Your free trial ended. Subscribe to keep transmitting invoices to the FTA.", "warning");
-      trialsEnded++;
+      const res = await prisma.orgBilling.updateMany({
+        where: { orgId: r.orgId, subStatus: "trialing", trialEndsAt: { lt: now } },
+        data: { subStatus: "none" },
+      });
+      if (res.count > 0) {
+        await notify(r.orgId, "Trial ended", "Your free trial ended. Subscribe to keep transmitting invoices to the FTA.", "warning");
+        trialsEnded++;
+      }
     }
 
     // Housekeeping: purge the webhook-dedup ledger older than 30 days.

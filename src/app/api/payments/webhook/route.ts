@@ -35,10 +35,13 @@ export async function POST(req: Request) {
       if (!payment || payment.status === "PAID") continue;
 
       const status = e.status === "PAID" ? "PAID" : e.status;
-      await prisma.payment.update({
-        where: { id: payment.id },
+      // Atomic flip guards against a duplicate delivery of the same event
+      // racing past the status check above and applying the payment twice.
+      const flip = await prisma.payment.updateMany({
+        where: { id: payment.id, status: { not: "PAID" } },
         data: { status, method: e.method, paidAt: e.status === "PAID" ? new Date() : null },
       });
+      if (flip.count === 0) continue;
       if (e.status === "PAID") {
         if (payment.kind === "subscription" && payment.tier) {
           await applySubscriptionPayment(payment.orgId, payment.tier, payment.id);

@@ -61,11 +61,19 @@ export function entitlementFrom(row: Row, now = Date.now()): { entitled: boolean
 /** Read (and lazily initialise) the org's billing row, starting a trial if new. */
 export async function ensureBilling(orgId: string): Promise<Row & { orgId: string }> {
   const existing = await prisma.orgBilling.findUnique({ where: { orgId } });
-  if (existing) return existing;
-  // No row yet — start a trial anchored to the org's creation date.
   const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { createdAt: true } });
   const base = org?.createdAt ?? new Date();
   const trialEndsAt = new Date(base.getTime() + TRIAL_DAYS * DAY);
+  if (existing) {
+    // Heal rows migrated in with a trialing status but no trial end (would
+    // otherwise read as not-entitled). Anchored to createdAt, so an already
+    // expired trial stays expired — this only restores a legitimately-live one.
+    if (existing.subStatus === "trialing" && !existing.trialEndsAt) {
+      return prisma.orgBilling.update({ where: { orgId }, data: { trialEndsAt } });
+    }
+    return existing;
+  }
+  // No row yet — start a trial anchored to the org's creation date.
   return prisma.orgBilling.upsert({
     where: { orgId },
     create: { orgId, subStatus: "trialing", trialEndsAt },
@@ -98,16 +106,6 @@ export async function assertEntitled(orgId: string): Promise<void> {
   if (!(await isEntitled(orgId))) throw new PaymentRequiredError();
 }
 
-/** Start a fresh trial (called at registration). */
-export async function startTrial(orgId: string): Promise<void> {
-  const trialEndsAt = new Date(Date.now() + TRIAL_DAYS * DAY);
-  await prisma.orgBilling.upsert({
-    where: { orgId },
-    create: { orgId, subStatus: "trialing", trialEndsAt },
-    update: { subStatus: "trialing", trialEndsAt },
-  });
-}
-
 /** Activate/renew a paid subscription for `tier`, extending the period. */
 export async function activateSubscription(
   orgId: string,
@@ -137,13 +135,32 @@ export async function activateSubscription(
   });
 }
 
-/** Move a lapsed subscription into the dunning/grace window. */
-export async function enterGrace(orgId: string): Promise<void> {
-  const graceEndsAt = new Date(Date.now() + GRACE_DAYS * DAY);
-  await prisma.orgBilling.update({ where: { orgId }, data: { subStatus: "grace", graceEndsAt } });
+/**
+ * Move a lapsed subscription into the dunning/grace window. Conditional: only a
+ * row that is still `active` and past its period end transitions, so a payment
+ * that renews the org between the cron's read and this write is never clobbered.
+ * `graceEndsAt` is anchored to the true cutoff (period end + grace), matching
+ * `entitlementFrom`, so the dunning banner can't over-promise. Returns true on
+ * transition.
+ */
+export async function enterGrace(orgId: string, periodEnd: Date): Promise<boolean> {
+  const graceEndsAt = new Date(periodEnd.getTime() + GRACE_DAYS * DAY);
+  const res = await prisma.orgBilling.updateMany({
+    where: { orgId, subStatus: "active", currentPeriodEnd: { lt: new Date() } },
+    data: { subStatus: "grace", graceEndsAt },
+  });
+  return res.count > 0;
 }
 
-/** Cut off — grace exhausted or hard cancel. */
-export async function cancelSubscription(orgId: string): Promise<void> {
-  await prisma.orgBilling.update({ where: { orgId }, data: { subStatus: "canceled" } });
+/**
+ * Cut off after grace is exhausted. Conditional: only a row still in `grace`
+ * whose period ended more than GRACE_DAYS ago is canceled, so a concurrent
+ * renewal is never clobbered. Returns true on transition.
+ */
+export async function cancelSubscription(orgId: string, graceCutoff: Date): Promise<boolean> {
+  const res = await prisma.orgBilling.updateMany({
+    where: { orgId, subStatus: "grace", currentPeriodEnd: { lt: graceCutoff } },
+    data: { subStatus: "canceled" },
+  });
+  return res.count > 0;
 }
