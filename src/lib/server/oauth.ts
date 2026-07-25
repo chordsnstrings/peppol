@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
 import { prisma } from "./prisma";
 import { sha256Hex } from "./crypto";
+import { authSecretKey } from "./secret";
 
 /**
  * OAuth 2.1 authorization server for the MCP endpoint. Authorization-code + PKCE
@@ -18,9 +19,7 @@ const CODE_TTL_SECONDS = 600; // 10m
 const ALG = "HS256";
 
 function key(): Uint8Array {
-  return new TextEncoder().encode(
-    process.env.AUTH_SECRET ?? "dev-insecure-session-secret-change-in-production-0001",
-  );
+  return authSecretKey();
 }
 
 function base64url(buf: Buffer): string {
@@ -149,7 +148,7 @@ export async function verifyAccessToken(
   token: string,
 ): Promise<{ userId: string; orgId: string; scope: string; clientId: string } | null> {
   try {
-    const { payload } = await jwtVerify(token, key());
+    const { payload } = await jwtVerify(token, key(), { algorithms: [ALG] });
     if (payload.token_type !== "access" || typeof payload.sub !== "string" || typeof payload.org !== "string") {
       return null;
     }

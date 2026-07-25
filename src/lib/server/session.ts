@@ -1,14 +1,13 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
+import { authSecretKey } from "./secret";
 
 const COOKIE = "arks_session";
 const ALG = "HS256";
 const MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 function secret(): Uint8Array {
-  return new TextEncoder().encode(
-    process.env.AUTH_SECRET ?? "dev-insecure-session-secret-change-in-production-0001",
-  );
+  return authSecretKey();
 }
 
 export interface Session {
@@ -37,7 +36,7 @@ export async function getSession(): Promise<Session | null> {
   const token = jar.get(COOKIE)?.value;
   if (!token) return null;
   try {
-    const { payload } = await jwtVerify(token, secret());
+    const { payload } = await jwtVerify(token, secret(), { algorithms: [ALG] });
     if (typeof payload.userId === "string" && typeof payload.orgId === "string") {
       return { userId: payload.userId, orgId: payload.orgId };
     }

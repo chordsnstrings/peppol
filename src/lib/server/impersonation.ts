@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
+import { authSecretKey } from "./secret";
 
 /**
  * Operator impersonation ("view as tenant"). A short-lived, read-only, separate
@@ -11,7 +12,7 @@ const TTL_SECONDS = 15 * 60; // 15 minutes
 const ALG = "HS256";
 
 function key(): Uint8Array {
-  return new TextEncoder().encode(process.env.AUTH_SECRET ?? "dev-insecure-session-secret-change-in-production-0001");
+  return authSecretKey();
 }
 
 export interface Impersonation {
@@ -40,7 +41,7 @@ export async function getImpersonation(): Promise<Impersonation | null> {
   const token = jar.get(COOKIE)?.value;
   if (!token) return null;
   try {
-    const { payload } = await jwtVerify(token, key());
+    const { payload } = await jwtVerify(token, key(), { algorithms: [ALG] });
     if (payload.act_as === true && typeof payload.sub === "string" && typeof payload.org === "string") {
       return { adminUserId: payload.sub, orgId: payload.org };
     }
