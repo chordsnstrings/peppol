@@ -5,6 +5,7 @@ import { createSession } from "@/lib/server/session";
 import { json, handleError } from "@/lib/server/http";
 import { isFlagOn } from "@/lib/server/flags";
 import { clientIp, enforce } from "@/lib/server/rate-limit";
+import { TRIAL_DAYS } from "@/lib/domain/billing";
 
 export const runtime = "nodejs";
 
@@ -44,6 +45,10 @@ export async function POST(req: Request) {
         data: { name: body.name, email, passwordHash: hashPassword(body.password) },
       });
       await tx.membership.create({ data: { userId: user.id, orgId: org.id, role: "OWNER" } });
+      // Start the 14-day free trial so the new workspace can transmit immediately.
+      await tx.orgBilling.create({
+        data: { orgId: org.id, subStatus: "trialing", trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000) },
+      });
       return { org, user };
     });
 

@@ -35,3 +35,43 @@ export function isPlanCode(v: string): v is PlanCode {
 export function includedFor(code: PlanCode): number {
   return Math.max(MANDATE_FREE_FLOOR, PLAN_BY_CODE[code]?.included ?? MANDATE_FREE_FLOOR);
 }
+
+/* ------------------------ Subscription (the paywall) ------------------ */
+
+/**
+ * ARKS subscription tiers. Unlimited FTA transmission; one flat price, billed
+ * upfront (annual / 6-mo) or monthly. Prices in AED minor units. A 14-day trial
+ * precedes the paywall; a 7-day grace + dunning precedes cutoff.
+ */
+export type SubTier = "MONTHLY" | "SEMIANNUAL" | "ANNUAL";
+
+export interface SubPlan {
+  tier: SubTier;
+  name: string;
+  priceMinor: number;
+  months: number;
+  perMonthMinor: number;
+  /** % saved vs paying monthly, for the pricing page anchor. */
+  savingsPct: number;
+  highlight?: boolean;
+}
+
+export const TRIAL_DAYS = 14;
+export const GRACE_DAYS = 7;
+/** Anti-abuse soft cap on "unlimited" — flags anomalous volume, not a hard block. */
+export const FAIR_USE_MONTHLY = 100_000;
+/** Our subscription is VAT-inclusive (5%); we issue the customer a tax invoice. */
+export const SUB_VAT_RATE = 0.05;
+
+const MONTHLY_MINOR = 29900;
+export const SUB_TIERS: SubPlan[] = [
+  { tier: "MONTHLY", name: "Monthly", priceMinor: MONTHLY_MINOR, months: 1, perMonthMinor: 29900, savingsPct: 0 },
+  { tier: "SEMIANNUAL", name: "6 months", priceMinor: 150000, months: 6, perMonthMinor: 25000, savingsPct: 16 },
+  { tier: "ANNUAL", name: "Annual", priceMinor: 240000, months: 12, perMonthMinor: 20000, savingsPct: 33, highlight: true },
+];
+
+export const SUB_BY_TIER = Object.fromEntries(SUB_TIERS.map((t) => [t.tier, t])) as Record<SubTier, SubPlan>;
+
+export function isSubTier(v: string): v is SubTier {
+  return v === "MONTHLY" || v === "SEMIANNUAL" || v === "ANNUAL";
+}

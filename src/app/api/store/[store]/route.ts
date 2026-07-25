@@ -13,33 +13,40 @@ export const runtime = "nodejs";
  * records. Payment state and (post-send) transmission status come only from the
  * server pipelines, never a client write.
  */
+/** Lifecycle states only ever reached via the server send pipeline. */
+const SERVER_LIFECYCLE = new Set(["QUEUED", "SENDING", "SENT", "DELIVERED", "COMPLETED", "FAILED"]);
+
 function sanitizeRecord(store: string, body: Record<string, unknown>, prev: Record<string, unknown> | null): Record<string, unknown> {
   const clean = { ...body };
   delete clean.orgId; // always re-stamped from the session
 
   if (store === "invoices") {
-    // AR/payment fields are only set by the payment webhook / mark-paid routes.
+    // Payment/AR fields: only the payment webhook / mark-paid routes set these.
     clean.amountPaidMinor = prev?.amountPaidMinor;
     clean.paymentStatus = prev?.paymentStatus;
     clean.paidAt = prev?.paidAt;
-    if (!prev) {
-      // On create, compliance state is always initial — a tenant can't mint a
-      // "delivered & reported" invoice; only the send pipeline advances these.
-      clean.exchangeStatus = "NOT_SENT";
-      clean.reportingStatusC2 = "NOT_REPORTED";
-      clean.sentAt = undefined;
-      clean.deliveredAt = undefined;
-      clean.reportedAt = undefined;
-      clean.lockedAt = undefined;
-    } else if (prev.lockedAt) {
-      // Once locked (sent), the two status dimensions + timestamps are authoritative.
-      clean.lifecycleStatus = prev.lifecycleStatus;
-      clean.exchangeStatus = prev.exchangeStatus;
-      clean.reportingStatusC2 = prev.reportingStatusC2;
-      clean.sentAt = prev.sentAt;
-      clean.deliveredAt = prev.deliveredAt;
-      clean.reportedAt = prev.reportedAt;
-      clean.lockedAt = prev.lockedAt;
+
+    // The two compliance dimensions + their timestamps are ALWAYS server-owned,
+    // regardless of lockedAt — only send.ts / the gateway webhook advance them
+    // (both via putRecord, which bypasses this sanitizer). A tenant can never
+    // mint "delivered/reported" state on their own record.
+    clean.exchangeStatus = prev ? prev.exchangeStatus : "NOT_SENT";
+    clean.reportingStatusC2 = prev ? prev.reportingStatusC2 : "NOT_REPORTED";
+    clean.sentAt = prev?.sentAt;
+    clean.deliveredAt = prev?.deliveredAt;
+    clean.reportedAt = prev?.reportedAt;
+
+    // Lifecycle: a server-terminal state (SENT…COMPLETED) is only ever reached via
+    // the send pipeline. If already there it's pinned; the client may otherwise
+    // transition DRAFT ↔ READY ↔ CANCELLED but can never jump straight to a
+    // sent/terminal state on its own record.
+    const prevLc = prev ? String(prev.lifecycleStatus) : null;
+    if (prevLc && SERVER_LIFECYCLE.has(prevLc)) {
+      clean.lifecycleStatus = prev!.lifecycleStatus;
+      clean.lockedAt = prev!.lockedAt;
+    } else if (SERVER_LIFECYCLE.has(String(clean.lifecycleStatus))) {
+      clean.lifecycleStatus = prevLc ?? "DRAFT";
+      if (!prev) clean.lockedAt = undefined;
     }
   }
   return clean;

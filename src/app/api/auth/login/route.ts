@@ -3,7 +3,7 @@ import { prisma } from "@/lib/server/prisma";
 import { verifyPassword } from "@/lib/server/crypto";
 import { createSession } from "@/lib/server/session";
 import { json, handleError } from "@/lib/server/http";
-import { clientIp, enforce } from "@/lib/server/rate-limit";
+import { clientIp, enforce, peek, record, tooManyResponse } from "@/lib/server/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -22,14 +22,18 @@ export async function POST(req: Request) {
     const body = schema.parse(await req.json());
     const email = body.email.toLowerCase().trim();
 
-    const emailBlock = enforce(`login:email:${email}`, 8, 5 * 60_000); // 8 / 5 min / account
-    if (emailBlock) return emailBlock;
+    // Per-account lockout counts only FAILED attempts, so a correct login is
+    // never blocked (no lockout DoS against a known email).
+    const emailKey = `login:fail:${email}`;
+    const emailPeek = peek(emailKey, 8); // 8 failures / 5 min / account
+    if (!emailPeek.ok) return tooManyResponse(emailPeek.retryAfter);
 
     const user = await prisma.user.findUnique({
       where: { email },
       include: { memberships: { orderBy: { createdAt: "asc" }, include: { org: true } } },
     });
     if (!user || !verifyPassword(body.password, user.passwordHash)) {
+      record(emailKey, 5 * 60_000);
       return json({ error: "Incorrect email or password." }, 401);
     }
     const membership = user.memberships[0];

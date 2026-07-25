@@ -18,7 +18,7 @@ const csp = [
   "manifest-src 'self'",
   "form-action 'self'",
   "frame-src 'self'",
-  "upgrade-insecure-requests",
+  ...(isProd ? ["upgrade-insecure-requests"] : []),
 ].join("; ");
 
 const securityHeaders = [

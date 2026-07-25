@@ -142,7 +142,9 @@ model Transmission {
 model Payment {
   id          String    @id @default(cuid())
   orgId       String
-  invoiceId   String
+  kind        String    @default("invoice") // invoice | subscription
+  invoiceId   String? // null for subscription payments
+  tier        String? // subscription tier when kind = subscription
   provider    String
   providerRef String?
   amountMinor Int
@@ -162,9 +164,21 @@ model Payment {
 /// The tenant's current billing plan. One row per org.
 model OrgBilling {
   orgId             String   @id
-  plan              String   @default("FREE_MANDATE")
+  plan              String   @default("FREE_MANDATE") // legacy analytics/allowance (not the paywall)
   allowanceOverride Int? // operator comp: overrides the plan's included exchanges
-  updatedAt         DateTime @updatedAt
+  // Subscription — the paywall. Entitlement to transmit to the FTA derives ONLY
+  // from these fields (server-authoritative, never client-writable).
+  subStatus              String    @default("trialing") // trialing | active | grace | canceled | none
+  subTier                String? // MONTHLY | SEMIANNUAL | ANNUAL
+  trialEndsAt            DateTime?
+  currentPeriodEnd       DateTime?
+  graceEndsAt            DateTime?
+  cancelAtPeriodEnd      Boolean   @default(false)
+  providerCustomerId     String?
+  providerSubscriptionId String?
+  lastPaymentAt          DateTime?
+  dunningStage           Int       @default(0) // which reminder emails have been sent
+  updatedAt              DateTime  @updatedAt
 }
 
 /// One billable exchange event, written when an invoice is first transmitted.

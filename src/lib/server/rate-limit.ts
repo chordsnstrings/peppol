@@ -36,6 +36,23 @@ export function rateLimit(key: string, limit: number, windowMs: number): RateRes
   return { ok: true, retryAfter: 0, remaining: limit - b.count };
 }
 
+/** Read-only check (does NOT count). Use to gate before knowing success/failure. */
+export function peek(key: string, limit: number): RateResult {
+  const now = Date.now();
+  const b = buckets.get(key);
+  if (!b || b.resetAt <= now) return { ok: true, retryAfter: 0, remaining: limit };
+  if (b.count >= limit) return { ok: false, retryAfter: Math.max(1, Math.ceil((b.resetAt - now) / 1000)), remaining: 0 };
+  return { ok: true, retryAfter: 0, remaining: limit - b.count };
+}
+
+/** Increment a counter (e.g. record a failed attempt) without gating. */
+export function record(key: string, windowMs: number): void {
+  const now = Date.now();
+  const b = buckets.get(key);
+  if (!b || b.resetAt <= now) buckets.set(key, { count: 1, resetAt: now + windowMs });
+  else b.count += 1;
+}
+
 /** Best-effort client IP from the proxy hop. */
 export function clientIp(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");

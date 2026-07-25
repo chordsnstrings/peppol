@@ -2,6 +2,7 @@ import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
 import { getPaymentProvider } from "@/lib/payments/registry";
 import { applyPaymentToInvoice } from "@/lib/payments/apply";
+import { applySubscriptionPayment } from "@/lib/server/subscription-apply";
 import { isFirstDelivery } from "@/lib/server/webhook-dedup";
 
 export const runtime = "nodejs";
@@ -39,11 +40,15 @@ export async function POST(req: Request) {
         data: { status, method: e.method, paidAt: e.status === "PAID" ? new Date() : null },
       });
       if (e.status === "PAID") {
-        await applyPaymentToInvoice(payment.orgId, payment.invoiceId, {
-          amountMinor: e.amountMinor ?? payment.amountMinor,
-          method: e.method ?? provider.driver,
-          at: e.at,
-        });
+        if (payment.kind === "subscription" && payment.tier) {
+          await applySubscriptionPayment(payment.orgId, payment.tier, payment.id);
+        } else if (payment.invoiceId) {
+          await applyPaymentToInvoice(payment.orgId, payment.invoiceId, {
+            amountMinor: e.amountMinor ?? payment.amountMinor,
+            method: e.method ?? provider.driver,
+            at: e.at,
+          });
+        }
       }
     }
     return json({ ok: true });
