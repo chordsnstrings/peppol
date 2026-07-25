@@ -26,12 +26,50 @@ model User {
 }
 
 model Organization {
-  id            String       @id @default(cuid())
-  name          String
-  slug          String
-  defaultLocale String       @default("en")
-  createdAt     DateTime     @default(now())
-  memberships   Membership[]
+  id              String       @id @default(cuid())
+  name            String
+  slug            String
+  defaultLocale   String       @default("en")
+  status          String       @default("active") // active | suspended | readonly
+  suspendedReason String?
+  createdAt       DateTime     @default(now())
+  memberships     Membership[]
+}
+
+/// A platform operator (super admin). Global, NOT an org Membership role. The
+/// PLATFORM_ADMINS env allowlist is the break-glass root and bootstraps rows here.
+model PlatformAdmin {
+  userId    String   @id
+  role      String   @default("support") // super | support | read_only
+  addedBy   String?
+  createdAt DateTime @default(now())
+}
+
+/// Append-only log of every privileged platform-admin read/action. This is what
+/// makes cross-tenant access defensible.
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  adminUserId String
+  adminEmail  String
+  action      String
+  targetOrgId String?
+  targetId    String?
+  metadata    String? // JSON — before/after, params
+  reason      String?
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([targetOrgId])
+  @@index([adminUserId])
+}
+
+/// Platform feature flags / kill switches. Global or per-org scope.
+model FeatureFlag {
+  key       String   @id // e.g. "signups_frozen" or "org:<id>:readonly"
+  value     String   @default("true") // JSON or scalar
+  updatedBy String?
+  updatedAt DateTime @updatedAt
 }
 
 model Membership {

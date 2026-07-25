@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { UnauthorizedError } from "./session";
+import { PlatformForbiddenError } from "./platform-admin";
 
 export function json(data: unknown, init?: number | ResponseInit) {
   return NextResponse.json(data, typeof init === "number" ? { status: init } : init);
@@ -7,6 +8,7 @@ export function json(data: unknown, init?: number | ResponseInit) {
 
 export function handleError(e: unknown) {
   if (e instanceof UnauthorizedError) return json({ error: "Unauthorized" }, 401);
+  if (e instanceof PlatformForbiddenError) return json({ error: "Forbidden" }, 403);
   // Errors carrying an explicit HTTP status (e.g. ApiKeyError) honor it.
   if (e instanceof Error && typeof (e as unknown as { status?: unknown }).status === "number") {
     return json({ error: e.message }, (e as unknown as { status: number }).status);
