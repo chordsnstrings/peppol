@@ -8,6 +8,7 @@ import { LogoMark } from "@/components/shell/logo";
 const LINKS = [
   { href: "/features", label: "Features" },
   { href: "/pricing", label: "Pricing" },
+  { href: "/connect", label: "Integrations" },
   { href: "/developers", label: "Developers" },
   { href: "/uae-e-invoicing", label: "The mandate" },
 ];

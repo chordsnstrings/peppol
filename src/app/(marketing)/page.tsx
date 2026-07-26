@@ -10,7 +10,9 @@ import { FaqList } from "@/components/marketing/faq";
 import {
   OrganizationJsonLd, WebSiteJsonLd, SoftwareApplicationJsonLd, ServiceJsonLd, HowToJsonLd, FaqJsonLd, BreadcrumbJsonLd,
 } from "@/components/marketing/jsonld";
-import { HOME_FAQ, REGIME_FACTS } from "@/lib/marketing/content";
+import { HOME_FAQ, REGIME_FACTS, faqText } from "@/lib/marketing/content";
+
+const HOME_FAQ_EN = HOME_FAQ.map((f) => faqText(f, "en"));
 
 export const metadata: Metadata = {
   title: "UAE e-invoicing, engineered — validate & reach the FTA",
@@ -58,7 +60,7 @@ export default function LandingPage() {
       <SoftwareApplicationJsonLd />
       <ServiceJsonLd />
       <HowToJsonLd name="How to send a UAE e-invoice to the FTA" steps={STEPS.map((s) => ({ name: s.t, text: s.d }))} />
-      <FaqJsonLd items={HOME_FAQ} />
+      <FaqJsonLd items={HOME_FAQ_EN} />
       <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }]} />
 
       {/* ---------------------------------------------------------------- HERO */}
@@ -257,7 +259,7 @@ export default function LandingPage() {
             <h2 className="mkt-display mt-3 text-4xl font-bold sm:text-5xl">Everything you were about to ask.</h2>
           </div>
           <div className="mt-10">
-            <FaqList items={HOME_FAQ} />
+            <FaqList items={HOME_FAQ_EN} />
           </div>
         </div>
       </section>

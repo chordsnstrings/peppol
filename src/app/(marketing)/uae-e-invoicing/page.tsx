@@ -3,7 +3,9 @@ import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { FaqList } from "@/components/marketing/faq";
 import { OrganizationJsonLd, ArticleJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
-import { MANDATE_FAQ, REGIME_FACTS } from "@/lib/marketing/content";
+import { MANDATE_FAQ, REGIME_FACTS, faqText } from "@/lib/marketing/content";
+
+const MANDATE_FAQ_EN = MANDATE_FAQ.map((f) => faqText(f, "en"));
 
 const PUBLISHED = "2026-01-01";
 const MODIFIED = "2026-07-01";
@@ -36,7 +38,7 @@ export default function MandateGuide() {
         datePublished={PUBLISHED}
         dateModified={MODIFIED}
       />
-      <FaqJsonLd items={MANDATE_FAQ} />
+      <FaqJsonLd items={MANDATE_FAQ_EN} />
       <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }, { name: "UAE e-invoicing", path: "/uae-e-invoicing" }]} />
 
       {/* hero */}
@@ -164,7 +166,7 @@ export default function MandateGuide() {
         <div className="mx-auto max-w-3xl px-5 py-16 lg:py-20">
           <h2 className="mkt-display text-center text-3xl font-bold sm:text-4xl">Mandate FAQ</h2>
           <div className="mt-10">
-            <FaqList items={MANDATE_FAQ} />
+            <FaqList items={MANDATE_FAQ_EN} />
           </div>
         </div>
       </section>

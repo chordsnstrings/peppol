@@ -4,7 +4,9 @@ import { Check, ArrowRight, ShieldCheck, Infinity as InfinityIcon, FileCheck2 } 
 import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
 import { OrganizationJsonLd, SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
-import { HOME_FAQ } from "@/lib/marketing/content";
+import { HOME_FAQ, faqText } from "@/lib/marketing/content";
+
+const HOME_FAQ_EN = HOME_FAQ.map((f) => faqText(f, "en"));
 
 export const metadata: Metadata = {
   title: "Pricing — unlimited UAE e-invoicing from AED 299/mo",
@@ -36,7 +38,7 @@ export default function PricingPage() {
     <>
       <OrganizationJsonLd />
       <SoftwareApplicationJsonLd />
-      <FaqJsonLd items={HOME_FAQ} />
+      <FaqJsonLd items={HOME_FAQ_EN} />
       <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }, { name: "Pricing", path: "/pricing" }]} />
 
       {/* hero */}
@@ -112,7 +114,7 @@ export default function PricingPage() {
         <div className="mx-auto max-w-3xl px-5 py-16 lg:py-20">
           <h2 className="mkt-display text-center text-3xl font-bold sm:text-4xl">Pricing questions</h2>
           <div className="mt-10">
-            <FaqList items={HOME_FAQ.slice(1, 5)} />
+            <FaqList items={HOME_FAQ_EN.slice(1, 5)} />
           </div>
           <p className="mt-8 text-center text-sm" style={{ color: "var(--on-ink-soft)" }}>
             Still deciding?{" "}

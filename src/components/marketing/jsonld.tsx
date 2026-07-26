@@ -1,6 +1,5 @@
 import { SITE_URL, SITE_NAME, SITE_SHORT, SITE_SOCIALS, SITE_LOGO_PNG, SITE_LOGO_W, SITE_LOGO_H, SITE_AREA } from "@/lib/site";
 import { SUB_TIERS } from "@/lib/domain/billing";
-import type { Faq } from "@/lib/marketing/content";
 import type { Locale } from "@/lib/marketing/i18n";
 import { htmlLang } from "@/lib/marketing/i18n";
 
@@ -159,7 +158,7 @@ export function HowToJsonLd({
   );
 }
 
-export function FaqJsonLd({ items, locale = "en" }: { items: Faq[]; locale?: Locale }) {
+export function FaqJsonLd({ items, locale = "en" }: { items: { q: string; a: string }[]; locale?: Locale }) {
   return (
     <JsonLd
       data={{
@@ -168,8 +167,8 @@ export function FaqJsonLd({ items, locale = "en" }: { items: Faq[]; locale?: Loc
         inLanguage: htmlLang(locale),
         mainEntity: items.map((it) => ({
           "@type": "Question",
-          name: it.q[locale],
-          acceptedAnswer: { "@type": "Answer", text: it.a[locale] },
+          name: it.q,
+          acceptedAnswer: { "@type": "Answer", text: it.a },
         })),
       }}
     />
