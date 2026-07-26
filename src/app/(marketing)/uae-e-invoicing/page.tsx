@@ -5,6 +5,7 @@ import { FaqList } from "@/components/marketing/faq";
 import { OrganizationJsonLd, ArticleJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { MANDATE_FAQ, REGIME_FACTS, faqText } from "@/lib/marketing/content";
 import { GUIDES } from "@/lib/marketing/guides";
+import { bilingualAlternates } from "@/lib/marketing/i18n";
 
 const MANDATE_FAQ_EN = MANDATE_FAQ.map((f) => faqText(f, "en"));
 
@@ -15,8 +16,14 @@ export const metadata: Metadata = {
   title: "UAE e-invoicing explained — the FTA mandate, PINT AE & Peppol",
   description:
     "A plain-English guide to UAE mandatory e-invoicing: Ministerial Decision 64, the Peppol 5-corner model, the PINT AE format, the Tax Data Document, and the rollout timeline — and how to be ready.",
-  alternates: { canonical: "/uae-e-invoicing" },
-  openGraph: { type: "article", title: "UAE e-invoicing explained — the FTA mandate, PINT AE & Peppol" },
+  alternates: bilingualAlternates("/uae-e-invoicing", "en"),
+  openGraph: {
+    type: "article",
+    title: "UAE e-invoicing explained — the FTA mandate, PINT AE & Peppol",
+    description: "The FTA mandate, the Peppol 5-corner model, the PINT AE format and the Tax Data Document — explained plainly.",
+    publishedTime: PUBLISHED,
+    modifiedTime: MODIFIED,
+  },
 };
 
 const TOC = [

@@ -1,6 +1,6 @@
 import { MarketingNav } from "@/components/marketing/nav";
 import { MarketingFooter } from "@/components/marketing/footer";
-import "./marketing.css";
+import "../../styles/marketing.css";
 
 // Each marketing page sets its OWN canonical (via metadata). We deliberately do
 // NOT set a layout-level canonical here — a shared canonical:"/" would silently
@@ -8,10 +8,10 @@ import "./marketing.css";
 
 export default function MarketingLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mkt min-h-dvh">
-      <MarketingNav />
+    <div className="mkt min-h-dvh" dir="ltr">
+      <MarketingNav locale="en" />
       <main>{children}</main>
-      <MarketingFooter />
+      <MarketingFooter locale="en" />
     </div>
   );
 }

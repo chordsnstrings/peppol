@@ -5,6 +5,7 @@ import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
 import { OrganizationJsonLd, SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { HOME_FAQ, faqText } from "@/lib/marketing/content";
+import { bilingualAlternates } from "@/lib/marketing/i18n";
 
 const HOME_FAQ_EN = HOME_FAQ.map((f) => faqText(f, "en"));
 
@@ -12,8 +13,11 @@ export const metadata: Metadata = {
   title: "Pricing — unlimited UAE e-invoicing from AED 299/mo",
   description:
     "Simple, flat pricing for UAE FTA e-invoicing. AED 299/month, AED 1,500/6 months, or AED 2,400/year — all with unlimited invoicing and every feature. 14-day free trial, no card required.",
-  alternates: { canonical: "/pricing" },
-  openGraph: { title: "Pricing — unlimited UAE e-invoicing from AED 299/mo" },
+  alternates: bilingualAlternates("/pricing", "en"),
+  openGraph: {
+    title: "Pricing — unlimited UAE e-invoicing from AED 299/mo",
+    description: "AED 299/month, 1,500/6 months, or 2,400/year — unlimited invoicing and every feature. 14-day free trial, no card.",
+  },
 };
 
 const INCLUDED = [

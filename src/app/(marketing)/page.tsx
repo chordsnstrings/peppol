@@ -11,6 +11,7 @@ import {
   OrganizationJsonLd, WebSiteJsonLd, SoftwareApplicationJsonLd, ServiceJsonLd, HowToJsonLd, FaqJsonLd, BreadcrumbJsonLd,
 } from "@/components/marketing/jsonld";
 import { HOME_FAQ, REGIME_FACTS, faqText } from "@/lib/marketing/content";
+import { bilingualAlternates } from "@/lib/marketing/i18n";
 
 const HOME_FAQ_EN = HOME_FAQ.map((f) => faqText(f, "en"));
 
@@ -18,8 +19,11 @@ export const metadata: Metadata = {
   title: "UAE e-invoicing, engineered — validate & reach the FTA",
   description:
     "Become UAE FTA e-invoicing compliant the moment your phase begins. Validate PINT AE invoices, transmit over Peppol, and prove FTA reporting — unlimited invoicing from AED 299/month. 14-day free trial, no card.",
-  alternates: { canonical: "/" },
-  openGraph: { title: "UAE e-invoicing, engineered — validate & reach the FTA" },
+  alternates: bilingualAlternates("/", "en"),
+  openGraph: {
+    title: "UAE e-invoicing, engineered — validate & reach the FTA",
+    description: "Validate PINT AE invoices, transmit over Peppol, and prove FTA reporting — unlimited invoicing from AED 299/month.",
+  },
 };
 
 const STEPS = [
@@ -203,7 +207,7 @@ export default function LandingPage() {
             </h2>
             <p className="mt-4 max-w-xl text-lg" style={{ color: "var(--on-ink-soft)" }}>
               A clean REST API and a native MCP server mean an agent or your own backend can create, validate
-              and transmit a compliant invoice programmatically. OAuth 2.1, scoped API keys, webhooks — the
+              and transmit a compliant invoice programmatically. OAuth 2.1, scoped API keys, usage metering — the
               plumbing is done.
             </p>
             <div className="mt-7 flex flex-wrap gap-3">

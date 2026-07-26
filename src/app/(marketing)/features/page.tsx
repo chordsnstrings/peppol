@@ -4,12 +4,13 @@ import { ArrowRight } from "lucide-react";
 import { FeatureGrid } from "@/components/marketing/feature-grid";
 import { OrganizationJsonLd, WebSiteJsonLd, ServiceJsonLd, ItemListJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { FEATURE_GROUPS, ALL_FEATURES } from "@/lib/marketing/content";
+import { bilingualAlternates } from "@/lib/marketing/i18n";
 
 export const metadata: Metadata = {
   title: "Features — everything for UAE FTA e-invoicing",
   description:
     "The complete ARKS feature set for UAE e-invoicing: PINT AE validation, Peppol transmission, FTA reporting with evidence bundles, receivables, Excel & accounting imports, a REST API and MCP server — unlimited invoicing on every plan.",
-  alternates: { canonical: "/features" },
+  alternates: bilingualAlternates("/features", "en"),
   openGraph: {
     title: "Features — everything for UAE FTA e-invoicing",
     description:
