@@ -7,7 +7,9 @@ import {
 import { HeroProof } from "@/components/marketing/hero-proof";
 import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
-import { OrganizationJsonLd, SoftwareApplicationJsonLd, FaqJsonLd } from "@/components/marketing/jsonld";
+import {
+  OrganizationJsonLd, WebSiteJsonLd, SoftwareApplicationJsonLd, ServiceJsonLd, HowToJsonLd, FaqJsonLd, BreadcrumbJsonLd,
+} from "@/components/marketing/jsonld";
 import { HOME_FAQ, REGIME_FACTS } from "@/lib/marketing/content";
 
 export const metadata: Metadata = {
@@ -52,8 +54,12 @@ export default function LandingPage() {
   return (
     <>
       <OrganizationJsonLd />
+      <WebSiteJsonLd />
       <SoftwareApplicationJsonLd />
+      <ServiceJsonLd />
+      <HowToJsonLd name="How to send a UAE e-invoice to the FTA" steps={STEPS.map((s) => ({ name: s.t, text: s.d }))} />
       <FaqJsonLd items={HOME_FAQ} />
+      <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }]} />
 
       {/* ---------------------------------------------------------------- HERO */}
       <section className="relative overflow-hidden">
@@ -109,9 +115,9 @@ export default function LandingPage() {
         <div className="relative border-y" style={{ borderColor: "var(--ink-line)", background: "color-mix(in srgb, var(--ink-2) 60%, transparent)" }}>
           <div className="mx-auto grid max-w-6xl grid-cols-2 gap-px px-5 md:grid-cols-4">
             {REGIME_FACTS.map((f) => (
-              <div key={f.k} className="px-2 py-5">
-                <p className="mkt-eyebrow">{f.k}</p>
-                <p className="mt-1.5 text-sm font-medium" style={{ color: "var(--on-ink)" }}>{f.v}</p>
+              <div key={f.k.en} className="px-2 py-5">
+                <p className="mkt-eyebrow">{f.k.en}</p>
+                <p className="mt-1.5 text-sm font-medium" style={{ color: "var(--on-ink)" }}>{f.v.en}</p>
               </div>
             ))}
           </div>
@@ -161,8 +167,8 @@ export default function LandingPage() {
                 Built for compliance you never have to think about.
               </h2>
             </div>
-            <Link href="/pricing" className="mkt-btn mkt-btn-ghost">
-              See pricing <ArrowRight className="size-4" />
+            <Link href="/features" className="mkt-btn mkt-btn-ghost">
+              See all features <ArrowRight className="size-4" />
             </Link>
           </div>
 
@@ -176,6 +182,11 @@ export default function LandingPage() {
                 <p className="mt-2 text-sm leading-relaxed" style={{ color: "var(--on-ink-soft)" }}>{f.d}</p>
               </div>
             ))}
+          </div>
+          <div className="mt-8 text-center">
+            <Link href="/features" className="mkt-mono text-sm" style={{ color: "var(--signal-2)" }}>
+              Explore the full feature set →
+            </Link>
           </div>
         </div>
       </section>

@@ -53,7 +53,7 @@ export default function MandateGuide() {
           </p>
           <div className="mkt-mono mt-6 flex flex-wrap gap-x-5 gap-y-1 text-[11px]" style={{ color: "var(--on-ink-faint)" }}>
             {REGIME_FACTS.map((f) => (
-              <span key={f.k}>{f.k}: <span style={{ color: "var(--on-ink-soft)" }}>{f.v}</span></span>
+              <span key={f.k.en}>{f.k.en}: <span style={{ color: "var(--on-ink-soft)" }}>{f.v.en}</span></span>
             ))}
           </div>
         </div>

@@ -6,9 +6,9 @@ import { Menu, X } from "lucide-react";
 import { LogoMark } from "@/components/shell/logo";
 
 const LINKS = [
-  { href: "/#how", label: "How it works" },
-  { href: "/#features", label: "Features" },
+  { href: "/features", label: "Features" },
   { href: "/pricing", label: "Pricing" },
+  { href: "/developers", label: "Developers" },
   { href: "/uae-e-invoicing", label: "The mandate" },
 ];
 

@@ -5,7 +5,7 @@ const COLS: { title: string; links: { href: string; label: string }[] }[] = [
   {
     title: "Product",
     links: [
-      { href: "/#features", label: "Features" },
+      { href: "/features", label: "Features" },
       { href: "/pricing", label: "Pricing" },
       { href: "/#how", label: "How it works" },
       { href: "/login", label: "Sign in" },
@@ -23,8 +23,8 @@ const COLS: { title: string; links: { href: string; label: string }[] }[] = [
   {
     title: "Developers",
     links: [
-      { href: "/#api", label: "REST API" },
-      { href: "/#api", label: "MCP for AI" },
+      { href: "/developers", label: "REST API" },
+      { href: "/developers", label: "MCP for AI" },
       { href: "/.well-known/oauth-authorization-server", label: "OAuth" },
     ],
   },

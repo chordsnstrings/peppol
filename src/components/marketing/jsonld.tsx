@@ -1,11 +1,15 @@
-import { SITE_URL, SITE_NAME } from "@/lib/site";
+import { SITE_URL, SITE_NAME, SITE_SHORT, SITE_SOCIALS, SITE_LOGO_PNG, SITE_LOGO_W, SITE_LOGO_H, SITE_AREA } from "@/lib/site";
 import { SUB_TIERS } from "@/lib/domain/billing";
+import type { Faq } from "@/lib/marketing/content";
+import type { Locale } from "@/lib/marketing/i18n";
+import { htmlLang } from "@/lib/marketing/i18n";
 
 /**
  * Structured data (schema.org) — the machine-readable substrate for Google rich
- * results and the LLM-citation play. Rendered as a single <script type="ld+json">
- * (allowed by CSP — it is not executable script). Kept factual and canonical so
- * an assistant answering "how do I comply with UAE e-invoicing" can quote it.
+ * results and the LLM-citation play. Rendered as <script type="ld+json"> (allowed
+ * by CSP — inert, not executed). Kept factual and canonical so an assistant
+ * answering "how do I comply with UAE e-invoicing" can quote it. All emitters
+ * reference the single Organization node by @id so entity signals consolidate.
  */
 
 function JsonLd({ data }: { data: unknown }) {
@@ -18,22 +22,51 @@ function JsonLd({ data }: { data: unknown }) {
   );
 }
 
+const ORG_ID = `${SITE_URL}/#org`;
+const WEBSITE_ID = `${SITE_URL}/#website`;
+
 const ORG = {
   "@type": "Organization",
-  "@id": `${SITE_URL}/#org`,
-  name: "ARKS",
+  "@id": ORG_ID,
+  name: SITE_SHORT,
   legalName: SITE_NAME,
   url: SITE_URL,
-  logo: `${SITE_URL}/icons/icon.svg`,
+  logo: {
+    "@type": "ImageObject",
+    url: `${SITE_URL}${SITE_LOGO_PNG}`,
+    width: SITE_LOGO_W,
+    height: SITE_LOGO_H,
+  },
   description:
-    "ARKS is a UAE e-invoicing platform (accredited-ASP model) that validates and transmits PINT AE invoices to the Federal Tax Authority over the Peppol network.",
-  areaServed: { "@type": "Country", name: "United Arab Emirates" },
-  knowsAbout: ["UAE e-invoicing", "Peppol", "PINT AE", "FTA compliance", "Ministerial Decision 64", "VAT"],
+    "ARKS is a UAE e-invoicing platform that validates PINT AE invoices, transmits them to the Federal Tax Authority over the Peppol network, and proves delivery and reporting.",
+  areaServed: { "@type": "Country", name: SITE_AREA },
+  knowsAbout: ["UAE e-invoicing", "Peppol", "PINT AE", "FTA compliance", "Ministerial Decision 64", "VAT", "Tax Data Document"],
+  ...(SITE_SOCIALS.length ? { sameAs: SITE_SOCIALS } : {}),
 };
 
 export function OrganizationJsonLd() {
   return <JsonLd data={{ "@context": "https://schema.org", ...ORG }} />;
 }
+
+/** WebSite node — the primary signal Google uses for the site-name in SERPs. */
+export function WebSiteJsonLd({ locale = "en" }: { locale?: Locale } = {}) {
+  return (
+    <JsonLd
+      data={{
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "@id": WEBSITE_ID,
+        url: SITE_URL,
+        name: SITE_NAME,
+        inLanguage: htmlLang(locale),
+        publisher: { "@id": ORG_ID },
+      }}
+    />
+  );
+}
+
+// Offers stay quotable for ~a year; recomputed each build (SSG).
+const PRICE_VALID_UNTIL = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 export function SoftwareApplicationJsonLd() {
   return (
@@ -54,9 +87,11 @@ export function SoftwareApplicationJsonLd() {
           price: (t.priceMinor / 100).toFixed(2),
           priceCurrency: "AED",
           url: `${SITE_URL}/pricing`,
+          availability: "https://schema.org/InStock",
+          priceValidUntil: PRICE_VALID_UNTIL,
           category: "subscription",
         })),
-        provider: { "@id": `${SITE_URL}/#org` },
+        provider: { "@id": ORG_ID },
         featureList: [
           "PINT AE UBL validation",
           "Peppol transmission",
@@ -69,16 +104,91 @@ export function SoftwareApplicationJsonLd() {
   );
 }
 
-export function FaqJsonLd({ items }: { items: { q: string; a: string }[] }) {
+/** The e-invoicing service itself (distinct from the software), with its offers. */
+export function ServiceJsonLd() {
+  return (
+    <JsonLd
+      data={{
+        "@context": "https://schema.org",
+        "@type": "Service",
+        serviceType: "E-invoicing and FTA reporting",
+        name: `${SITE_SHORT} UAE e-invoicing`,
+        areaServed: { "@type": "Country", name: SITE_AREA },
+        provider: { "@id": ORG_ID },
+        description:
+          "Validate PINT AE invoices, transmit them over the Peppol network, and report the Tax Data Document to the UAE Federal Tax Authority — with an evidence bundle per invoice.",
+        hasOfferCatalog: {
+          "@type": "OfferCatalog",
+          name: "ARKS subscription plans",
+          itemListElement: SUB_TIERS.map((t) => ({
+            "@type": "Offer",
+            name: `ARKS ${t.name}`,
+            price: (t.priceMinor / 100).toFixed(2),
+            priceCurrency: "AED",
+          })),
+        },
+      }}
+    />
+  );
+}
+
+export function HowToJsonLd({
+  name,
+  steps,
+  locale = "en",
+}: {
+  name: string;
+  steps: { name: string; text: string }[];
+  locale?: Locale;
+}) {
+  return (
+    <JsonLd
+      data={{
+        "@context": "https://schema.org",
+        "@type": "HowTo",
+        name,
+        inLanguage: htmlLang(locale),
+        step: steps.map((s, i) => ({
+          "@type": "HowToStep",
+          position: i + 1,
+          name: s.name,
+          text: s.text,
+        })),
+      }}
+    />
+  );
+}
+
+export function FaqJsonLd({ items, locale = "en" }: { items: Faq[]; locale?: Locale }) {
   return (
     <JsonLd
       data={{
         "@context": "https://schema.org",
         "@type": "FAQPage",
+        inLanguage: htmlLang(locale),
         mainEntity: items.map((it) => ({
           "@type": "Question",
-          name: it.q,
-          acceptedAnswer: { "@type": "Answer", text: it.a },
+          name: it.q[locale],
+          acceptedAnswer: { "@type": "Answer", text: it.a[locale] },
+        })),
+      }}
+    />
+  );
+}
+
+/** ItemList — for feature / integration catalog pages. */
+export function ItemListJsonLd({ name, items }: { name: string; items: { name: string; url?: string }[] }) {
+  return (
+    <JsonLd
+      data={{
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        name,
+        itemListElement: items.map((it, i) => ({
+          "@type": "ListItem",
+          position: i + 1,
+          name: it.name,
+          ...(it.url ? { url: it.url } : {}),
         })),
       }}
     />
@@ -108,12 +218,14 @@ export function ArticleJsonLd({
   path,
   datePublished,
   dateModified,
+  locale = "en",
 }: {
   headline: string;
   description: string;
   path: string;
   datePublished: string;
   dateModified: string;
+  locale?: Locale;
 }) {
   return (
     <JsonLd
@@ -122,11 +234,13 @@ export function ArticleJsonLd({
         "@type": "Article",
         headline,
         description,
+        inLanguage: htmlLang(locale),
         datePublished,
         dateModified,
         mainEntityOfPage: `${SITE_URL}${path}`,
-        author: { "@id": `${SITE_URL}/#org` },
-        publisher: { "@id": `${SITE_URL}/#org` },
+        image: `${SITE_URL}/opengraph-image`,
+        author: { "@id": ORG_ID },
+        publisher: { "@id": ORG_ID },
       }}
     />
   );
