@@ -4,6 +4,7 @@ import { ArrowRight } from "lucide-react";
 import { FaqList } from "@/components/marketing/faq";
 import { OrganizationJsonLd, ArticleJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { MANDATE_FAQ, REGIME_FACTS, faqText } from "@/lib/marketing/content";
+import { GUIDES } from "@/lib/marketing/guides";
 
 const MANDATE_FAQ_EN = MANDATE_FAQ.map((f) => faqText(f, "en"));
 
@@ -167,6 +168,27 @@ export default function MandateGuide() {
           <h2 className="mkt-display text-center text-3xl font-bold sm:text-4xl">Mandate FAQ</h2>
           <div className="mt-10">
             <FaqList items={MANDATE_FAQ_EN} />
+          </div>
+        </div>
+      </section>
+
+      {/* go deeper — pillar → spoke internal links */}
+      <section className="border-t" style={{ borderColor: "var(--ink-line)", background: "var(--ink-2)" }}>
+        <div className="mx-auto max-w-6xl px-5 py-14">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="mkt-eyebrow">Go deeper</p>
+              <h2 className="mkt-display mt-3 text-2xl font-bold sm:text-3xl">Detailed guides</h2>
+            </div>
+            <Link href="/guides" className="mkt-btn mkt-btn-ghost">All guides <ArrowRight className="size-4" /></Link>
+          </div>
+          <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {GUIDES.filter((g) => g.slug !== "glossary").map((g) => (
+              <Link key={g.slug} href={`/guides/${g.slug}`} className="mkt-card rounded-2xl border p-5" style={{ borderColor: "var(--ink-line)", background: "var(--ink)" }}>
+                <p className="mkt-display font-bold">{g.h1}</p>
+                <p className="mt-1 text-sm" style={{ color: "var(--on-ink-soft)" }}>{g.description}</p>
+              </Link>
+            ))}
           </div>
         </div>
       </section>

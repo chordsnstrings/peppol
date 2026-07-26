@@ -16,9 +16,18 @@ const COLS: { title: string; links: { href: string; label: string }[] }[] = [
     title: "Compliance",
     links: [
       { href: "/uae-e-invoicing", label: "The UAE mandate" },
-      { href: "/uae-e-invoicing#pint-ae", label: "PINT AE format" },
-      { href: "/uae-e-invoicing#timeline", label: "Rollout timeline" },
-      { href: "/uae-e-invoicing#faq", label: "FTA FAQ" },
+      { href: "/guides/ministerial-decision-64", label: "Ministerial Decision 64" },
+      { href: "/guides/pint-ae-format", label: "PINT AE format" },
+      { href: "/guides/peppol-5-corner-model", label: "Peppol 5-corner model" },
+    ],
+  },
+  {
+    title: "Guides",
+    links: [
+      { href: "/guides", label: "All guides" },
+      { href: "/guides/readiness-checklist", label: "Readiness checklist" },
+      { href: "/guides/tax-data-document", label: "Tax Data Document" },
+      { href: "/guides/glossary", label: "Glossary" },
     ],
   },
   {
@@ -34,7 +43,7 @@ const COLS: { title: string; links: { href: string; label: string }[] }[] = [
 export function MarketingFooter() {
   return (
     <footer style={{ background: "var(--ink)", borderTop: "1px solid var(--ink-line)" }}>
-      <div className="mx-auto grid max-w-6xl gap-10 px-5 py-14 md:grid-cols-[1.4fr_1fr_1fr_1fr]">
+      <div className="mx-auto grid max-w-6xl gap-10 px-5 py-14 md:grid-cols-[1.4fr_repeat(4,1fr)]">
         <div>
           <div className="flex items-center gap-2.5">
             <LogoMark size={30} />

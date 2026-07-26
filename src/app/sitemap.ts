@@ -1,6 +1,7 @@
 import type { MetadataRoute } from "next";
 import { SITE_URL } from "@/lib/site";
 import { INTEGRATIONS } from "@/lib/marketing/integrations";
+import { GUIDES } from "@/lib/marketing/guides";
 
 /** Public, indexable routes only — the app surface stays out of the sitemap. */
 export default function sitemap(): MetadataRoute.Sitemap {
@@ -12,6 +13,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { path: "/connect", priority: 0.8, changeFrequency: "weekly" },
     { path: "/developers", priority: 0.8, changeFrequency: "weekly" },
     { path: "/uae-e-invoicing", priority: 0.8, changeFrequency: "monthly" },
+    { path: "/guides", priority: 0.7, changeFrequency: "weekly" },
+    ...GUIDES.map((g) => ({ path: `/guides/${g.slug}`, priority: 0.7, changeFrequency: "monthly" as const })),
     ...INTEGRATIONS.map((i) => ({ path: `/connect/${i.slug}`, priority: 0.7, changeFrequency: "monthly" as const })),
     { path: "/signup", priority: 0.6, changeFrequency: "monthly" },
   ];

@@ -10,7 +10,7 @@ const LINKS = [
   { href: "/pricing", label: "Pricing" },
   { href: "/connect", label: "Integrations" },
   { href: "/developers", label: "Developers" },
-  { href: "/uae-e-invoicing", label: "The mandate" },
+  { href: "/guides", label: "Guides" },
 ];
 
 export function MarketingNav() {
