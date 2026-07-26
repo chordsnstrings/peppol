@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Check, ArrowRight, ShieldCheck, Infinity as InfinityIcon, FileCheck2 } from "lucide-react";
 import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
-import { OrganizationJsonLd, SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
+import { OrganizationJsonLd, SoftwareApplicationJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { HOME_FAQ, faqText } from "@/lib/marketing/content";
 import { bilingualAlternates } from "@/lib/marketing/i18n";
 
@@ -27,7 +27,7 @@ const INCLUDED = [
   "FTA reporting + evidence bundle (UBL · TDD · timeline)",
   "Excel import & accounting-system connectors",
   "REST API + MCP server for AI agents",
-  "Team members, roles & multi-entity",
+  "Team members & multi-entity",
   "Audit log & data export, always",
 ];
 
@@ -40,9 +40,10 @@ const TRUST = [
 export default function PricingPage() {
   return (
     <>
+      {/* FAQ is shown but its FAQPage schema lives only on the canonical / (home)
+          page to avoid a duplicate rich result and a JSON-LD/visible mismatch. */}
       <OrganizationJsonLd />
       <SoftwareApplicationJsonLd />
-      <FaqJsonLd items={HOME_FAQ_EN} />
       <BreadcrumbJsonLd items={[{ name: "Home", path: "/" }, { name: "Pricing", path: "/pricing" }]} />
 
       {/* hero */}

@@ -25,15 +25,18 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { path: "/signup", priority: 0.6, changeFrequency: "monthly" },
   ];
 
+  // Absolute URL; the homepage has no trailing slash (matches its canonical).
+  const abs = (path: string) => (path === "/" ? SITE_URL : `${SITE_URL}${path}`);
+
   const entries: MetadataRoute.Sitemap = [];
   for (const r of routes) {
     const mirrored = MIRRORED.has(r.path);
     const languages = mirrored
-      ? { "en-AE": `${SITE_URL}${r.path}`, "ar-AE": `${SITE_URL}${localizedPath(r.path, "ar")}` }
+      ? { "en-AE": abs(r.path), "ar-AE": abs(localizedPath(r.path, "ar")), "x-default": abs(r.path) }
       : undefined;
     // English URL
     entries.push({
-      url: `${SITE_URL}${r.path}`,
+      url: abs(r.path),
       lastModified: now,
       changeFrequency: r.changeFrequency,
       priority: r.priority,
@@ -42,7 +45,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     // Arabic mirror URL (same alternates set)
     if (mirrored) {
       entries.push({
-        url: `${SITE_URL}${localizedPath(r.path, "ar")}`,
+        url: abs(localizedPath(r.path, "ar")),
         lastModified: now,
         changeFrequency: r.changeFrequency,
         priority: r.priority,

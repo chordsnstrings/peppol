@@ -23,7 +23,7 @@ export function faqText(f: Faq, locale: Locale) {
 /** Homepage / pricing FAQ — the conversion + reassurance set. */
 export const HOME_FAQ: Faq[] = [
   {
-    q: { en: "What is UAE e-invoicing and who does it apply to?", ar: "ما هو الفوترة الإلكترونية في الإمارات ومن يشملها؟" },
+    q: { en: "What is UAE e-invoicing and who does it apply to?", ar: "ما هي الفوترة الإلكترونية في الإمارات ومن يشملها؟" },
     a: {
       en: "The UAE Federal Tax Authority (FTA) is introducing mandatory electronic invoicing under Ministerial Decision No. 64 of 2025. Businesses exchange structured invoices through service providers over the Peppol network, and the tax data is reported to the FTA. It applies to VAT-registered businesses in phases, beginning with larger taxpayers. ARKS handles validation, transmission and reporting so you are ready regardless of your phase.",
       ar: "تطبّق الهيئة الاتحادية للضرائب في الإمارات الفوترة الإلكترونية الإلزامية بموجب القرار الوزاري رقم 64 لسنة 2025. تتبادل المنشآت فواتير مُهيكلة عبر شبكة Peppol من خلال مزوّدي خدمة، وتُبلَّغ بيانات الضريبة إلى الهيئة. يسري ذلك على المنشآت المسجّلة في ضريبة القيمة المضافة على مراحل، بدءاً من كبار المكلّفين. تتولّى ARKS التحقق والإرسال والإبلاغ لتكون جاهزاً في أي مرحلة.",
@@ -61,7 +61,7 @@ export const HOME_FAQ: Faq[] = [
     q: { en: "Can I connect my accounting or e-commerce system?", ar: "هل يمكنني ربط نظام المحاسبة أو المتجر الإلكتروني لديّ؟" },
     a: {
       en: "Yes. ARKS imports from Excel and connects with common accounting and e-commerce systems — Zoho Books, QuickBooks, Xero, Odoo, Shopify and WooCommerce — and offers a REST API plus an MCP server so AI agents and custom software can create and send invoices directly.",
-      ar: "نعم. تستورد ARKS من Excel وتتكامل مع أنظمة المحاسبة والتجارة الإلكترونية الشائعة — Zoho Books وQuickBooks وXero وOdoo وShopify وWooCommerce — كما توفّر واجهة REST وخادم MCP لتتمكّن وكلاء الذكاء الاصطناعي والبرمجيات المخصّصة من إنشاء الفواتير وإرسالها مباشرة.",
+      ar: "نعم. تستورد ARKS من Excel وتتكامل مع أنظمة المحاسبة والتجارة الإلكترونية الشائعة — Zoho Books وQuickBooks وXero وOdoo وShopify وWooCommerce — كما توفّر واجهة REST وخادم MCP ليتمكّن وكلاء الذكاء الاصطناعي والبرمجيات المخصّصة من إنشاء الفواتير وإرسالها مباشرة.",
     },
   },
   {
@@ -167,7 +167,7 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
       { icon: "Wallet", title: { en: "Accounts receivable", ar: "الذمم المدينة" }, desc: { en: "Aging buckets, DSO, outstanding and overdue — see exactly what to chase.", ar: "شرائح تقادم وDSO والمستحق والمتأخر — لترى بدقة ما يجب متابعته." } },
       { icon: "CreditCard", title: { en: "Payment links", ar: "روابط الدفع" }, desc: { en: "Attach a hosted pay link to any invoice and reconcile the payment automatically.", ar: "أرفق رابط دفع مستضاف بأي فاتورة وسوّ الدفعة تلقائياً." } },
       { icon: "Repeat", title: { en: "Recurring invoices", ar: "الفواتير المتكررة" }, desc: { en: "Templates on weekly, monthly, quarterly or yearly cadence, with optional auto-send.", ar: "قوالب بجدولة أسبوعية أو شهرية أو ربع سنوية أو سنوية، مع إرسال تلقائي اختياري." } },
-      { icon: "BellRing", title: { en: "Reminders & chasing", ar: "التذكيرات والمتابعة" }, desc: { en: "Nudge overdue customers and mark payments received — keep DSO down without the busywork.", ar: "نبّه العملاء المتأخرين وسجّل الدفعات المستلمة — لخفض DSO دون عناء." } },
+      { icon: "BellRing", title: { en: "Overdue chasing", ar: "متابعة المتأخرات" }, desc: { en: "Surface overdue invoices, send a pay link, and mark payments received — keep DSO down.", ar: "أبرِز الفواتير المتأخرة، وأرسل رابط دفع، وسجّل الدفعات المستلمة — لخفض DSO." } },
     ],
   },
   {

@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Check, ArrowLeft, ShieldCheck, Infinity as InfinityIcon, FileCheck2 } from "lucide-react";
 import { PricingCards } from "@/components/marketing/pricing-cards";
 import { FaqList } from "@/components/marketing/faq";
-import { OrganizationJsonLd, WebSiteJsonLd, SoftwareApplicationJsonLd, FaqJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
+import { OrganizationJsonLd, WebSiteJsonLd, SoftwareApplicationJsonLd, BreadcrumbJsonLd } from "@/components/marketing/jsonld";
 import { HOME_FAQ, faqText } from "@/lib/marketing/content";
 import { bilingualAlternates } from "@/lib/marketing/i18n";
 
@@ -24,7 +24,7 @@ const INCLUDED = [
   "إبلاغ الهيئة + حزمة أدلة (UBL · TDD · سجل)",
   "استيراد Excel وموصّلات أنظمة المحاسبة",
   "واجهة REST + خادم MCP لوكلاء الذكاء الاصطناعي",
-  "أعضاء فريق وأدوار ومنشآت متعددة",
+  "أعضاء فريق ومنشآت متعددة",
   "سجل تدقيق وتصدير للبيانات، دائماً",
 ];
 
@@ -40,7 +40,6 @@ export default function ArPricingPage() {
       <OrganizationJsonLd />
       <WebSiteJsonLd locale="ar" />
       <SoftwareApplicationJsonLd />
-      <FaqJsonLd items={FAQ_AR} locale="ar" />
       <BreadcrumbJsonLd items={[{ name: "الرئيسية", path: "/ar" }, { name: "الأسعار", path: "/ar/pricing" }]} />
 
       <section className="relative overflow-hidden">

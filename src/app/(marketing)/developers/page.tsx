@@ -20,7 +20,7 @@ const CAPS = [
   { icon: KeyRound, t: "OAuth 2.1", d: "Discovery, dynamic client registration, auth-code + PKCE and rotating refresh tokens for secure agent sign-in." },
   { icon: ShieldCheck, t: "Scoped API keys", d: "arks_live_ keys, shown once, SHA-256 hashed, org-scoped and revocable, with a last-used stamp." },
   { icon: Gauge, t: "Usage metering", d: "Query billable exchanges against your allowance programmatically." },
-  { icon: Webhook, t: "Verified webhooks", d: "HMAC-verified gateway and payment callbacks with replay protection keep your state in sync." },
+  { icon: Webhook, t: "Signed gateway callbacks", d: "HMAC-verified gateway and payment callbacks with replay protection keep your state in sync." },
 ];
 
 const MCP_TOOLS = [
