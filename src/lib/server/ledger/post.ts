@@ -57,6 +57,15 @@ export interface PostInput {
   bookCode?: string;
   entryDate: Date | string;
   memo?: string;
+  /**
+   * Post into a named period rather than the one the date falls in.
+   *
+   * The year-end adjustment period deliberately overlaps the last trading
+   * month — that is what makes it an adjustment period — so a date alone
+   * cannot say which of the two an entry belongs to. Only a year-end close
+   * should need this; everything else is answered by the date.
+   */
+  periodId?: string;
   /** manual | invoice | bill | payment | bank | payroll | depreciation | fx */
   source?: string;
   sourceType?: string;
@@ -136,8 +145,8 @@ function rethrowLedgerErrors(e: unknown): never {
 export async function post(input: PostInput) {
   const {
     orgId, entityId, bookCode = "PRIMARY", entryDate, memo, source = "manual",
-    sourceType, sourceId, externalKey, reversalOfId, settlesId, actorType = "HUMAN", actorId,
-    series = "GJ", lines,
+    sourceType, sourceId, externalKey, reversalOfId, settlesId, periodId,
+    actorType = "HUMAN", actorId, series = "GJ", lines,
   } = input;
 
   if (!lines || lines.length < 2) throw new LedgerError("A journal entry needs at least two lines.");
@@ -157,11 +166,21 @@ export async function post(input: PostInput) {
     const book = await tx.book.findFirst({ where: { orgId, entityId, code: bookCode } });
     if (!book) throw new LedgerError(`No book "${bookCode}" for this entity. Set up the chart of accounts first.`);
 
-    const period = await tx.accountingPeriod.findFirst({
-      where: { orgId, entityId, startsOn: { lte: date }, endsOn: { gte: date } },
-    });
+    const period = periodId
+      ? await tx.accountingPeriod.findFirst({ where: { id: periodId, orgId, entityId } })
+      : // Ordinary postings never land in an adjustment period by accident: it
+        // overlaps the last trading month, so ordering puts the real month
+        // first and a caller has to ask for the other one by name.
+        await tx.accountingPeriod.findFirst({
+          where: { orgId, entityId, startsOn: { lte: date }, endsOn: { gte: date } },
+          orderBy: [{ isAdjustment: "asc" }, { seq: "asc" }],
+        });
     if (!period) {
-      throw new LedgerError(`No accounting period covers ${date.toISOString().slice(0, 10)}. Open the fiscal year first.`);
+      throw new LedgerError(
+        periodId
+          ? "That accounting period does not exist for this entity."
+          : `No accounting period covers ${date.toISOString().slice(0, 10)}. Open the fiscal year first.`,
+      );
     }
     if (period.status !== "open") {
       throw new LedgerError(`Period ${period.label} is ${period.status.replace("_", " ")}. Post to an open period, or reopen it.`);

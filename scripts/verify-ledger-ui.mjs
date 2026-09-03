@@ -239,6 +239,7 @@ try {
     ["/accounting/statements", "Financial statements"],
     ["/accounting/bank", "Bank reconciliation"],
     ["/accounting/assets", "Fixed assets"],
+    ["/accounting/year-end", "Year end"],
   ]) {
     await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("h1", { timeout: 20000 });
@@ -315,6 +316,19 @@ try {
   await page.waitForSelector('[data-testid="depreciation-result"]', { timeout: 20000 });
   const depResult = await page.locator('[data-testid="depreciation-result"]').innerText();
   check("running depreciation reports what it did", depResult.length > 10, depResult.slice(0, 90));
+
+  // Year end: the screen has to show what closing would do, and refuse while
+  // the year is still trading, before anyone can press the button.
+  await page.goto(`${B}/accounting/year-end`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="close-year"]', { timeout: 20000 });
+  const closeBtn = page.locator('[data-testid="close-year"]');
+  check("closing is blocked while the year is still trading",
+    (await closeBtn.getAttribute("aria-disabled")) === "true");
+  const blockerText = await page.locator('[data-testid="close-blocker"]').first().innerText();
+  check("and the reason is on the page, not hidden", /still open/i.test(blockerText), blockerText.slice(0, 80));
+
+  const lockBox = page.locator('[data-testid="lock-periods"]');
+  check("locking periods is opt-in, not the default", (await lockBox.isChecked()) === false);
 
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });

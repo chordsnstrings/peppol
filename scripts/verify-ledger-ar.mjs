@@ -287,6 +287,52 @@ check('an asset cannot be disposed of twice', r.status === 422, `HTTP ${r.status
 r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
 check('the trial balance ties through purchase, depreciation and disposal', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
 
+console.log('\nYEAR END');
+r = await call('GET', `/api/ledger/close?entityId=${ENT}&fiscalYear=2026`);
+check('the close is blocked while the year is still trading', (r.body?.blockers ?? []).length > 0,
+  String(r.body?.blockers?.[0]).slice(0, 70));
+const profitBefore = r.body?.netProfitMinor;
+check('and it says what the result would be', typeof profitBefore === 'string', `net ${profitBefore}`);
+
+// Hard-close every trading month, which is what a real year end requires.
+r = await call('GET', `/api/ledger/periods?entityId=${ENT}`);
+const months = (r.body?.periods ?? []).filter(p => !p.isAdjustment && p.label.startsWith('2026'));
+for (const m of months) {
+  if (m.status === 'open') await call('PATCH', '/api/ledger/periods', { periodId: m.id, status: 'soft_closed' });
+  await call('PATCH', '/api/ledger/periods', { periodId: m.id, status: 'hard_closed' });
+}
+r = await call('GET', `/api/ledger/close?entityId=${ENT}&fiscalYear=2026`);
+check('once the months are closed, nothing blocks it', (r.body?.blockers ?? []).length === 0, JSON.stringify(r.body?.blockers ?? []));
+check('and the adjustment period is not treated as a blocker',
+  !JSON.stringify(r.body?.blockers ?? []).includes('ADJ'), 'adjustment period excluded');
+
+r = await call('POST', '/api/ledger/close', { entityId: ENT, fiscalYear: '2026', action: 'close' });
+check('the year closes', r.status === 200 && /^CL-/.test(r.body?.reference ?? ''), `${r.body?.reference}, ${r.body?.accountsClosed} accounts`);
+const closedProfit = r.body?.netProfitMinor;
+
+r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2026-01-01&to=2026-12-31`);
+check('the profit and loss is left at zero for the closed year', r.body?.profitAndLoss?.netProfitMinor === '0',
+  `net ${r.body?.profitAndLoss?.netProfitMinor}`);
+check('the result now sits in posted retained earnings',
+  r.body?.balanceSheet?.equity?.lines?.find(l => l.code === '3900')?.presentedMinor === closedProfit,
+  `3900 holds ${r.body?.balanceSheet?.equity?.lines?.find(l => l.code === '3900')?.presentedMinor}, result was ${closedProfit}`);
+check('and the balance sheet still balances', r.body?.balanceSheet?.balanced === true, `diff ${r.body?.balanceSheet?.differenceMinor}`);
+
+r = await call('POST', '/api/ledger/close', { entityId: ENT, fiscalYear: '2026', action: 'close' });
+check('closing twice does nothing the second time', r.body?.alreadyClosed === true, `${r.body?.reference}`);
+
+r = await call('POST', '/api/ledger/close', { entityId: ENT, fiscalYear: '2026', action: 'open-next' });
+check('the next year opens with its periods', r.status === 200 && r.body?.label === '2027' && r.body?.periods === 13,
+  `${r.body?.label}, ${r.body?.periods} periods`);
+
+r = await call('POST', '/api/ledger/close', { entityId: ENT, fiscalYear: '2026', action: 'open-next' });
+check('opening it twice does not create it twice', r.body?.created === false, `created ${r.body?.created}`);
+
+r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2027-01-01&to=2027-12-31`);
+check('the new year starts clean and the balance sheet carries itself',
+  r.body?.profitAndLoss?.netProfitMinor === '0' && r.body?.balanceSheet?.balanced === true,
+  `net ${r.body?.profitAndLoss?.netProfitMinor}, balanced ${r.body?.balanceSheet?.balanced}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';

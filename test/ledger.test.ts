@@ -49,6 +49,32 @@ d("ledger", () => {
     expect(ar?.isControl).toBe(true);
   });
 
+  it("never lands an ordinary posting in the adjustment period by accident", async () => {
+    // The adjustment period shares its last day with December on purpose. A
+    // posting dated that day belongs to December unless a caller says
+    // otherwise, or a routine year-end sale would silently become an
+    // adjustment.
+    const e = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-12-31", source: "manual",
+      memo: "New year's eve sale",
+      lines: [{ account: "1010", debit: 1_000 }, { account: "4000", credit: 1_000 }],
+    });
+    const entry = await db.journalEntry.findUnique({ where: { id: e.id }, include: { period: true } });
+    expect(entry?.period.isAdjustment).toBe(false);
+    expect(entry?.period.label).toBe("2026-12");
+  });
+
+  it("posts into the adjustment period when asked for it by name", async () => {
+    const adj = await db.accountingPeriod.findFirst({ where: { orgId: ORG, entityId: ENT, isAdjustment: true } });
+    const e = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-12-31", source: "manual", periodId: adj!.id,
+      memo: "Year-end adjustment",
+      lines: [{ account: "1010", debit: 500 }, { account: "4000", credit: 500 }],
+    });
+    const entry = await db.journalEntry.findUnique({ where: { id: e.id }, include: { period: true } });
+    expect(entry?.period.isAdjustment).toBe(true);
+  });
+
   it("posts a balanced sale with VAT and returns a numbered entry", async () => {
     const e = await post({
       orgId: ORG, entityId: ENT, entryDate: "2026-01-15", source: "invoice",

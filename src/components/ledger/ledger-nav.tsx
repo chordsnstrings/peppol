@@ -15,6 +15,7 @@ const TABS = [
   { href: "/accounting/statements", label: "Statements" },
   { href: "/accounting/trial-balance", label: "Trial balance" },
   { href: "/accounting/periods", label: "Periods" },
+  { href: "/accounting/year-end", label: "Year end" },
 ];
 
 export function LedgerNav() {
