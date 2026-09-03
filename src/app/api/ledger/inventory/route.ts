@@ -2,7 +2,9 @@ import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
-import { addItem, receive, issue, adjust, stockValuation, itemHistory } from "@/lib/server/ledger/inventory";
+import {
+  addItem, receive, issue, adjust, assessNrv, setCostMethod, stockValuation, itemHistory,
+} from "@/lib/server/ledger/inventory";
 
 export const runtime = "nodejs";
 
@@ -16,29 +18,31 @@ export async function GET(req: Request) {
 
     const sku = url.searchParams.get("sku");
     if (sku) return json(await itemHistory({ orgId, entityId, sku }));
-    return json(await stockValuation({ orgId, entityId }));
+    return json(await stockValuation({ orgId, entityId, asOf: url.searchParams.get("asOf") ?? undefined }));
   } catch (e) {
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
 }
 
-/** Add an item, or move stock. */
+/** Add an item, move stock, assess its net realisable value, or change how it is costed. */
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
-      action?: "add" | "receive" | "issue" | "count";
+      action?: "add" | "receive" | "issue" | "count" | "nrv" | "method";
       entityId?: string;
       sku?: string;
       name?: string;
       nameAr?: string;
       uom?: string;
+      costMethod?: string;
       movedOn?: string;
       quantityMilli?: number | string;
       valueMinor?: number | string;
       countedMilli?: number | string;
+      nrvMinor?: number | string | null;
       contraAccount?: string;
       reference?: string;
       memo?: string;
@@ -50,9 +54,9 @@ export async function POST(req: Request) {
         if (!b.sku || !b.name) return json({ error: "An item needs a SKU and a name." }, 400);
         const item = await addItem({
           orgId, entityId: b.entityId,
-          item: { sku: b.sku, name: b.name, nameAr: b.nameAr, uom: b.uom },
+          item: { sku: b.sku, name: b.name, nameAr: b.nameAr, uom: b.uom, costMethod: b.costMethod },
         });
-        return json({ item: { sku: item.sku, name: item.name, uom: item.uom } });
+        return json({ item: { sku: item.sku, name: item.name, uom: item.uom, costMethod: item.costMethod } });
       }
 
       case "receive":
@@ -80,8 +84,24 @@ export async function POST(req: Request) {
         }
         return json(await adjust({
           orgId, entityId: b.entityId, sku: b.sku, movedOn: b.movedOn,
-          countedMilli: b.countedMilli, reason: b.memo, actorId: userId,
+          countedMilli: b.countedMilli, reference: b.reference, reason: b.memo, actorId: userId,
         }));
+
+      case "nrv":
+        // nrvMinor is deliberately not defaulted: nobody having assessed the
+        // item and somebody assessing it at nothing are different facts, and
+        // the module refuses to guess which one an empty field meant.
+        if (!b.sku || !b.movedOn) {
+          return json({ error: "An assessment needs an item and the date it was made." }, 400);
+        }
+        return json(await assessNrv({
+          orgId, entityId: b.entityId, sku: b.sku, on: b.movedOn,
+          nrvMinor: b.nrvMinor, memo: b.memo, actorId: userId,
+        }));
+
+      case "method":
+        if (!b.sku || !b.costMethod) return json({ error: "Say which item, and which cost method." }, 400);
+        return json(await setCostMethod({ orgId, entityId: b.entityId, sku: b.sku, costMethod: b.costMethod }));
 
       default:
         return json({ error: "Unknown action." }, 400);
