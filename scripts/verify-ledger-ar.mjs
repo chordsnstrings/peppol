@@ -344,8 +344,13 @@ check('the year closes', r.status === 200 && /^CL-/.test(r.body?.reference ?? ''
 const closedProfit = r.body?.netProfitMinor;
 
 r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2026-01-01&to=2026-12-31`);
-check('the profit and loss is left at zero for the closed year', r.body?.profitAndLoss?.netProfitMinor === '0',
-  `net ${r.body?.profitAndLoss?.netProfitMinor}`);
+// Closing a year is a transfer into equity, not trading, so it is taken back
+// out of the profit and loss. It used to be left in, which read as nil for
+// every closed year — and a corporate tax computation run afterwards then
+// found no profit and charged no tax.
+check('the profit and loss still reports the year it closed',
+  r.body?.profitAndLoss?.netProfitMinor === closedProfit,
+  `net ${r.body?.profitAndLoss?.netProfitMinor}, result was ${closedProfit}`);
 check('the result now sits in posted retained earnings',
   r.body?.balanceSheet?.equity?.lines?.find(l => l.code === '3900')?.presentedMinor === closedProfit,
   `3900 holds ${r.body?.balanceSheet?.equity?.lines?.find(l => l.code === '3900')?.presentedMinor}, result was ${closedProfit}`);

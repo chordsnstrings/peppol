@@ -280,4 +280,49 @@ d("ledger", () => {
       lines: [{ account: "1000" } as never, { account: "4000", credit: 100 }],
     })).rejects.toThrow(LedgerError);
   });
+
+  it("cannot be walked around by changing an entry's source after its lines are written", async () => {
+    // The route the guards left open: a draft entry with a subledger source
+    // takes control-account lines legitimately, is then made manual while
+    // still a draft, and is posted. The line guard read the source when the
+    // line was written and it was true then; nothing re-checked afterwards.
+    const book = await db.book.findFirstOrThrow({ where: { orgId: ORG, entityId: ENT } });
+    const period = await db.accountingPeriod.findFirstOrThrow({
+      where: { orgId: ORG, entityId: ENT, status: "open" },
+    });
+    const ar = await db.account.findFirstOrThrow({ where: { orgId: ORG, entityId: ENT, code: "1100" } });
+    const bank = await db.account.findFirstOrThrow({ where: { orgId: ORG, entityId: ENT, code: "1010" } });
+
+    const draft = await db.journalEntry.create({
+      data: {
+        orgId: ORG, entityId: ENT, bookId: book.id, periodId: period.id,
+        series: "GJ", number: `X-${Date.now()}`, entryDate: new Date("2026-01-20"),
+        status: "draft", source: "invoice",
+        lines: {
+          create: [
+            { orgId: ORG, lineNo: 1, accountId: ar.id, txnCurrency: "AED", txnAmountMinor: 1_000n,
+              functionalCurrency: "AED", functionalAmountMinor: 1_000n },
+            { orgId: ORG, lineNo: 2, accountId: bank.id, txnCurrency: "AED", txnAmountMinor: -1_000n,
+              functionalCurrency: "AED", functionalAmountMinor: -1_000n },
+          ],
+        },
+      },
+    });
+
+    // Step three is now refused, at the moment the entry becomes manual.
+    await expect(
+      db.journalEntry.update({ where: { id: draft.id }, data: { source: "manual" } }),
+    ).rejects.toThrow(/1100 is a control account/);
+
+    // And again at the moment of posting, which is the last chance to catch it.
+    await db.$executeRawUnsafe(`UPDATE "JournalEntry" SET "source" = 'manual' WHERE id = '${draft.id}' AND false`);
+    await expect(
+      db.$executeRawUnsafe(
+        `UPDATE "JournalEntry" SET "source" = 'manual', "status" = 'posted' WHERE id = '${draft.id}'`,
+      ),
+    ).rejects.toThrow(/1100 is a control account/);
+
+    await db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "entryId" = '${draft.id}'`);
+    await db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE id = '${draft.id}'`);
+  });
 });

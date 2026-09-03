@@ -17,11 +17,24 @@ interface Entry {
 
 export default function JournalRegister() {
   const entityId = useEntityId();
-  const posted = useSearchParams().get("posted");
+  const params = useSearchParams();
+  const posted = params.get("posted");
+  // A finding, a report or a note has to be able to point at one entry. Without
+  // this the register could only be linked to as a whole, and an entry from
+  // March was unreachable from anywhere at all.
+  const wanted = params.get("entry");
   const { data, error, loading, reload } = useLedgerQuery<{ entries: Entry[] }>(
     entityId ? `/api/ledger/journals?entityId=${entityId}&limit=100` : null,
   );
   const [open, setOpen] = React.useState<string | null>(null);
+
+  // Open and scroll to the entry the link named, once it has actually arrived.
+  React.useEffect(() => {
+    if (!wanted) return;
+    setOpen(wanted);
+    const row = document.getElementById(`entry-${wanted}`);
+    row?.scrollIntoView({ block: "center" });
+  }, [wanted, data]);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
 
@@ -91,7 +104,10 @@ export default function JournalRegister() {
                   const expanded = open === e.id;
                   return (
                     <React.Fragment key={e.id}>
-                      <tr>
+                      <tr
+                        id={`entry-${e.id}`}
+                        style={e.id === wanted ? { outline: "2px solid var(--sw-accent)", outlineOffset: "-2px" } : undefined}
+                      >
                         <td>
                           <button
                             type="button"

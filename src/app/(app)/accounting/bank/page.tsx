@@ -70,7 +70,7 @@ export default function BankPage() {
         statement: {
           format: string;
           lines: { postedOn: string; description: string; reference?: string; amountMinor: string; balanceMinor?: string }[];
-          proof: { provable: boolean; agrees: boolean; differenceMinor: string };
+          proof: { provable: boolean; foots: boolean; differenceMinor: string; note: string };
           warnings: string[];
         };
       }>("/api/ledger/bank-import", { method: "POST", body: JSON.stringify({ text: paste }) });
@@ -82,10 +82,10 @@ export default function BankPage() {
       // truncated somewhere between the bank and here. Importing it anyway
       // would put a reconciliation difference into the books that nobody could
       // later explain, so it stops at the door.
-      if (st.proof.provable && !st.proof.agrees) {
+      if (st.proof.provable && !st.proof.foots) {
         setError(
           `That statement does not foot: its lines and its own opening and closing balances differ by ` +
-            `${toInput(st.proof.differenceMinor.replace("-", ""))}. It has probably been truncated — ` +
+            `${toInput(st.proof.differenceMinor.replace("-", "")) || st.proof.differenceMinor}. It has probably been truncated — ` +
             `re-export it, or open it on the import screen where the difference can be seen line by line.`,
         );
         return;
@@ -101,7 +101,11 @@ export default function BankPage() {
         );
       }
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "That statement could not be read.");
+      // A refusal here is usually answerable — most often the date order cannot
+      // be settled from the file alone — and the import screen is where it can
+      // be answered. Sending somebody there beats leaving them at a dead end.
+      const why = e instanceof ApiError ? e.message : "That statement could not be read.";
+      setError(`${why} The import screen can set the date order and show every parsed row before anything is written down.`);
     } finally {
       setBusy(null);
     }
@@ -119,7 +123,7 @@ export default function BankPage() {
       />
 
       {error && <ErrorNote>{error}</ErrorNote>}
-      {note && <div className="sw-note mb-3" role="status">{note}</div>}
+      {note && <div className="sw-note mb-3" role="status" data-testid="bank-result">{note}</div>}
       {q.error && <ErrorNote>{q.error}</ErrorNote>}
       {q.loading && !st && <Loading />}
 

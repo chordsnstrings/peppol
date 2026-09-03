@@ -285,11 +285,25 @@ try {
   check("import is blocked until there is something to import",
     (await importBtn.getAttribute("aria-disabled")) === "true");
 
+  // Every day in this file is 12 or under, so nothing in it says whether it is
+  // day-first or month-first. Guessing would put every line in the wrong month
+  // without a word, so it is refused — and the refusal has to point somewhere.
   await page.fill('textarea[aria-label="Bank statement to import"]',
     "Date,Description,Reference,Amount,Balance\n05/02/2026,Opening transfer,FT900,1500.00,1500.00\n07/02/2026,Card fee,,-25.50,1474.50");
   await page.click('[data-testid="import-statement"]');
-  await page.waitForSelector("text=Imported 2 lines", { timeout: 20000 });
-  ok("a pasted dd/mm/yyyy statement imports");
+  await page.waitForTimeout(1500);
+  const ambiguous = await page.locator('[role="alert"], .sw-error, .sw-note').allInnerTexts();
+  check("an unreadable date order is refused rather than guessed",
+    ambiguous.some((t) => /date|order|import screen/i.test(t)),
+    (ambiguous[0] ?? "nothing said").slice(0, 90));
+
+  // The same file with a day above 12 settles it, and imports.
+  await page.fill('textarea[aria-label="Bank statement to import"]',
+    "Date,Description,Reference,Amount,Balance\n05/02/2026,Opening transfer,FT900,1500.00,1500.00\n27/02/2026,Card fee,,-25.50,1474.50");
+  await page.click('[data-testid="import-statement"]');
+  await page.waitForSelector('[data-testid="bank-result"]', { timeout: 20000 });
+  const importNote = (await page.locator("body").innerText()).match(/Read \d+ lines? as \w+ and imported \d+[^.]*/);
+  check("a statement whose date order can be settled imports", Boolean(importNote), importNote?.[0]?.slice(0, 90) ?? "no result line");
 
   const verdict = await page.locator('[data-testid="rec-verdict"]').innerText();
   check("the reconciliation states its position in words", verdict.length > 20, verdict.slice(0, 80));
@@ -415,9 +429,13 @@ try {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check("no horizontal page scroll on a phone", overflow <= 1, `${overflow}px overflow`);
 
-  // The onboarding page probes /api/auth/me before anyone is signed in; that
-  // 401 is the expected answer, not a fault.
-  const realErrors = consoleErrors.filter((e) => !/status of 401/.test(e));
+  // Two answers are expected rather than faults, and the browser logs both as
+  // errors: the onboarding page probes /api/auth/me before anyone is signed
+  // in, and the checks above deliberately hand the importer a file it cannot
+  // read. A 422 is the product saying no and explaining why — which the page
+  // then shows — so counting it as a defect would mean the only way to pass
+  // this check is never to refuse anything.
+  const realErrors = consoleErrors.filter((e) => !/status of (401|422)/.test(e));
   check("no console errors during the whole flow", realErrors.length === 0, realErrors.slice(0, 3).join(" | ") || `(${consoleErrors.length} expected pre-auth 401s ignored)`);
 } catch (e) {
   bad("run", e.message);
