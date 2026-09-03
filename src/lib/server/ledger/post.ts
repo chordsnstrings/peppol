@@ -194,14 +194,20 @@ export async function post(input: PostInput) {
 
     // Resolve dimension codes → value ids.
     const dimPairs = lines.flatMap((l) => Object.entries(l.dimensions ?? {}));
-    const dimValues = new Map<string, { dimensionId: string; valueId: string }>();
+    const dimValues = new Map<string, { dimensionId: string; valueId: string; status: string; name: string }>();
     if (dimPairs.length) {
       const dims = await tx.dimension.findMany({
         where: { orgId, code: { in: [...new Set(dimPairs.map(([d]) => d))] } },
         include: { values: true },
       });
       for (const d of dims) {
-        for (const v of d.values) dimValues.set(`${d.code}:${v.code}`, { dimensionId: d.id, valueId: v.id });
+        // Archived values are still resolvable, so a posting can be refused by
+        // name rather than reported as an unknown value — "SITE_A is closed" is
+        // a different problem from "there is no SITE_A", and telling someone
+        // the wrong one sends them to create a duplicate.
+        for (const v of d.values) {
+          dimValues.set(`${d.code}:${v.code}`, { dimensionId: d.id, valueId: v.id, status: v.status, name: v.name });
+        }
       }
       const known = new Set(dims.map((x) => x.code));
       for (const [d, v] of dimPairs) {
@@ -213,10 +219,21 @@ export async function post(input: PostInput) {
               `Create it before posting against it, or check the spelling.`,
           );
         }
-        if (!dimValues.has(`${d}:${v}`)) {
-          const options = dims.find((x) => x.code === d)?.values.map((x) => x.code).slice(0, 6) ?? [];
+        const found = dimValues.get(`${d}:${v}`);
+        if (!found) {
+          const options = dims
+            .find((x) => x.code === d)?.values.filter((x) => x.status === "active").map((x) => x.code).slice(0, 6) ?? [];
           throw new LedgerError(
             `"${v}" is not a value of ${d}.` + (options.length ? ` The ones that exist are ${options.join(", ")}.` : ""),
+          );
+        }
+        // An archived value is a closed cost centre or a finished job. Letting
+        // a late posting land on one is how cost quietly arrives against work
+        // that was reported as complete.
+        if (found.status !== "active") {
+          throw new LedgerError(
+            `${d} value "${v}"${found.name ? ` (${found.name})` : ""} has been closed, so nothing further can be ` +
+              `posted against it. Reopen it, or post to an open one.`,
           );
         }
       }

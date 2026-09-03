@@ -129,6 +129,33 @@ d("ledger", () => {
     });
   });
 
+  it("refuses a posting to a closed cost centre, and distinguishes it from an unknown one", async () => {
+    const dim = await db.dimension.findFirst({ where: { orgId: ORG, code: "COST_CENTRE_T" } });
+    await db.dimensionValue.create({
+      data: { orgId: ORG, dimensionId: dim!.id, code: "CLOSED_T", name: "Finished job", status: "archived" },
+    });
+
+    // A late posting to a closed job is how cost quietly arrives against work
+    // already reported as complete.
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-09", source: "manual",
+      lines: [
+        { account: "6900", debit: 1_000, dimensions: { COST_CENTRE_T: "CLOSED_T" } },
+        { account: "1010", credit: 1_000 },
+      ],
+    })).rejects.toThrow(/has been closed, so nothing further can be posted/i);
+
+    // And "closed" is a different problem from "does not exist" — saying the
+    // wrong one sends someone off to create a duplicate.
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-09", source: "manual",
+      lines: [
+        { account: "6900", debit: 1_000, dimensions: { COST_CENTRE_T: "NEVER_EXISTED" } },
+        { account: "1010", credit: 1_000 },
+      ],
+    })).rejects.toThrow(/is not a value of COST_CENTRE_T/i);
+  });
+
   it("says which of the dimension and the value it does not recognise", async () => {
     await expect(post({
       orgId: ORG, entityId: ENT, entryDate: "2026-05-08", source: "manual",

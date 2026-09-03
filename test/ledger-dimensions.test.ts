@@ -372,9 +372,18 @@ d("dimensions and cost-centre reporting", () => {
     expect(pl.expenses.grandTotalMinor).toBe("0");
     expect(pl.reconciles).toBe(true);
     expect(pl.differenceMinor).toBe("0");
-    // Not asserted, and worth knowing: reverse() in post.ts does not copy the
-    // line's dimensions the way it copies taxCode, so the reversal lands in
-    // Unallocated and leaves OPS overstated by 300,000 against a matching
-    // negative here. The total is right and the column split is not.
+    // This once documented a defect: reverse() copied taxCode but not the
+    // line's dimensions, so a reversal landed in Unallocated and left the
+    // original cost centre overstated — the total right, the column split
+    // wrong, and nothing that checked totals could see it. Fixed in post.ts,
+    // which now loads dimensions.value.dimension for the purpose, so the
+    // assertions below hold per column and not only in aggregate.
+    // Read the per-column totals by key. Written with a lookup that would be
+    // vacuous if the key were wrong, so both columns are asserted to exist
+    // first — an assertion that passes because it matched nothing is worse
+    // than no assertion.
+    expect(pl.columns.map((c) => c.key)).toEqual(expect.arrayContaining(["OPS", "UNALLOCATED"]));
+    expect(pl.expenses.totalMinor["OPS"]).toBe("0");
+    expect(pl.expenses.totalMinor["UNALLOCATED"]).toBe("0");
   });
 });
