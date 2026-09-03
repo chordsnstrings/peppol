@@ -163,9 +163,9 @@ model Payment {
 
 /// The tenant's current billing plan. One row per org.
 model OrgBilling {
-  orgId             String   @id
-  plan              String   @default("FREE_MANDATE") // legacy analytics/allowance (not the paywall)
-  allowanceOverride Int? // operator comp: overrides the plan's included exchanges
+  orgId                  String    @id
+  plan                   String    @default("FREE_MANDATE") // legacy analytics/allowance (not the paywall)
+  allowanceOverride      Int? // operator comp: overrides the plan's included exchanges
   // Subscription — the paywall. Entitlement to transmit to the FTA derives ONLY
   // from these fields (server-authoritative, never client-writable).
   subStatus              String    @default("trialing") // trialing | active | grace | canceled | none
@@ -279,31 +279,32 @@ model IntegrationToken {
   @@index([orgId])
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   LEDGER CORE — double-entry general ledger.
-
-   The invariants that make this an accounting system rather than a table of
-   rows are enforced by the DATABASE, not by application code (see the raw SQL
-   in the accompanying migration): entries balance to zero per currency, posted
-   entries are immutable (correction is reversal-only), and nothing posts into
-   a closed period. Amounts are signed integer minor units — debit positive,
-   credit negative — so "balanced" is literally SUM() = 0.
-   ══════════════════════════════════════════════════════════════════════════ */
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * LEDGER CORE — double-entry general ledger.
+ * The invariants that make this an accounting system rather than a table of
+ * rows are enforced by the DATABASE, not by application code (see the raw SQL
+ * in the accompanying migration): entries balance to zero per currency, posted
+ * entries are immutable (correction is reversal-only), and nothing posts into
+ * a closed period. Amounts are signed integer minor units — debit positive,
+ * credit negative — so "balanced" is literally SUM() = 0.
+ * ══════════════════════════════════════════════════════════════════════════
+ */
 
 /// A set of books for a legal entity. Multi-book from day one (statutory / tax /
 /// management); every entity ships with one PRIMARY book. Shipping the column now
 /// avoids the retrofit that NetSuite charges Professional Services to perform.
 model Book {
-  id                   String         @id @default(cuid())
+  id                   String           @id @default(cuid())
   orgId                String
   entityId             String
-  code                 String         @default("PRIMARY")
+  code                 String           @default("PRIMARY")
   name                 String
-  kind                 String         @default("PRIMARY") // PRIMARY | TAX | MGMT
-  functionalCurrency   String         @default("AED")
-  presentationCurrency String         @default("AED")
-  isDefault            Boolean        @default(false)
-  createdAt            DateTime       @default(now())
+  kind                 String           @default("PRIMARY") // PRIMARY | TAX | MGMT
+  functionalCurrency   String           @default("AED")
+  presentationCurrency String           @default("AED")
+  isDefault            Boolean          @default(false)
+  createdAt            DateTime         @default(now())
   entries              JournalEntry[]
   balances             AccountBalance[]
 
@@ -313,7 +314,7 @@ model Book {
 
 /// Chart of accounts. One chart per legal entity, shared across that entity's books.
 model Account {
-  id                String           @id @default(cuid())
+  id                String              @id @default(cuid())
   orgId             String
   entityId          String
   code              String
@@ -322,18 +323,18 @@ model Account {
   type              String // ASSET | LIABILITY | EQUITY | INCOME | EXPENSE
   subtype           String? // BANK | AR | AP | VAT_INPUT | VAT_OUTPUT | RETAINED_EARNINGS | ...
   parentId          String?
-  parent            Account?         @relation("AccountTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  children          Account[]        @relation("AccountTree")
+  parent            Account?            @relation("AccountTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children          Account[]           @relation("AccountTree")
   /// Header accounts roll up but cannot be posted to.
-  isPostable        Boolean          @default(true)
+  isPostable        Boolean             @default(true)
   /// Control accounts (AR/AP/VAT/bank) are owned by their subledger — manual journals are refused.
-  isControl         Boolean          @default(false)
+  isControl         Boolean             @default(false)
   /// Restrict postings to a single currency (bank accounts).
   currency          String?
   /// Dimension code that must be supplied on every posting to this account.
   requiresDimension String?
-  status            String           @default("active") // active | archived
-  createdAt         DateTime         @default(now())
+  status            String              @default("active") // active | archived
+  createdAt         DateTime            @default(now())
   lines             JournalLine[]
   balances          AccountBalance[]
   bankLines         BankStatementLine[] @relation("BankLines")
@@ -360,18 +361,18 @@ model FiscalYear {
 /// The fiscal calendar. Without this there is no close, and no way to stop a
 /// tenant back-dating a journal into a filed VAT quarter.
 model AccountingPeriod {
-  id           String         @id @default(cuid())
+  id           String           @id @default(cuid())
   orgId        String
   entityId     String
   fiscalYearId String
-  fiscalYear   FiscalYear     @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+  fiscalYear   FiscalYear       @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
   seq          Int
   label        String
-  startsOn     DateTime       @db.Date
-  endsOn       DateTime       @db.Date
+  startsOn     DateTime         @db.Date
+  endsOn       DateTime         @db.Date
   /// open → soft_closed (reopenable) → hard_closed → locked (statutory, never reopens)
-  status       String         @default("open")
-  isAdjustment Boolean        @default(false)
+  status       String           @default("open")
+  isAdjustment Boolean          @default(false)
   closedAt     DateTime?
   entries      JournalEntry[]
   balances     AccountBalance[]
@@ -577,37 +578,37 @@ model BankStatementLine {
 /// silently rewrite prior periods every time an estimate changed — and a
 /// change in estimate is prospective under IAS 16, not retrospective.
 model FixedAsset {
-  id                String    @id @default(cuid())
-  orgId             String
-  entityId          String
-  code              String
-  name              String
-  nameAr            String?
-  category          String    @default("EQUIPMENT")
-  acquiredOn        DateTime  @db.Date
+  id               String    @id @default(cuid())
+  orgId            String
+  entityId         String
+  code             String
+  name             String
+  nameAr           String?
+  category         String    @default("EQUIPMENT")
+  acquiredOn       DateTime  @db.Date
   /// What it cost, in minor units of the book's functional currency.
-  costMinor         BigInt
+  costMinor        BigInt
   /// What it is expected to be worth at the end of its life.
-  residualMinor     BigInt    @default(0)
+  residualMinor    BigInt    @default(0)
   /// Straight line, or reducing balance at `ratePercent`.
-  method            String    @default("STRAIGHT_LINE")
-  usefulLifeMonths  Int
-  ratePercent       Decimal?  @db.Decimal(6, 3)
+  method           String    @default("STRAIGHT_LINE")
+  usefulLifeMonths Int
+  ratePercent      Decimal?  @db.Decimal(6, 3)
   /// Where the asset, its accumulated depreciation and the charge live.
-  assetAccount      String    @default("1500")
-  accumAccount      String    @default("1590")
-  expenseAccount    String    @default("6600")
+  assetAccount     String    @default("1500")
+  accumAccount     String    @default("1590")
+  expenseAccount   String    @default("6600")
   /// Depreciation already posted, kept as a running figure so a run never has
   /// to re-derive history it did not create.
-  accumulatedMinor  BigInt    @default(0)
+  accumulatedMinor BigInt    @default(0)
   /// The last period depreciated, as YYYY-MM. A run is idempotent on it.
-  depreciatedTo     String?
-  status            String    @default("active") // active | disposed | written_off
-  disposedOn        DateTime? @db.Date
-  proceedsMinor     BigInt?
-  notes             String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  depreciatedTo    String?
+  status           String    @default("active") // active | disposed | written_off
+  disposedOn       DateTime? @db.Date
+  proceedsMinor    BigInt?
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -621,25 +622,25 @@ model FixedAsset {
 /// of rows without replaying them, and replaying them would let a backdated
 /// receipt silently rewrite the cost of goods already sold.
 model InventoryItem {
-  id            String              @id @default(cuid())
-  orgId         String
-  entityId      String
-  sku           String
-  name          String
-  nameAr        String?
-  uom           String              @default("EA")
-  costMethod    String              @default("WEIGHTED_AVERAGE")
+  id              String              @id @default(cuid())
+  orgId           String
+  entityId        String
+  sku             String
+  name            String
+  nameAr          String?
+  uom             String              @default("EA")
+  costMethod      String              @default("WEIGHTED_AVERAGE")
   /// Quantity in thousandths, so 1.5 kg is 1500. Stock is not always whole.
-  quantityMilli BigInt              @default(0)
+  quantityMilli   BigInt              @default(0)
   /// What that quantity is carried at, in minor units.
-  valueMinor    BigInt              @default(0)
-  stockAccount  String              @default("1200")
-  cogsAccount   String              @default("5000")
-  varianceAccount String            @default("5300")
-  status        String              @default("active")
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  movements     InventoryMovement[]
+  valueMinor      BigInt              @default(0)
+  stockAccount    String              @default("1200")
+  cogsAccount     String              @default("5000")
+  varianceAccount String              @default("5300")
+  status          String              @default("active")
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  movements       InventoryMovement[]
 
   @@unique([orgId, entityId, sku])
   @@index([orgId, entityId, status])
@@ -648,25 +649,25 @@ model InventoryItem {
 /// One movement of stock. Append-only: a correction is another movement, never
 /// an edit, for the same reason a posted journal entry is never edited.
 model InventoryMovement {
-  id             String        @id @default(cuid())
-  orgId          String
-  itemId         String
-  item           InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
-  movedOn        DateTime      @db.Date
-  kind           String // RECEIPT | ISSUE | ADJUSTMENT | WRITE_OFF
+  id                String        @id @default(cuid())
+  orgId             String
+  itemId            String
+  item              InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  movedOn           DateTime      @db.Date
+  kind              String // RECEIPT | ISSUE | ADJUSTMENT | WRITE_OFF
   /// Signed thousandths: a receipt is positive, an issue negative.
-  quantityMilli  BigInt
+  quantityMilli     BigInt
   /// Signed minor units, matching the quantity's direction.
-  valueMinor     BigInt
+  valueMinor        BigInt
   /// Weighted average cost per whole unit after this movement, in minor units.
-  unitCostMinor  BigInt
+  unitCostMinor     BigInt
   /// Running figures after this movement, so a movement can be read on its own.
-  balanceQtyMilli BigInt
+  balanceQtyMilli   BigInt
   balanceValueMinor BigInt
-  reference      String?
-  memo           String?
-  entryId        String?
-  createdAt      DateTime      @default(now())
+  reference         String?
+  memo              String?
+  entryId           String?
+  createdAt         DateTime      @default(now())
 
   @@index([orgId, itemId, movedOn])
   @@index([entryId])
@@ -674,7 +675,7 @@ model InventoryMovement {
 
 /// An employee, for payroll and end-of-service benefits.
 model Employee {
-  id             String       @id @default(cuid())
+  id             String    @id @default(cuid())
   orgId          String
   entityId       String
   code           String
@@ -685,17 +686,17 @@ model Employee {
   molPersonId    String?
   routingCode    String?
   iban           String?
-  joinedOn       DateTime     @db.Date
-  leftOn         DateTime?    @db.Date
+  joinedOn       DateTime  @db.Date
+  leftOn         DateTime? @db.Date
   /// Unlimited contracts accrue gratuity differently from limited ones.
-  contractType   String       @default("UNLIMITED")
+  contractType   String    @default("UNLIMITED")
   basicMinor     BigInt
-  housingMinor   BigInt       @default(0)
-  transportMinor BigInt       @default(0)
-  otherMinor     BigInt       @default(0)
-  status         String       @default("active")
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  housingMinor   BigInt    @default(0)
+  transportMinor BigInt    @default(0)
+  otherMinor     BigInt    @default(0)
+  status         String    @default("active")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
   payslips       Payslip[]
 
   @@unique([orgId, entityId, code])
@@ -704,22 +705,22 @@ model Employee {
 
 /// One employee's pay for one month. Append-only once posted.
 model Payslip {
-  id            String   @id @default(cuid())
-  orgId         String
-  entityId      String
-  employeeId    String
-  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
-  period        String   // YYYY-MM
-  basicMinor    BigInt
-  allowancesMinor BigInt @default(0)
-  overtimeMinor BigInt   @default(0)
-  deductionsMinor BigInt @default(0)
-  netMinor      BigInt
+  id              String   @id @default(cuid())
+  orgId           String
+  entityId        String
+  employeeId      String
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  period          String // YYYY-MM
+  basicMinor      BigInt
+  allowancesMinor BigInt   @default(0)
+  overtimeMinor   BigInt   @default(0)
+  deductionsMinor BigInt   @default(0)
+  netMinor        BigInt
   /// Gratuity accrued for this month, charged to the provision.
-  gratuityMinor BigInt   @default(0)
-  status        String   @default("draft") // draft | posted | paid
-  entryId       String?
-  createdAt     DateTime @default(now())
+  gratuityMinor   BigInt   @default(0)
+  status          String   @default("draft") // draft | posted | paid
+  entryId         String?
+  createdAt       DateTime @default(now())
 
   @@unique([orgId, employeeId, period])
   @@index([orgId, entityId, period])
@@ -733,7 +734,7 @@ model BudgetLine {
   /// Names a scenario, so last year's plan and this year's forecast coexist.
   scenario    String   @default("BUDGET")
   fiscalYear  String
-  period      String   // YYYY-MM
+  period      String // YYYY-MM
   accountCode String
   amountMinor BigInt
   note        String?
@@ -746,15 +747,15 @@ model BudgetLine {
 
 /// A period-end exchange rate, used to revalue foreign-currency balances.
 model FxRate {
-  id           String   @id @default(cuid())
-  orgId        String
-  entityId     String
-  currency     String
+  id        String   @id @default(cuid())
+  orgId     String
+  entityId  String
+  currency  String
   /// Rate to the book's functional currency.
-  rate         Decimal  @db.Decimal(20, 10)
-  rateDate     DateTime @db.Date
-  source       String   @default("CBUAE")
-  createdAt    DateTime @default(now())
+  rate      Decimal  @db.Decimal(20, 10)
+  rateDate  DateTime @db.Date
+  source    String   @default("CBUAE")
+  createdAt DateTime @default(now())
 
   @@unique([orgId, entityId, currency, rateDate])
   @@index([orgId, entityId, currency])
@@ -767,28 +768,28 @@ model FxRate {
 /// posting whose meaning depends on a mutable template is a posting nobody can
 /// audit.
 model RecurringJournal {
-  id            String   @id @default(cuid())
+  id            String    @id @default(cuid())
   orgId         String
   entityId      String
   code          String
   name          String
   /// MONTHLY | QUARTERLY | ANNUAL
-  frequency     String   @default("MONTHLY")
-  startsOn      DateTime @db.Date
+  frequency     String    @default("MONTHLY")
+  startsOn      DateTime  @db.Date
   endsOn        DateTime? @db.Date
   /// How many times it has run, and the last period it ran for (YYYY-MM).
-  runCount      Int      @default(0)
+  runCount      Int       @default(0)
   lastRunPeriod String?
   /// The template lines, as JSON: [{account, debit|credit, memo}].
   lines         String
   /// ACCRUAL | PREPAYMENT | STANDING — shapes how the reversal behaves.
-  kind          String   @default("STANDING")
+  kind          String    @default("STANDING")
   /// An accrual reverses on the first day of the next period; a standing
   /// charge does not.
-  autoReverse   Boolean  @default(false)
-  status        String   @default("active")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  autoReverse   Boolean   @default(false)
+  status        String    @default("active")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -796,45 +797,45 @@ model RecurringJournal {
 
 /// An employee expense claim, from submission through to reimbursement.
 model ExpenseClaim {
-  id           String            @id @default(cuid())
-  orgId        String
-  entityId     String
-  reference    String
-  employeeCode String
-  employeeName String
-  claimedOn    DateTime          @db.Date
-  currency     String            @default("AED")
+  id             String             @id @default(cuid())
+  orgId          String
+  entityId       String
+  reference      String
+  employeeCode   String
+  employeeName   String
+  claimedOn      DateTime           @db.Date
+  currency       String             @default("AED")
   /// draft | submitted | approved | rejected | posted | paid
-  status       String            @default("draft")
-  submittedAt  DateTime?
-  approvedAt   DateTime?
-  approvedBy   String?
+  status         String             @default("draft")
+  submittedAt    DateTime?
+  approvedAt     DateTime?
+  approvedBy     String?
   rejectedReason String?
-  entryId      String?
-  paidEntryId  String?
-  notes        String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  lines        ExpenseClaimLine[]
+  entryId        String?
+  paidEntryId    String?
+  notes          String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  lines          ExpenseClaimLine[]
 
   @@unique([orgId, entityId, reference])
   @@index([orgId, entityId, status])
 }
 
 model ExpenseClaimLine {
-  id          String       @id @default(cuid())
-  orgId       String
-  claimId     String
-  claim       ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
-  spentOn     DateTime     @db.Date
-  description String
-  accountCode String
-  netMinor    BigInt
-  vatMinor    BigInt       @default(0)
+  id             String       @id @default(cuid())
+  orgId          String
+  claimId        String
+  claim          ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  spentOn        DateTime     @db.Date
+  description    String
+  accountCode    String
+  netMinor       BigInt
+  vatMinor       BigInt       @default(0)
   /// Input VAT is only recoverable against a valid tax invoice showing a TRN.
-  supplierTrn String?
-  vatRecoverable Boolean   @default(false)
-  receiptRef  String?
+  supplierTrn    String?
+  vatRecoverable Boolean      @default(false)
+  receiptRef     String?
 
   @@index([claimId])
 }
@@ -843,21 +844,21 @@ model ExpenseClaimLine {
 /// statement. Content is stored by hash so the same PDF attached twice costs
 /// one copy, and so an attachment can be proved unaltered.
 model Attachment {
-  id           String   @id @default(cuid())
-  orgId        String
-  entityId     String?
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String?
   /// What it is attached to: JOURNAL_ENTRY | INVOICE | BILL | EXPENSE_CLAIM | ASSET | BANK_LINE
-  subjectType  String
-  subjectId    String
-  filename     String
-  mimeType     String
-  sizeBytes    Int
+  subjectType String
+  subjectId   String
+  filename    String
+  mimeType    String
+  sizeBytes   Int
   /// SHA-256 of the content. Two identical files share one blob.
-  sha256       String
+  sha256      String
   /// The bytes, base64. Small documents only — see the size guard.
-  content      String
-  uploadedBy   String?
-  uploadedAt   DateTime @default(now())
+  content     String
+  uploadedBy  String?
+  uploadedAt  DateTime @default(now())
 
   @@index([orgId, subjectType, subjectId])
   @@index([orgId, sha256])
@@ -865,21 +866,21 @@ model Attachment {
 
 /// An approval rule: what needs approving, by whom, above what amount.
 model ApprovalRule {
-  id            String   @id @default(cuid())
-  orgId         String
-  entityId      String
+  id                String   @id @default(cuid())
+  orgId             String
+  entityId          String
   /// JOURNAL | BILL | EXPENSE_CLAIM | PAYMENT | PAYROLL
-  subjectType   String
+  subjectType       String
   /// Applies above this amount; a rule at zero applies to everything.
-  thresholdMinor BigInt  @default(0)
+  thresholdMinor    BigInt   @default(0)
   /// How many distinct people must approve.
-  approversRequired Int   @default(1)
+  approversRequired Int      @default(1)
   /// Role that may approve, or a specific user id.
-  approverRole  String?
-  approverUserId String?
-  active        Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  approverRole      String?
+  approverUserId    String?
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([orgId, entityId, subjectType, active])
 }
@@ -904,29 +905,29 @@ model ApprovalDecision {
 
 /// A group of entities reported together.
 model ConsolidationGroup {
-  id            String   @id @default(cuid())
-  orgId         String
-  code          String
-  name          String
+  id        String                @id @default(cuid())
+  orgId     String
+  code      String
+  name      String
   /// The currency the group reports in.
-  currency      String   @default("AED")
-  members       ConsolidationMember[]
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  currency  String                @default("AED")
+  members   ConsolidationMember[]
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
 
   @@unique([orgId, code])
 }
 
 model ConsolidationMember {
-  id          String             @id @default(cuid())
-  orgId       String
-  groupId     String
-  group       ConsolidationGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  entityId    String
+  id           String             @id @default(cuid())
+  orgId        String
+  groupId      String
+  group        ConsolidationGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  entityId     String
   /// Percentage owned, in basis points: 10000 is wholly owned.
-  ownershipBps Int               @default(10000)
+  ownershipBps Int                @default(10000)
   /// Entities inside the group, so intercompany balances can be eliminated.
-  isParent    Boolean            @default(false)
+  isParent     Boolean            @default(false)
 
   @@unique([groupId, entityId])
   @@index([orgId, groupId])
@@ -958,20 +959,20 @@ model PurchaseOrder {
 }
 
 model PurchaseOrderLine {
-  id            String        @id @default(cuid())
-  orgId         String
-  orderId       String
-  order         PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  lineNo        Int
-  description   String
-  sku           String?
+  id             String        @id @default(cuid())
+  orgId          String
+  orderId        String
+  order          PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineNo         Int
+  description    String
+  sku            String?
   /// Thousandths, as inventory quantities are.
-  quantityMilli BigInt
+  quantityMilli  BigInt
   unitPriceMinor BigInt
-  accountCode   String?
+  accountCode    String?
   /// Running totals, so a line can answer "what is still outstanding" alone.
-  receivedMilli BigInt        @default(0)
-  invoicedMilli BigInt        @default(0)
+  receivedMilli  BigInt        @default(0)
+  invoicedMilli  BigInt        @default(0)
 
   @@unique([orderId, lineNo])
   @@index([orgId, orderId])
@@ -979,17 +980,17 @@ model PurchaseOrderLine {
 
 /// Goods physically arriving. Creates the accrual between receipt and invoice.
 model GoodsReceipt {
-  id          String             @id @default(cuid())
-  orgId       String
-  entityId    String
-  orderId     String
-  order       PurchaseOrder      @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  number      String
-  receivedOn  DateTime           @db.Date
-  entryId     String?
-  notes       String?
-  createdAt   DateTime           @default(now())
-  lines       GoodsReceiptLine[]
+  id         String             @id @default(cuid())
+  orgId      String
+  entityId   String
+  orderId    String
+  order      PurchaseOrder      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  number     String
+  receivedOn DateTime           @db.Date
+  entryId    String?
+  notes      String?
+  createdAt  DateTime           @default(now())
+  lines      GoodsReceiptLine[]
 
   @@unique([orgId, entityId, number])
   @@index([orgId, orderId])
@@ -1009,19 +1010,19 @@ model GoodsReceiptLine {
 
 /// A job or project that costs and revenue are attributed to.
 model Project {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   orgId        String
   entityId     String
   code         String
   name         String
   customerName String?
-  startsOn     DateTime @db.Date
+  startsOn     DateTime  @db.Date
   endsOn       DateTime? @db.Date
   /// What was quoted, so actual can be measured against something.
-  budgetMinor  BigInt   @default(0)
-  status       String   @default("active")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  budgetMinor  BigInt    @default(0)
+  status       String    @default("active")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -1029,30 +1030,30 @@ model Project {
 
 /// A lease under IFRS 16 — a right-of-use asset and a lease liability.
 model Lease {
-  id              String   @id @default(cuid())
-  orgId           String
-  entityId        String
-  code            String
-  name            String
-  lessor          String?
-  startsOn        DateTime @db.Date
-  endsOn          DateTime @db.Date
+  id                    String   @id @default(cuid())
+  orgId                 String
+  entityId              String
+  code                  String
+  name                  String
+  lessor                String?
+  startsOn              DateTime @db.Date
+  endsOn                DateTime @db.Date
   /// Payment per period, in minor units.
-  paymentMinor    BigInt
+  paymentMinor          BigInt
   /// MONTHLY | QUARTERLY | ANNUAL
-  frequency       String   @default("MONTHLY")
+  frequency             String   @default("MONTHLY")
   /// Incremental borrowing rate, annual, in basis points.
-  discountRateBps Int
+  discountRateBps       Int
   /// Computed at inception and then fixed — remeasurement is a separate event.
-  initialLiabilityMinor BigInt @default(0)
-  initialRouMinor       BigInt @default(0)
-  liabilityMinor  BigInt   @default(0)
-  accumRouDepMinor BigInt  @default(0)
+  initialLiabilityMinor BigInt   @default(0)
+  initialRouMinor       BigInt   @default(0)
+  liabilityMinor        BigInt   @default(0)
+  accumRouDepMinor      BigInt   @default(0)
   /// YYYY-MM of the last period charged.
-  chargedTo       String?
-  status          String   @default("draft")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  chargedTo             String?
+  status                String   @default("draft")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -1064,29 +1065,29 @@ model Lease {
 /// because credit limits, payment terms and a TRN are facts about the party,
 /// not about any one invoice.
 model Counterparty {
-  id            String   @id @default(cuid())
-  orgId         String
-  entityId      String
-  code          String
-  name          String
-  nameAr        String?
+  id               String   @id @default(cuid())
+  orgId            String
+  entityId         String
+  code             String
+  name             String
+  nameAr           String?
   /// CUSTOMER | SUPPLIER | BOTH
-  kind          String   @default("CUSTOMER")
-  trn           String?
-  email         String?
-  phone         String?
+  kind             String   @default("CUSTOMER")
+  trn              String?
+  email            String?
+  phone            String?
   /// Days from invoice date. 0 means due on receipt.
-  paymentTerms  Int      @default(30)
+  paymentTerms     Int      @default(30)
   /// Nil means no limit set, which is different from a limit of nothing.
   creditLimitMinor BigInt?
   /// Whether new sales are blocked because of overdue debt.
-  onHold        Boolean  @default(false)
-  holdReason    String?
-  currency      String   @default("AED")
-  notes         String?
-  status        String   @default("active")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  onHold           Boolean  @default(false)
+  holdReason       String?
+  currency         String   @default("AED")
+  notes            String?
+  status           String   @default("active")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, kind, status])
@@ -1094,39 +1095,39 @@ model Counterparty {
 
 /// A batch of supplier payments prepared, approved and released together.
 model PaymentRun {
-  id           String            @id @default(cuid())
-  orgId        String
-  entityId     String
-  reference    String
-  runDate      DateTime          @db.Date
-  bankAccount  String            @default("1010")
-  currency     String            @default("AED")
+  id          String           @id @default(cuid())
+  orgId       String
+  entityId    String
+  reference   String
+  runDate     DateTime         @db.Date
+  bankAccount String           @default("1010")
+  currency    String           @default("AED")
   /// draft | approved | released | cancelled
-  status       String            @default("draft")
-  approvedBy   String?
-  approvedAt   DateTime?
-  releasedAt   DateTime?
-  entryId      String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  items        PaymentRunItem[]
+  status      String           @default("draft")
+  approvedBy  String?
+  approvedAt  DateTime?
+  releasedAt  DateTime?
+  entryId     String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  items       PaymentRunItem[]
 
   @@unique([orgId, entityId, reference])
   @@index([orgId, entityId, status])
 }
 
 model PaymentRunItem {
-  id          String     @id @default(cuid())
-  orgId       String
-  runId       String
-  run         PaymentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  id            String     @id @default(cuid())
+  orgId         String
+  runId         String
+  run           PaymentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   /// The bill being paid, and who it is owed to.
-  billId      String?
-  billNumber  String
-  supplierName String
-  amountMinor BigInt
+  billId        String?
+  billNumber    String
+  supplierName  String
+  amountMinor   BigInt
   /// Excluded from the run, with the reason, rather than silently dropped.
-  excluded    Boolean    @default(false)
+  excluded      Boolean    @default(false)
   excludeReason String?
 
   @@index([runId])
@@ -1134,18 +1135,24 @@ model PaymentRunItem {
 
 /// A revenue contract under IFRS 15, with its performance obligations.
 model RevenueContract {
-  id             String                @id @default(cuid())
+  id             String                  @id @default(cuid())
   orgId          String
   entityId       String
   code           String
   customerName   String
-  signedOn       DateTime              @db.Date
+  signedOn       DateTime                @db.Date
   /// The total transaction price allocated across obligations.
   priceMinor     BigInt
-  currency       String                @default("AED")
-  status         String                @default("active")
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
+  /// What invoices have charged against this contract, cumulative and net of
+  /// tax. The difference between this and what has been earned is the contract
+  /// asset or contract liability IFRS 15 requires to be presented.
+  billedMinor    BigInt                  @default(0)
+  /// Where this contract's revenue lands in the chart.
+  revenueAccount String                  @default("4100")
+  currency       String                  @default("AED")
+  status         String                  @default("active")
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
   obligations    PerformanceObligation[]
 
   @@unique([orgId, entityId, code])
@@ -1153,24 +1160,146 @@ model RevenueContract {
 }
 
 model PerformanceObligation {
-  id             String          @id @default(cuid())
-  orgId          String
-  contractId     String
-  contract       RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  seq            Int
-  description    String
+  id                   String          @id @default(cuid())
+  orgId                String
+  contractId           String
+  contract             RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  seq                  Int
+  description          String
   /// The standalone selling price, used to allocate the transaction price.
   standalonePriceMinor BigInt
   /// What the allocation gave this obligation.
-  allocatedMinor BigInt          @default(0)
+  allocatedMinor       BigInt          @default(0)
   /// POINT_IN_TIME | OVER_TIME
-  timing         String          @default("POINT_IN_TIME")
+  timing               String          @default("POINT_IN_TIME")
   /// Recognised so far, in minor units.
-  recognisedMinor BigInt         @default(0)
+  recognisedMinor      BigInt          @default(0)
   /// Percent complete in basis points, for an over-time obligation.
-  progressBps    Int             @default(0)
-  satisfiedOn    DateTime?       @db.Date
+  progressBps          Int             @default(0)
+  satisfiedOn          DateTime?       @db.Date
 
   @@unique([contractId, seq])
   @@index([orgId, contractId])
+}
+
+/// A quotation or sales order: what we have offered or agreed to sell, before
+/// any of it is invoiced. Nothing here touches the ledger — a promise is not a
+/// transaction — but the running invoiced quantity lets a line answer "what is
+/// still to be delivered" without scanning the invoices.
+model SalesOrder {
+  id           String           @id @default(cuid())
+  orgId        String
+  entityId     String
+  number       String
+  /// QUOTE | ORDER — a quote can expire, an order cannot.
+  kind         String           @default("QUOTE")
+  customerCode String?
+  customerName String
+  customerTrn  String?
+  issuedOn     DateTime         @db.Date
+  /// A quote that nobody accepted stops being an offer on this date.
+  validUntil   DateTime?        @db.Date
+  currency     String           @default("AED")
+  /// draft | sent | accepted | part_invoiced | invoiced | declined | expired | cancelled
+  status       String           @default("draft")
+  notes        String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  lines        SalesOrderLine[]
+
+  @@unique([orgId, entityId, number])
+  @@index([orgId, entityId, status])
+}
+
+model SalesOrderLine {
+  id             String     @id @default(cuid())
+  orgId          String
+  orderId        String
+  order          SalesOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineNo         Int
+  description    String
+  sku            String?
+  /// Thousandths, as inventory quantities are.
+  quantityMilli  BigInt
+  unitPriceMinor BigInt
+  /// Basis points off the line, so 1000 is ten percent.
+  discountBps    Int        @default(0)
+  taxCode        String     @default("SR")
+  accountCode    String?
+  /// How much of the line has been turned into an invoice.
+  invoicedMilli  BigInt     @default(0)
+
+  @@unique([orderId, lineNo])
+  @@index([orgId, orderId])
+}
+
+/// An imprest float: a fixed sum of cash held by someone, topped back up to
+/// that sum when it is reimbursed. The float amount is the point — the cash on
+/// hand plus the unreimbursed receipts must always equal it.
+model PettyCashFund {
+  id          String              @id @default(cuid())
+  orgId       String
+  entityId    String
+  code        String
+  name        String
+  custodian   String
+  /// The imprest amount the float is restored to.
+  floatMinor  BigInt
+  /// The ledger account the cash sits in. 1000 is "Cash on hand" — a tin of
+  /// notes is not a bank account, and coding it to one makes the bank
+  /// reconciliation ask for a statement that will never exist.
+  accountCode String              @default("1000")
+  currency    String              @default("AED")
+  status      String              @default("active")
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  movements   PettyCashMovement[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+model PettyCashMovement {
+  id          String        @id @default(cuid())
+  orgId       String
+  fundId      String
+  fund        PettyCashFund @relation(fields: [fundId], references: [id], onDelete: Cascade)
+  seq         Int
+  /// OPENING | SPEND | REIMBURSE | RETURN — the four things that move a float.
+  kind        String
+  movedOn     DateTime      @db.Date
+  description String
+  /// Always positive; the kind says which way the cash went.
+  amountMinor BigInt
+  /// Where a spend was coded to.
+  accountCode String?
+  vatMinor    BigInt        @default(0)
+  supplierTrn String?
+  receiptRef  String?
+  /// The journal entry this movement posted, once it is on the ledger.
+  entryId     String?
+
+  @@unique([fundId, seq])
+  @@index([orgId, fundId])
+}
+
+/// A saved report layout: rows the user defined over account ranges, so a
+/// business can present its numbers the way it reads them without anyone
+/// editing code. The definition is data, so it can be copied between entities.
+model ReportLayout {
+  id        String   @id @default(cuid())
+  orgId     String
+  entityId  String
+  code      String
+  name      String
+  /// BALANCE | PROFIT — which side of the books the rows draw from.
+  basis     String   @default("PROFIT")
+  /// Rows: [{ label, kind: 'accounts'|'total'|'spacer'|'heading', from?, to?, of?, invert? }]
+  rows      Json
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
 }

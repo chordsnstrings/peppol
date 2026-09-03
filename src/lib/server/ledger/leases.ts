@@ -52,19 +52,15 @@ import { post, LedgerError } from "./post";
 /* ------------------------------------------------------------------ accounts */
 
 /**
- * The chart has 1700 Right-of-use assets and 2600 Lease liabilities, but no
- * finance-cost line: 6350 Bank charges and 6900 Other operating expenses are
- * the only candidates, and both sit under 6 Operating expenses.
+ * Interest on a lease liability is a finance cost, and IAS 1.82(b) requires it
+ * to be presented separately from operating expenses. It also has to be
+ * separable for tax: the Article 30 interest deduction limitation is computed
+ * on net interest expenditure, which cannot be found if the interest is mixed
+ * in with bank charges.
  *
- * Interest on a lease liability is a finance cost and IAS 1.82(b) requires it
- * to be presented separately from operating expenses — neither account is
- * right. 6350 is used because a financing charge misfiled among bank charges is
- * at least in the family of costs it belongs to, whereas 6900 would bury it in
- * operating expenses and quietly overstate operating profit. THIS NEEDS A REAL
- * FINANCE-COST ACCOUNT in the chart; until then, the presentation has to be
- * reclassified when the statements are prepared.
+ * 6360 exists for exactly that, so nothing here needs reclassifying later.
  */
-export const FINANCE_COST_ACCOUNT = "6350";
+export const FINANCE_COST_ACCOUNT = "6360";
 /** IFRS 16.47(a): the right-of-use asset is presented separately. */
 export const ROU_ASSET_ACCOUNT = "1700";
 export const LEASE_LIABILITY_ACCOUNT = "2600";
@@ -647,7 +643,7 @@ export interface LeaseRunResult {
  *
  * Two charges on a capitalised lease, and they are separate on purpose:
  *
- *   Dr  6350 finance cost         interest for the month
+ *   Dr  6360 finance cost         interest for the month
  *     Cr  2600 lease liability      it unwinds INTO the liability, not out of it
  *   Dr  6600 depreciation         a twelfth of a year of the term
  *     Cr  1700 right-of-use asset
@@ -1033,7 +1029,11 @@ export async function leaseRegister(opts: { orgId: string; entityId: string }) {
   });
   const lines = accounts.length
     ? await prisma.journalLine.findMany({
-        where: { orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) }, entry: { status: "posted" } },
+        where: { orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) },
+          // A reversed entry and its reversal net to nothing; reading only
+          // "posted" lines counts the reversal alone and moves the balance by
+          // the full amount, which shows up here as a false difference.
+          entry: { status: { in: ["posted", "reversed"] } } },
         select: { accountId: true, functionalAmountMinor: true },
       })
     : [];

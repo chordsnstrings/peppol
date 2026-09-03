@@ -9,9 +9,14 @@ import { usePathname } from "next/navigation";
  *
  * A single row of twenty tabs is not a navigation, it is a list someone has to
  * read every time. Grouping by what a person is actually doing — recording,
- * chasing money, reporting, closing — means the second row only ever holds
- * four or five things, which is a number you can take in at a glance rather
- * than scan.
+ * selling, buying, handling cash, reporting, closing — means the second row
+ * only ever holds a handful of things, which is a number you can take in at a
+ * glance rather than scan.
+ *
+ * The groups follow the business, not the database. Customers, receivables and
+ * revenue recognition sit together because they are three views of the same
+ * question; splitting them by which table they read would be a filing system
+ * for the people who built it rather than for the people who use it.
  *
  * The group is shown by its own tab; its members appear underneath only while
  * that group is current. Nothing is hidden behind a hover or a menu: the
@@ -42,16 +47,31 @@ export const LEDGER_NAV: NavGroup[] = [
     ],
   },
   {
-    key: "money",
-    label: "Money",
+    key: "sales",
+    label: "Sales",
     items: [
+      { href: "/accounting/customers", label: "Customers" },
       { href: "/accounting/receivables", label: "Receivables" },
+      { href: "/accounting/revenue", label: "Revenue recognition" },
+    ],
+  },
+  {
+    key: "purchases",
+    label: "Purchases",
+    items: [
       { href: "/accounting/payables", label: "Payables" },
       { href: "/accounting/procurement", label: "Purchase orders" },
-      { href: "/accounting/bank", label: "Bank" },
       { href: "/accounting/expenses", label: "Expense claims" },
-      { href: "/accounting/payroll", label: "Payroll" },
       { href: "/accounting/approvals", label: "Approvals" },
+    ],
+  },
+  {
+    key: "cash",
+    label: "Cash and pay",
+    items: [
+      { href: "/accounting/bank", label: "Bank" },
+      { href: "/accounting/petty-cash", label: "Petty cash" },
+      { href: "/accounting/payroll", label: "Payroll" },
     ],
   },
   {

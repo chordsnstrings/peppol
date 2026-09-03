@@ -266,7 +266,7 @@ d("leases under IFRS 16", () => {
     expect(r.reference).toMatch(/^LS-/);
 
     const by = await linesOf(r.entryId!);
-    expect(by["6350"]).toBe(56_407n);           // Dr finance cost
+    expect(by["6360"]).toBe(56_407n);           // Dr finance cost
     expect(by["2600"]).toBe(-56_407n);          // Cr lease liability — it unwinds INTO the liability
     expect(by["6600"]).toBe(470_059n);          // Dr depreciation
     expect(by["1700"]).toBe(-470_059n);         // Cr right-of-use asset
@@ -323,7 +323,7 @@ d("leases under IFRS 16", () => {
     expect(by["1010"]).toBe(-500_000n);         // Cr bank
     // The whole point of IFRS 16: a lease payment is not an expense.
     expect(by["6100"]).toBeUndefined();
-    expect(by["6350"]).toBeUndefined();
+    expect(by["6360"]).toBeUndefined();
   });
 
   it("will not record the same payment twice", async () => {
@@ -454,7 +454,7 @@ d("leases under IFRS 16", () => {
     expect(r.skipped.find((s) => s.code === "LS-001")?.reason).toMatch(/already charged/);
 
     const by = await linesOf(r.entryId!);
-    expect(by["6350"]).toBe(BigInt(r.interestMinor));
+    expect(by["6360"]).toBe(BigInt(r.interestMinor));
     expect(by["6600"]).toBe(BigInt(r.depreciationMinor));
 
     const after = await leaseRegister({ orgId: ORG, entityId: ENT });

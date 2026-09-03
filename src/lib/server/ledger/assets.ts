@@ -383,7 +383,11 @@ export async function assetRegister(opts: { orgId: string; entityId: string }) {
   });
   const lines = accounts.length
     ? await prisma.journalLine.findMany({
-        where: { orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) }, entry: { status: "posted" } },
+        where: { orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) },
+          // A reversed entry and its reversal net to nothing; reading only
+          // "posted" lines counts the reversal alone and moves the balance by
+          // the full amount, which shows up here as a false difference.
+          entry: { status: { in: ["posted", "reversed"] } } },
         select: { accountId: true, functionalAmountMinor: true },
       })
     : [];
