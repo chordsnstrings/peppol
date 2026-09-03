@@ -118,6 +118,20 @@ function invoiceLines(lines: TemplateLine[], where: string): InvoiceLine[] {
       );
     }
 
+    // The margin scheme prices from the purchase cost of the particular thing
+    // being sold, and a subscription bills the same line every period. There
+    // is no cost for a template to carry, and computing 5% of the whole price
+    // — which is what this used to do — would charge the customer a tax the
+    // scheme exists to avoid, on an invoice that under Executive Regulation
+    // Article 43 must not show tax at all.
+    if (taxCode === "MARGIN_SCHEME") {
+      throw new LedgerError(
+        `Line ${i + 1} of ${where} is on the margin scheme, which prices from what the particular item cost. ` +
+          `A subscription bills the same line every period and has no such cost, so the tax cannot be worked out. ` +
+          `Raise those sales as invoices.`,
+      );
+    }
+
     // Quantity is thousandths everywhere in this product; the invoice model
     // takes a plain number, so it is converted once, here, rather than each
     // caller deciding.

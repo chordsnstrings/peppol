@@ -67,6 +67,70 @@ d("receivables subledger", () => {
   });
   afterAll(async () => { await wipe(); await db.$disconnect(); });
 
+  it("posts margin-scheme tax out of revenue, never on top of the invoice", async () => {
+    // A used car bought for AED 30,000 and sold for AED 35,000. Executive
+    // Regulation Article 43 forbids the invoice showing any tax, so the
+    // customer pays 3,500,000 fils and nothing more — but Article 29 still
+    // makes the business owe 5/105 of the 500,000 margin, which is 23,810.
+    // That has to come out of the revenue, not be added to the payable amount.
+    const margin: InvoiceLine = {
+      id: "lm", lineNo: 1, description: "Used vehicle", qty: 1, unitCode: "C62",
+      unitPriceMinor: 3_500_000, taxProfileCode: "MARGIN_SCHEME",
+      lineNetMinor: 3_500_000, lineVatMinor: 0, marginPurchaseMinor: 3_000_000,
+    };
+    const inv = invoice({ number: "INV-MARGIN", docType: "COMMERCIAL_INVOICE" }, [margin]);
+    const r = await postInvoice({ orgId: ORG, invoice: inv });
+    const l = await linesOf(r.entryId);
+
+    expect(l["1100"]).toBe(3_500_000n);        // the customer owes the whole price
+    expect(l["4000"]).toBe(-3_476_190n);       // revenue is the price less the tax in it
+    expect(l["2100"]).toBe(-23_810n);          // and the FTA is owed the rest
+    // Which is the same total: nothing was added to what the customer pays.
+    expect(-(l["4000"] + l["2100"])).toBe(3_500_000n);
+  });
+
+  it("takes the margin tax only off the accounts the margin lines credit", async () => {
+    const margin: InvoiceLine = {
+      id: "lm2", lineNo: 1, description: "Used vehicle", qty: 1, unitCode: "C62",
+      unitPriceMinor: 3_500_000, taxProfileCode: "MARGIN_SCHEME",
+      lineNetMinor: 3_500_000, lineVatMinor: 0, marginPurchaseMinor: 3_000_000,
+    };
+    // An export line credits 4200, and the margin tax must not touch it.
+    const exportLine = line(200_000, 0, "ZERO_EXPORT");
+    const inv = invoice({ number: "INV-MARGIN-MIX", docType: "COMMERCIAL_INVOICE" }, [margin, exportLine]);
+    const r = await postInvoice({ orgId: ORG, invoice: inv });
+    const l = await linesOf(r.entryId);
+
+    expect(l["1100"]).toBe(3_700_000n);
+    expect(l["4200"]).toBe(-200_000n);
+    expect(l["4000"]).toBe(-3_476_190n);
+    expect(l["2100"]).toBe(-23_810n);
+  });
+
+  it("posts nothing extra where the margin is nil or the cost is unknown", async () => {
+    const atCost: InvoiceLine = {
+      id: "lm3", lineNo: 1, description: "Used vehicle", qty: 1, unitCode: "C62",
+      unitPriceMinor: 3_000_000, taxProfileCode: "MARGIN_SCHEME",
+      lineNetMinor: 3_000_000, lineVatMinor: 0, marginPurchaseMinor: 3_000_000,
+    };
+    const sold = await postInvoice({
+      orgId: ORG, invoice: invoice({ number: "INV-MARGIN-NIL", docType: "COMMERCIAL_INVOICE" }, [atCost]),
+    });
+    const l = await linesOf(sold.entryId);
+    expect(l["4000"]).toBe(-3_000_000n);
+    expect(l["2100"]).toBeUndefined();
+
+    // An unrecorded purchase cost is not a cost of nought. Nothing is posted,
+    // and the return warns rather than this inventing a margin.
+    const unknown: InvoiceLine = { ...atCost, id: "lm4", marginPurchaseMinor: undefined };
+    const guess = await postInvoice({
+      orgId: ORG, invoice: invoice({ number: "INV-MARGIN-UNK", docType: "COMMERCIAL_INVOICE" }, [unknown]),
+    });
+    const g = await linesOf(guess.entryId);
+    expect(g["4000"]).toBe(-3_000_000n);
+    expect(g["2100"]).toBeUndefined();
+  });
+
   it("turns a sales invoice into receivable, revenue and output VAT", async () => {
     const r = await postInvoice({ orgId: ORG, invoice: invoice() });
     expect(r.alreadyPosted).toBe(false);

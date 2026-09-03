@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError, type PostLine } from "./post";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
+import { marginSchemeLineTax } from "@/lib/domain/tax";
 
 /**
  * The accounts-receivable subledger.
@@ -110,6 +111,27 @@ export async function postInvoice(opts: {
   const vat = minor(inv.totals.vatMinor, "VAT total") * sign;
   const revenue = revenueByAccount(inv.lines);
 
+  // Margin-scheme output tax.
+  //
+  // The document shows no tax — Executive Regulation Article 43 forbids it —
+  // and the customer pays a VAT-inclusive price. The business still owes the
+  // FTA 5/105 of the margin under Article 29, so the liability has to come out
+  // of the revenue rather than be added to the invoice: revenue is what was
+  // charged less the tax embedded in it. Adding it to the payable amount would
+  // charge the customer a tax they were told the document does not carry.
+  //
+  // It is taken off the accounts the margin lines themselves credit, so a
+  // document that mixes margin and standard-rated lines reduces only the
+  // margin revenue.
+  const marginTaxByAccount = new Map<string, bigint>();
+  for (const l of inv.lines) {
+    const { taxMinor } = marginSchemeLineTax(l);
+    if (!taxMinor) continue;
+    const account = REVENUE_BY_PROFILE[l.taxProfileCode] ?? "4000";
+    marginTaxByAccount.set(account, (marginTaxByAccount.get(account) ?? 0n) + BigInt(taxMinor));
+  }
+  const marginTax = [...marginTaxByAccount.values()].reduce((a, v) => a + v, 0n) * sign;
+
   const netTotal = [...revenue.values()].reduce((a, r) => a + r.net, 0n) * sign;
   // The document has to be internally consistent before it reaches the books.
   // Catching this here names the invoice; catching it in the ledger names a
@@ -144,7 +166,7 @@ export async function postInvoice(opts: {
 
   const emirate = inv.seller?.address?.emirate ?? undefined;
   for (const [account, r] of revenue) {
-    const amount = r.net * sign;
+    const amount = (r.net - (marginTaxByAccount.get(account) ?? 0n)) * sign;
     if (amount === 0n) continue;
     lines.push({
       account, ...(amount > 0n ? { credit: amount } : { debit: -amount }), ...fx,
@@ -158,6 +180,21 @@ export async function postInvoice(opts: {
       ...(vat > 0n ? { credit: vat } : { debit: -vat }),
       ...fx,
       memo: "VAT on sales",
+      taxCode: "OUTPUT_VAT",
+      taxEmirate: emirate,
+    });
+  }
+
+  if (marginTax !== 0n) {
+    // A separate line from the ordinary output tax, and deliberately so: on
+    // the VAT return the two are the same liability, but on the invoice one
+    // was charged to the customer and the other was not, and only a separate
+    // line lets anybody see afterwards which was which.
+    lines.push({
+      account: VAT_OUTPUT,
+      ...(marginTax > 0n ? { credit: marginTax } : { debit: -marginTax }),
+      ...fx,
+      memo: "VAT on the margin — not charged to the customer",
       taxCode: "OUTPUT_VAT",
       taxEmirate: emirate,
     });

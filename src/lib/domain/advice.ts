@@ -51,14 +51,35 @@ export function taxAdvisories(inv: Partial<Invoice>): Advisory[] {
     });
   }
 
-  // Margin scheme
-  if (lines.some((l) => l.taxProfileCode === "MARGIN_SCHEME")) {
-    out.push({
-      id: "margin",
-      tone: "warning",
-      title: "Margin scheme — check the tax figure",
-      body: "VAT under the profit-margin scheme is on your margin, not the full price. We don't auto-calculate it yet — verify the tax amount before sending.",
-    });
+  // Margin scheme. The tax is now computed — 5/105 of the margin, under
+  // Article 29 and Executive Regulation Article 43 — so what is left to warn
+  // about is the one input nothing in the ledger can supply: what the item
+  // cost. Without it the margin cannot be worked out at all.
+  const marginLines = lines.filter((l) => l.taxProfileCode === "MARGIN_SCHEME");
+  if (marginLines.length) {
+    const missing = marginLines.filter(
+      (l) => l.marginPurchaseMinor === undefined || l.marginPurchaseMinor === null || !(l.marginPurchaseMinor >= 0),
+    );
+    out.push(
+      missing.length
+        ? {
+            id: "margin",
+            tone: "warning",
+            title: "Margin scheme — the purchase price is missing",
+            body:
+              "The tax is 5/105 of the margin, so the ledger needs what the item cost you. Without it no tax is " +
+              "computed and none is posted. Add the purchase price to each margin-scheme line.",
+          }
+        : {
+            id: "margin",
+            tone: "info",
+            title: "Margin scheme — the invoice shows no tax",
+            body:
+              "Executive Regulation Article 43 forbids a margin-scheme invoice showing a tax amount, so this one " +
+              "does not. The 5/105 of your margin is still owed to the FTA and is posted out of the revenue, not " +
+              "added to what the customer pays.",
+          },
+    );
   }
 
   // Designated zone

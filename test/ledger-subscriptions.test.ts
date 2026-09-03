@@ -94,6 +94,20 @@ d("subscriptions", () => {
     })).rejects.toThrow(/does not know/);
   });
 
+  it("refuses a margin-scheme line, because a template has no purchase cost", async () => {
+    // The margin scheme prices from what the particular item cost, and a
+    // subscription bills the same line every period. Computing 5% of the whole
+    // price — which is what this used to do — would charge the customer a tax
+    // the scheme exists to avoid, on an invoice that must not show tax at all.
+    await expect(createSubscription({
+      ...S,
+      subscription: {
+        code: "SUB-MARGIN", customerName: "Nobody", startsOn: "2026-01-01",
+        lines: [{ description: "x", quantityMilli: 1000, unitPriceMinor: 100, taxCode: "MARGIN_SCHEME" }],
+      },
+    })).rejects.toThrow(/prices from what the particular item cost/);
+  });
+
   it("refuses one that ends before it begins", async () => {
     await expect(createSubscription({
       ...S,
