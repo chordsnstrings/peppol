@@ -838,3 +838,96 @@ model ExpenseClaimLine {
 
   @@index([claimId])
 }
+
+/// A file attached to something in the books — a receipt, a contract, a bank
+/// statement. Content is stored by hash so the same PDF attached twice costs
+/// one copy, and so an attachment can be proved unaltered.
+model Attachment {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String?
+  /// What it is attached to: JOURNAL_ENTRY | INVOICE | BILL | EXPENSE_CLAIM | ASSET | BANK_LINE
+  subjectType  String
+  subjectId    String
+  filename     String
+  mimeType     String
+  sizeBytes    Int
+  /// SHA-256 of the content. Two identical files share one blob.
+  sha256       String
+  /// The bytes, base64. Small documents only — see the size guard.
+  content      String
+  uploadedBy   String?
+  uploadedAt   DateTime @default(now())
+
+  @@index([orgId, subjectType, subjectId])
+  @@index([orgId, sha256])
+}
+
+/// An approval rule: what needs approving, by whom, above what amount.
+model ApprovalRule {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// JOURNAL | BILL | EXPENSE_CLAIM | PAYMENT | PAYROLL
+  subjectType   String
+  /// Applies above this amount; a rule at zero applies to everything.
+  thresholdMinor BigInt  @default(0)
+  /// How many distinct people must approve.
+  approversRequired Int   @default(1)
+  /// Role that may approve, or a specific user id.
+  approverRole  String?
+  approverUserId String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([orgId, entityId, subjectType, active])
+}
+
+/// One approval decision. Append-only: a change of mind is another row.
+model ApprovalDecision {
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String
+  subjectType String
+  subjectId   String
+  /// APPROVED | REJECTED
+  decision    String
+  decidedBy   String
+  decidedAt   DateTime @default(now())
+  amountMinor BigInt?
+  reason      String?
+
+  @@unique([orgId, subjectType, subjectId, decidedBy])
+  @@index([orgId, entityId, subjectType, subjectId])
+}
+
+/// A group of entities reported together.
+model ConsolidationGroup {
+  id            String   @id @default(cuid())
+  orgId         String
+  code          String
+  name          String
+  /// The currency the group reports in.
+  currency      String   @default("AED")
+  members       ConsolidationMember[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([orgId, code])
+}
+
+model ConsolidationMember {
+  id          String             @id @default(cuid())
+  orgId       String
+  groupId     String
+  group       ConsolidationGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  entityId    String
+  /// Percentage owned, in basis points: 10000 is wholly owned.
+  ownershipBps Int               @default(10000)
+  /// Entities inside the group, so intercompany balances can be eliminated.
+  isParent    Boolean            @default(false)
+
+  @@unique([groupId, entityId])
+  @@index([orgId, groupId])
+}
