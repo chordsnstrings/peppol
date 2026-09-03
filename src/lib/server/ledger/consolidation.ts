@@ -130,6 +130,8 @@ export interface ConsolidatedSection {
  * A candidate, not a conclusion — see the note at the top of this file.
  */
 export interface Elimination {
+  /** Stable across runs, so one candidate can be accepted without the others. */
+  key: string;
   /** The member carrying the receivable (account 1100). */
   receivableEntityId: string;
   /** The member carrying the payable (account 2000). */
@@ -364,11 +366,17 @@ export async function consolidatedStatements(opts: {
   from: string;
   to: string;
   /**
-   * Take the proposed intercompany eliminations off these figures. Off by
-   * default, deliberately: a caller has to have read the candidates and decided
-   * they are right. See the note at the top of this file.
+   * Take proposed intercompany eliminations off these figures. Off by default,
+   * deliberately: a caller has to have read the candidates and decided they are
+   * right. See the note at the top of this file.
+   *
+   * `true` applies every candidate, which is only honest when every one of them
+   * has been looked at. A list of keys applies exactly those — because a
+   * reviewer who believes one candidate should not thereby be made to accept
+   * the rest, and an all-or-nothing switch is how a real third-party balance
+   * gets eliminated by somebody who was agreeing to something else.
    */
-  applyEliminations?: boolean;
+  applyEliminations?: boolean | string[];
 }): Promise<ConsolidatedStatements> {
   const group = await mustFindGroup(opts.orgId, opts.groupCode);
   if (group.members.length === 0) {
@@ -418,17 +426,28 @@ export async function consolidatedStatements(opts: {
     })),
     warnings,
   );
-  const applyEliminations = opts.applyEliminations === true;
-  for (const e of eliminations) e.applied = applyEliminations;
-
-  const eliminatedByCode = new Map<string, bigint>();
-  if (applyEliminations) {
-    for (const e of eliminations) {
-      const amount = BigInt(e.amountMinor);
-      eliminatedByCode.set(AR_CODE, (eliminatedByCode.get(AR_CODE) ?? 0n) + amount);
-      eliminatedByCode.set(AP_CODE, (eliminatedByCode.get(AP_CODE) ?? 0n) + amount);
+  const chosen = Array.isArray(opts.applyEliminations) ? new Set(opts.applyEliminations) : null;
+  if (chosen) {
+    const unknown = [...chosen].filter((k) => !eliminations.some((e) => e.key === k));
+    if (unknown.length) {
+      throw new LedgerError(
+        `${unknown.join(", ")} ${unknown.length === 1 ? "is not a candidate" : "are not candidates"} on this ` +
+          `consolidation. The candidates change with the figures, so accept them from the run you are looking at.`,
+      );
     }
   }
+  for (const e of eliminations) {
+    e.applied = chosen ? chosen.has(e.key) : opts.applyEliminations === true;
+  }
+
+  const eliminatedByCode = new Map<string, bigint>();
+  for (const e of eliminations) {
+    if (!e.applied) continue;
+    const amount = BigInt(e.amountMinor);
+    eliminatedByCode.set(AR_CODE, (eliminatedByCode.get(AR_CODE) ?? 0n) + amount);
+    eliminatedByCode.set(AP_CODE, (eliminatedByCode.get(AP_CODE) ?? 0n) + amount);
+  }
+  const applyEliminations = eliminations.some((e) => e.applied);
 
   /* --- line by line, on account code ------------------------------------ */
 
@@ -681,26 +700,42 @@ function proposeEliminations(
   for (const a of balances) {
     const ar = receivableLeft.get(a.entityId) ?? 0n;
     if (ar <= 0n) continue;
-    for (const b of balances) {
-      if (b.entityId === a.entityId) continue;
-      const ap = payableLeft.get(b.entityId) ?? 0n;
-      if (ap !== ar) continue;
-      out.push({
-        receivableEntityId: a.entityId,
-        payableEntityId: b.entityId,
-        receivableCode: AR_CODE,
-        payableCode: AP_CODE,
-        amountMinor: ar.toString(),
-        reason:
-          `${a.entityId} carries ${ar} on ${AR_CODE} and ${b.entityId} carries the same amount on ${AP_CODE}. ` +
-          `Equal and opposite across two members of the group, which is what an unsettled intragroup invoice ` +
-          `looks like. Confirm the counterparty before eliminating — a journal line does not record one.`,
-        applied: false,
-      });
-      receivableLeft.set(a.entityId, 0n);
-      payableLeft.set(b.entityId, 0n);
-      break;
+
+    // Every member whose payables equal this receivable. Taking the first and
+    // stopping would both starve a genuine pair behind a coincidental one and
+    // hide the ambiguity — and where two members owe the same amount, which of
+    // them is the intragroup one is exactly what the ledger cannot say.
+    const candidates = balances.filter(
+      (b) => b.entityId !== a.entityId && (payableLeft.get(b.entityId) ?? 0n) === ar,
+    );
+    if (candidates.length > 1) {
+      warnings.push(
+        `${a.entityId} carries ${ar} on ${AR_CODE}, and ${candidates.map((c) => c.entityId).join(" and ")} each ` +
+          `carry the same amount on ${AP_CODE}. Equal amounts are not evidence of which one it is owed by, so no ` +
+          `elimination is proposed. The intercompany screen matches at document level and can tell them apart.`,
+      );
+      continue;
     }
+    const b = candidates[0];
+    if (!b) continue;
+
+    out.push({
+      key: `${a.entityId}:${b.entityId}:${ar}`,
+      receivableEntityId: a.entityId,
+      payableEntityId: b.entityId,
+      receivableCode: AR_CODE,
+      payableCode: AP_CODE,
+      amountMinor: ar.toString(),
+      reason:
+        `${a.entityId} carries ${ar} on ${AR_CODE} and ${b.entityId} carries the same amount on ${AP_CODE}. ` +
+        `Equal and opposite across two members of the group, which is what an unsettled intragroup invoice ` +
+        `looks like — but this compares whole control-account balances, so it is a coincidence away from being ` +
+        `wrong, and eliminating it then removes a real third-party balance. The intercompany screen matches ` +
+        `document by document and carries the evidence; confirm there before applying this.`,
+      applied: false,
+    });
+    receivableLeft.set(a.entityId, 0n);
+    payableLeft.set(b.entityId, 0n);
   }
 
   const strandedAr = balances.filter((b) => (receivableLeft.get(b.entityId) ?? 0n) > 0n);

@@ -530,4 +530,35 @@ d("supplier payment runs", () => {
       expect(tb.differenceMinor).toBe(0n);
     }
   });
+
+  it("finds the supplier by TRN, not only by the name on the bill", async () => {
+    // Attribution used to be a folded name match here and a three-step ladder
+    // in the sales ledger. Two rules is two answers to "whose is this", and
+    // the weaker one was the one governing who gets paid.
+    await db.counterparty.create({
+      data: {
+        orgId: ORG, entityId: ENT, code: "SUP-TRN", name: "Gulf Supplies FZE",
+        kind: "SUPPLIER", trn: "100000000000099", paymentTerms: 45,
+        onHold: true, holdReason: "Quality dispute on the last delivery.",
+      },
+    });
+
+    // The name on the face of the bill is not the counterparty's name; only
+    // the TRN ties them together, and a folded-name match would miss it.
+    const b = await receive(bill({
+      id: `bill-trn-${Date.now()}`,
+      number: `BILL-TRN-${Date.now()}`,
+      issueDate: "2026-05-02", supplyDate: "2026-05-02", dueDate: "2026-06-01",
+      seller: { nameEn: "GULF SUPPLIES (FZE) — DUBAI BRANCH", trn: "100000000000099" },
+    }));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-06-30", dueBy: "2026-06-30", reference: "PR-TRN",
+    });
+    const item = run.items.find((i) => i.billId === b.id);
+    expect(item).toBeDefined();
+    expect(item!.excluded).toBe(true);
+    expect(item!.excludeReason).toMatch(/hold/i);
+    expect(item!.excludeReason).toMatch(/Quality dispute/);
+  });
 });

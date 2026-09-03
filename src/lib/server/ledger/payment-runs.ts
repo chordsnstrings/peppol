@@ -2,6 +2,7 @@ import { prisma } from "@/lib/server/prisma";
 import { fmtMinor, exponentOf } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { payablesAgeing } from "./ap";
+import { partyIndex, attributeDocument } from "./counterparties";
 import type { Invoice } from "@/lib/domain/types";
 
 /**
@@ -408,16 +409,14 @@ export async function proposeRun(opts: {
   for (const r of docRows) {
     try { docs.set(r.id, JSON.parse(r.data) as Invoice); } catch { /* a corrupt document is not a reason to skip the payable */ }
   }
-  // The bill carries a supplier NAME, not a counterparty id — there is no link
-  // between the two in this schema — so the hold is matched by name. An
-  // unmatched name simply means no hold and no agreed terms, which is the
-  // honest answer rather than a guess.
-  const holds = new Map<string, { name: string; reason: string | null }>();
-  const terms = new Map<string, number>();
-  for (const c of suppliers) {
-    terms.set(fold(c.name), c.paymentTerms);
-    if (c.onHold) holds.set(fold(c.name), { name: c.name, reason: c.holdReason });
-  }
+  // A bill is attributed to a supplier through the same ladder the sales
+  // ledger uses — an explicit link, then the TRN, then the name — rather than
+  // by name alone. Two attribution rules in one product is two answers to
+  // "whose is this", and the weaker one would be the one governing who gets
+  // paid. An unmatched bill simply means no hold and no agreed terms, which is
+  // the honest answer rather than a guess.
+  const supplierIndex = partyIndex(suppliers);
+  const byId = new Map(suppliers.map((c) => [c.id, c]));
   const decisionsByBill = new Map<string, BillDecision[]>();
   for (const d of decisions) {
     const g = decisionsByBill.get(d.subjectId);
@@ -461,7 +460,8 @@ export async function proposeRun(opts: {
     // terms; failing that, due on receipt. Guessing later than the truth is
     // what leaves a bill unpaid past its date, so the fallbacks get earlier,
     // never later.
-    const agreedTerms = terms.get(fold(supplierName));
+    const party = doc ? byId.get(attributeDocument(doc, supplierIndex, "seller") ?? "") : undefined;
+    const agreedTerms = party?.paymentTerms;
     const dueDate = doc?.dueDate
       ? asDate(doc.dueDate, `The due date on ${billNumber}`)
       : agreedTerms === undefined ? billDate : addDays(billDate, agreedTerms);
@@ -485,7 +485,7 @@ export async function proposeRun(opts: {
       continue;
     }
 
-    const hold = holds.get(fold(supplierName));
+    const hold = party?.onHold ? { name: party.name, reason: party.holdReason } : undefined;
     if (hold) {
       items.push({
         billId: o.sourceId, billNumber, supplierName, amountMinor: outstanding, excluded: true,

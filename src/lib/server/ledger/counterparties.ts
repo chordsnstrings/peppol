@@ -470,14 +470,14 @@ interface Activity {
   docs: Map<string, DocFacts>;
 }
 
-interface PartyIndex {
+export interface PartyIndex {
   byId: Map<string, string>;
   byCode: Map<string, string>;
   byTrn: Map<string, string>;
   byName: Map<string, string>;
 }
 
-function partyIndex(parties: Counterparty[]): PartyIndex {
+export function partyIndex(parties: Counterparty[]): PartyIndex {
   const idx: PartyIndex = { byId: new Map(), byCode: new Map(), byTrn: new Map(), byName: new Map() };
   for (const p of parties) {
     idx.byId.set(p.id, p.id);
@@ -491,23 +491,37 @@ function partyIndex(parties: Counterparty[]): PartyIndex {
 /**
  * Whose document is this?
  *
- * An explicit customer link on the document is decisive — if it names a
- * customer, that is the customer, even where the name typed onto the face of it
- * was later edited. Only when there is no link do we fall back to the TRN
- * (which identifies one taxable person) and finally to the name, which is why
- * two counterparties are not allowed to share one.
+ * An explicit link on the document is decisive — if it names a party, that is
+ * the party, even where the name typed onto the face of it was later edited.
+ * Only when there is no link do we fall back to the TRN (which identifies one
+ * taxable person) and finally to the name, which is why two counterparties are
+ * not allowed to share one.
+ *
+ * The same ladder answers for a supplier, reading the seller instead of the
+ * buyer. It is one function rather than two because a product with two
+ * attribution rules has two answers to "whose is this", and the weaker one
+ * ends up governing who gets paid — which is the more expensive half to get
+ * wrong.
  */
-function partyIdOf(inv: Invoice, idx: PartyIndex): string | null {
+export function attributeDocument(
+  inv: Invoice,
+  idx: PartyIndex,
+  side: "buyer" | "seller" = "buyer",
+): string | null {
   const link = (inv.customerId ?? "").trim();
   if (link) return idx.byId.get(link) ?? idx.byCode.get(link.toLowerCase()) ?? null;
-  const trn = (inv.buyer?.trn ?? "").trim();
+
+  const party = side === "buyer" ? inv.buyer : inv.seller;
+  const trn = (party?.trn ?? "").trim();
   if (trn) {
     const byTrn = idx.byTrn.get(trn);
     if (byTrn) return byTrn;
   }
-  const name = (inv.buyer?.nameEn ?? "").trim().toLowerCase();
+  const name = (party?.nameEn ?? "").trim().toLowerCase();
   return (name && idx.byName.get(name)) || null;
 }
+
+const partyIdOf = (inv: Invoice, idx: PartyIndex) => attributeDocument(inv, idx, "buyer");
 
 /**
  * Every movement on the receivables control account up to a date, netted into

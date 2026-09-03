@@ -212,7 +212,33 @@ d("consolidation", () => {
       amountMinor: "300000",
       applied: false,
     });
-    expect(c.eliminations[0].reason).toMatch(/counterparty/i);
+    // The reason has to say what the evidence actually is: two whole control
+    // balances that happen to be equal, which is a coincidence away from
+    // eliminating a real third-party balance.
+    expect(c.eliminations[0].reason).toMatch(/coincidence away from being\s+wrong/i);
+    expect(c.eliminations[0].reason).toMatch(/intercompany screen/i);
+    expect(c.eliminations[0].key).toBe(`${PARENT}:${SUB}:300000`);
+  });
+
+  it("applies one candidate without making the reviewer accept the rest", async () => {
+    const all = await consolidatedStatements({ orgId: ORG, groupCode: "MAIN", ...MAR });
+    const key = all.eliminations[0].key;
+
+    const one = await consolidatedStatements({
+      orgId: ORG, groupCode: "MAIN", ...MAR, applyEliminations: [key],
+    });
+    expect(one.eliminations[0].applied).toBe(true);
+    expect(one.eliminationsApplied).toBe(true);
+
+    const none = await consolidatedStatements({
+      orgId: ORG, groupCode: "MAIN", ...MAR, applyEliminations: [],
+    });
+    expect(none.eliminations[0].applied).toBe(false);
+    expect(none.eliminationsApplied).toBe(false);
+
+    await expect(consolidatedStatements({
+      orgId: ORG, groupCode: "MAIN", ...MAR, applyEliminations: ["not-a-candidate"],
+    })).rejects.toThrow(/not a candidate on this consolidation/i);
   });
 
   it("does not apply the proposal by default — the control accounts still stand in full", async () => {
