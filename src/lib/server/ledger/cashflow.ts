@@ -111,6 +111,9 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "1200": "operating_working_capital", // inventory
   "1250": "operating_working_capital", // goods received not invoiced
   "1300": "operating_working_capital", // prepaid expenses
+  // Work in progress is unbilled time. It moves with the operating cycle
+  // exactly as inventory does — the raw material of a service business.
+  "1330": "operating_working_capital", // work in progress
   "1350": "operating_working_capital", // VAT input
   "1360": "operating_working_capital", // VAT receivable from FTA
   "1400": "operating_working_capital", // employee advances

@@ -1811,3 +1811,53 @@ model RecurringInvoiceIssue {
   @@unique([templateId, scheduledOn])
   @@index([orgId, templateId])
 }
+
+
+/// Time worked, which for a service business is the raw material.
+///
+/// Recorded in minutes rather than decimal hours, because a quarter of an hour
+/// is 15 and 0.25 of an hour is a float that will not add up over a month.
+model TimeEntry {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  projectCode  String?
+  employeeCode String
+  workedOn     DateTime @db.Date
+  minutes      Int
+  /// Charge-out rate per hour, in minor units.
+  rateMinor    BigInt
+  /// Cost per hour, where it is known. Nil means nobody has set one, which is
+  /// different from work that costs nothing.
+  costRateMinor BigInt?
+  description  String
+  /// Work that will be charged for. Non-billable time is still recorded,
+  /// because what it cost is real whether or not anybody pays for it.
+  billable     Boolean  @default(true)
+  /// draft | approved | invoiced | written_off
+  status       String   @default("draft")
+  invoiceId    String?
+  writeOffReason String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([orgId, entityId, projectCode, workedOn])
+  @@index([orgId, entityId, employeeCode, workedOn])
+}
+
+/// The work-in-progress balance recognised at a period end, kept per period
+/// because the charge for a month is the movement between two dates.
+model WipPosting {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  period       String
+  balanceMinor BigInt
+  chargeMinor  BigInt
+  minutes      Int
+  entryId      String?
+  createdAt    DateTime @default(now())
+
+  @@unique([orgId, entityId, period])
+  @@index([orgId, entityId])
+}

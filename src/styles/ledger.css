@@ -472,3 +472,18 @@
   color: var(--sw-fg);
   font-weight: 600;
 }
+
+/* A checkbox in a dense table. The browser draws the box at about 13px; SC
+   2.5.8 asks for 24 CSS px of target, so the box is grown to 18 and given the
+   3px of margin on every side that carries it the rest of the way — the
+   margin is part of the target, and it is also what keeps one row's target
+   from touching the next. */
+.sw-check {
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  margin: 0.1875rem;
+  accent-color: var(--sw-accent);
+  cursor: pointer;
+}
+.sw-check:focus-visible { outline: 2px solid var(--sw-accent); outline-offset: 2px; }
+.sw-check:disabled { cursor: not-allowed; opacity: 0.45; }

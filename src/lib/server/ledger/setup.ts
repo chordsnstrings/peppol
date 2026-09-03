@@ -41,6 +41,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "1300", name: "Prepaid expenses", nameAr: "مصروفات مدفوعة مقدماً", type: "ASSET", parent: "10" },
   { code: "1320", name: "Deferred tax asset", nameAr: "أصل ضريبي مؤجل", type: "ASSET", parent: "15", subtype: "DEFERRED_TAX_ASSET" },
   { code: "1310", name: "Contract assets (unbilled revenue)", nameAr: "أصول العقود (إيرادات غير مفوترة)", type: "ASSET", parent: "10", subtype: "CONTRACT_ASSET" },
+  { code: "1330", name: "Work in progress", nameAr: "أعمال تحت التنفيذ", type: "ASSET", parent: "10", subtype: "WIP" },
   { code: "1350", name: "VAT input (recoverable)", nameAr: "ضريبة القيمة المضافة على المشتريات", type: "ASSET", parent: "10", subtype: "VAT_INPUT", isControl: true },
   { code: "1360", name: "VAT receivable from FTA", nameAr: "ضريبة مستحقة من الهيئة", type: "ASSET", parent: "10", subtype: "VAT_RECEIVABLE" },
   { code: "1400", name: "Employee advances", nameAr: "سلف الموظفين", type: "ASSET", parent: "10" },
