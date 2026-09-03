@@ -464,12 +464,21 @@ model JournalLine {
   fxRate                Decimal                @default(1) @db.Decimal(20, 10)
   functionalCurrency    String
   functionalAmountMinor BigInt
+  /// The tax treatment this line was raised under, carried from the document.
+  /// The VAT return groups by it, so the return is computed from the ledger
+  /// rather than from a second pass over the documents — the two can then
+  /// never disagree with each other.
+  taxCode               String?
+  /// Emirate of supply. The FTA's VAT 201 splits standard-rated supplies by
+  /// emirate, and that is only knowable at the moment of posting.
+  taxEmirate            String?
   memo                  String?
   dimensions            JournalLineDimension[]
 
   @@unique([entryId, lineNo])
   @@index([orgId, accountId])
   @@index([entryId])
+  @@index([orgId, taxCode])
 }
 
 model JournalLineDimension {

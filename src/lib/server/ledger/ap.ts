@@ -54,10 +54,15 @@ function minor(v: number | undefined, what: string): bigint {
 const isReverseCharge = (l: InvoiceLine) => l.taxProfileCode === "REVERSE_CHARGE";
 
 function expenseByAccount(lines: InvoiceLine[], accountFor?: (l: InvoiceLine) => string | undefined) {
-  const out = new Map<string, bigint>();
+  const out = new Map<string, { net: bigint; taxCode: TaxProfileCode }>();
   for (const l of lines) {
     const account = accountFor?.(l) ?? EXPENSE_BY_PROFILE[l.taxProfileCode] ?? "6900";
-    out.set(account, (out.get(account) ?? 0n) + minor(l.lineNetMinor, `Line ${l.lineNo} net`));
+    const net = minor(l.lineNetMinor, `Line ${l.lineNo} net`);
+    const prev = out.get(account);
+    // A caller can code two differently-taxed lines to one account. The first
+    // treatment wins the tag, and the reverse-charge total is computed from the
+    // document rather than from these buckets, so the return stays right.
+    out.set(account, prev ? { net: prev.net + net, taxCode: prev.taxCode } : { net, taxCode: l.taxProfileCode });
   }
   return out;
 }
@@ -116,7 +121,7 @@ export async function postBill(opts: {
     minor(bill.lines.filter(isReverseCharge).reduce((a, l) => a + l.lineNetMinor, 0), "Reverse-charge net") * sign;
 
   const expenses = expenseByAccount(bill.lines, opts.accountFor);
-  const netTotal = [...expenses.values()].reduce((a, b) => a + b, 0n) * sign;
+  const netTotal = [...expenses.values()].reduce((a, e) => a + e.net, 0n) * sign;
 
   if (netTotal + chargedVat !== gross) {
     throw new LedgerError(
@@ -136,10 +141,13 @@ export async function postBill(opts: {
   const fx = fxRate === undefined ? {} : { currency, fxRate };
 
   const lines: PostLine[] = [];
-  for (const [account, net] of expenses) {
-    const amount = net * sign;
+  for (const [account, e] of expenses) {
+    const amount = e.net * sign;
     if (amount === 0n) continue;
-    lines.push({ account, ...(amount > 0n ? { debit: amount } : { credit: -amount }), ...fx });
+    lines.push({
+      account, ...(amount > 0n ? { debit: amount } : { credit: -amount }), ...fx,
+      taxCode: e.taxCode,
+    });
   }
 
   if (chargedVat !== 0n) {
@@ -148,6 +156,7 @@ export async function postBill(opts: {
       ...(chargedVat > 0n ? { debit: chargedVat } : { credit: -chargedVat }),
       ...fx,
       memo: "Recoverable input VAT",
+      taxCode: "INPUT_VAT",
     });
   }
 
@@ -167,11 +176,13 @@ export async function postBill(opts: {
       account: VAT_OUTPUT,
       ...(rcVat > 0n ? { credit: rcVat } : { debit: -rcVat }),
       memo: "Reverse charge — output side",
+      taxCode: "RC_OUTPUT_VAT",
     });
     lines.push({
       account: VAT_INPUT,
       ...(rcVat > 0n ? { debit: rcVat } : { credit: -rcVat }),
       memo: "Reverse charge — recoverable side",
+      taxCode: "RC_INPUT_VAT",
     });
   }
 

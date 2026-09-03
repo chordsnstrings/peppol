@@ -9,6 +9,7 @@ const TABS = [
   { href: "/accounting/accounts", label: "Chart of accounts" },
   { href: "/accounting/receivables", label: "Receivables" },
   { href: "/accounting/payables", label: "Payables" },
+  { href: "/accounting/vat", label: "VAT return" },
   { href: "/accounting/trial-balance", label: "Trial balance" },
   { href: "/accounting/periods", label: "Periods" },
 ];

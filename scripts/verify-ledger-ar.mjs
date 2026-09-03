@@ -153,6 +153,28 @@ check('a paid bill leaves the payables report', r.body?.totalMinor === '0' && r.
 r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
 check('the trial balance ties across both subledgers', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
 
+console.log('\nVAT 201 RETURN');
+r = await call('GET', `/api/ledger/vat?entityId=${ENT}&from=2026-02-01&to=2026-02-28`);
+const b = (side, n) => (r.body?.[side] ?? []).find(x => x.box === n);
+check('standard-rated sales reach box 1', b('sales','1')?.amountMinor === '200000' && b('sales','1')?.vatMinor === '10000',
+  `${b('sales','1')?.amountMinor} @ ${b('sales','1')?.vatMinor}`);
+check('zero-rated exports reach box 4 with no VAT figure', b('sales','4')?.amountMinor === '50000' && b('sales','4')?.vatMinor === null,
+  `${b('sales','4')?.amountMinor} / vat ${JSON.stringify(b('sales','4')?.vatMinor)}`);
+check('the reverse-charge supply reaches box 3', b('sales','3')?.vatMinor === '5000', `${b('sales','3')?.vatMinor}`);
+check('standard-rated expenses reach box 9', b('expenses','9')?.amountMinor === '300000' && b('expenses','9')?.vatMinor === '15000',
+  `${b('expenses','9')?.amountMinor} @ ${b('expenses','9')?.vatMinor}`);
+check('and the same reverse charge is recoverable in box 10', b('expenses','10')?.vatMinor === '5000', `${b('expenses','10')?.vatMinor}`);
+check('the net position is right', r.body?.totalOutputVatMinor === '15000' && r.body?.totalInputVatMinor === '20000' && r.body?.netVatMinor === '-5000',
+  `out ${r.body?.totalOutputVatMinor} in ${r.body?.totalInputVatMinor} net ${r.body?.netVatMinor}`);
+check('a net reclaim is reported as a reclaim, not a payment', r.body?.payable === false, `payable ${r.body?.payable}`);
+check('the return reconciles to both VAT control accounts',
+  r.body?.reconciliation?.outputMatches === true && r.body?.reconciliation?.inputMatches === true,
+  `2100 ${r.body?.reconciliation?.outputVatPerLedgerMinor} / 1350 ${r.body?.reconciliation?.inputVatPerLedgerMinor}`);
+check('and files no warnings when everything is coded', (r.body?.warnings ?? []).length === 0, JSON.stringify(r.body?.warnings ?? []).slice(0, 120));
+
+r = await call('GET', `/api/ledger/vat?entityId=${ENT}&from=2026-02-28&to=2026-02-01`);
+check('a backwards period is refused', r.status === 422, `HTTP ${r.status}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';

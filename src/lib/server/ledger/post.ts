@@ -38,6 +38,15 @@ export interface PostLine {
   /** Rate to the functional currency. Required when currency differs. */
   fxRate?: number;
   memo?: string;
+  /**
+   * The tax treatment this line was raised under (STANDARD_5, ZERO_EXPORT,
+   * REVERSE_CHARGE …). The VAT return groups by it, which is what lets the
+   * return be computed from the ledger instead of from a second pass over the
+   * documents — the two then cannot disagree.
+   */
+  taxCode?: string;
+  /** Emirate of supply; the VAT 201 splits standard-rated supplies by it. */
+  taxEmirate?: string;
   /** { dimensionCode: valueCode }, e.g. { COST_CENTRE: "OPS" }. */
   dimensions?: Record<string, string>;
 }
@@ -216,6 +225,8 @@ export async function post(input: PostInput) {
         functionalCurrency: book.functionalCurrency,
         functionalAmountMinor: toFunctional(txnAmountMinor, fxRate),
         memo: l.memo ?? null,
+        taxCode: l.taxCode ?? null,
+        taxEmirate: l.taxEmirate ?? null,
         dims: Object.entries(l.dimensions ?? {}).map(([d, v]) => dimValues.get(`${d}:${v}`)!),
       };
     });
@@ -254,7 +265,7 @@ export async function post(input: PostInput) {
             lineNo: p.lineNo, orgId: p.orgId, accountId: p.accountId,
             txnCurrency: p.txnCurrency, txnAmountMinor: p.txnAmountMinor, fxRate: p.fxRate,
             functionalCurrency: p.functionalCurrency, functionalAmountMinor: p.functionalAmountMinor,
-            memo: p.memo,
+            memo: p.memo, taxCode: p.taxCode, taxEmirate: p.taxEmirate,
             dimensions: { create: p.dims.map((d) => ({ dimensionId: d.dimensionId, valueId: d.valueId })) },
           })),
         },
@@ -307,6 +318,10 @@ export async function reverse(opts: {
         currency: l.txnCurrency,
         fxRate: Number(l.fxRate),
         memo: l.memo ?? undefined,
+        // The reversal has to carry the tax treatment too, or reversing an
+        // invoice would quietly leave its supply on the VAT return.
+        taxCode: l.taxCode ?? undefined,
+        taxEmirate: l.taxEmirate ?? undefined,
       };
     }),
   });

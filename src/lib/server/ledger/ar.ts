@@ -56,11 +56,15 @@ function minor(v: number | undefined, what: string): bigint {
  * an invoice with forty line items still posts three or four journal lines —
  * the ledger records what happened to the business, not a copy of the document.
  */
-function revenueByAccount(lines: InvoiceLine[]): Map<string, bigint> {
-  const out = new Map<string, bigint>();
+function revenueByAccount(lines: InvoiceLine[]): Map<string, { net: bigint; taxCode: TaxProfileCode }> {
+  const out = new Map<string, { net: bigint; taxCode: TaxProfileCode }>();
   for (const l of lines) {
     const account = REVENUE_BY_PROFILE[l.taxProfileCode] ?? "4000";
-    out.set(account, (out.get(account) ?? 0n) + minor(l.lineNetMinor, `Line ${l.lineNo} net`));
+    const prev = out.get(account);
+    const net = minor(l.lineNetMinor, `Line ${l.lineNo} net`);
+    // Lines are only merged when they share an account, and an account only
+    // serves one treatment, so the tax code stays unambiguous.
+    out.set(account, prev ? { net: prev.net + net, taxCode: prev.taxCode } : { net, taxCode: l.taxProfileCode });
   }
   return out;
 }
@@ -106,7 +110,7 @@ export async function postInvoice(opts: {
   const vat = minor(inv.totals.vatMinor, "VAT total") * sign;
   const revenue = revenueByAccount(inv.lines);
 
-  const netTotal = [...revenue.values()].reduce((a, b) => a + b, 0n) * sign;
+  const netTotal = [...revenue.values()].reduce((a, r) => a + r.net, 0n) * sign;
   // The document has to be internally consistent before it reaches the books.
   // Catching this here names the invoice; catching it in the ledger names a
   // journal the user has never seen.
@@ -138,10 +142,14 @@ export async function postInvoice(opts: {
     },
   ];
 
-  for (const [account, net] of revenue) {
-    const amount = net * sign;
+  const emirate = inv.seller?.address?.emirate ?? undefined;
+  for (const [account, r] of revenue) {
+    const amount = r.net * sign;
     if (amount === 0n) continue;
-    lines.push({ account, ...(amount > 0n ? { credit: amount } : { debit: -amount }), ...fx });
+    lines.push({
+      account, ...(amount > 0n ? { credit: amount } : { debit: -amount }), ...fx,
+      taxCode: r.taxCode, taxEmirate: emirate,
+    });
   }
 
   if (vat !== 0n) {
@@ -150,6 +158,8 @@ export async function postInvoice(opts: {
       ...(vat > 0n ? { credit: vat } : { debit: -vat }),
       ...fx,
       memo: "VAT on sales",
+      taxCode: "OUTPUT_VAT",
+      taxEmirate: emirate,
     });
   }
 
