@@ -39,6 +39,7 @@ export const LEDGER_NAV: NavGroup[] = [
     label: "Record",
     items: [
       { href: "/accounting", label: "Overview", exact: true },
+      { href: "/accounting/attention", label: "Needs attention" },
       { href: "/accounting/journals", label: "Journals" },
       { href: "/accounting/accounts", label: "Chart of accounts" },
       { href: "/accounting/chart", label: "Edit the chart" },
@@ -51,6 +52,7 @@ export const LEDGER_NAV: NavGroup[] = [
     label: "Sales",
     items: [
       { href: "/accounting/customers", label: "Customers" },
+      { href: "/accounting/sales-orders", label: "Quotes and orders" },
       { href: "/accounting/receivables", label: "Receivables" },
       { href: "/accounting/revenue", label: "Revenue recognition" },
     ],
@@ -61,6 +63,7 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting/payables", label: "Payables" },
       { href: "/accounting/procurement", label: "Purchase orders" },
+      { href: "/accounting/payment-runs", label: "Payment runs" },
       { href: "/accounting/expenses", label: "Expense claims" },
       { href: "/accounting/approvals", label: "Approvals" },
     ],

@@ -1,6 +1,7 @@
 import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
+import { LedgerError } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { prisma } from "@/lib/server/prisma";
 
@@ -28,6 +29,7 @@ export async function POST(req: Request) {
     });
     return json({ book: { id: book.id, code: book.code, functionalCurrency: book.functionalCurrency }, accounts, fiscalYear: label });
   } catch (e) {
+    if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
 }

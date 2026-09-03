@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { LedgerError } from "./post";
 
 /**
  * Ledger reads. The trial balance is served from the period-anchored balance
@@ -46,12 +47,12 @@ export async function trialBalance(opts: {
   const book = await prisma.book.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, code: opts.bookCode ?? "PRIMARY" },
   });
-  if (!book) throw new Error("No ledger has been opened for this entity.");
+  if (!book) throw new LedgerError("No ledger has been opened for this entity.");
 
   const period = await prisma.accountingPeriod.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, label: opts.periodLabel },
   });
-  if (!period) throw new Error(`No accounting period "${opts.periodLabel}".`);
+  if (!period) throw new LedgerError(`No accounting period "${opts.periodLabel}".`);
 
   const upto = await prisma.accountingPeriod.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId, endsOn: { lte: period.endsOn } },
@@ -109,7 +110,7 @@ export async function generalLedger(opts: {
   const account = await prisma.account.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, code: opts.accountCode },
   });
-  if (!account) throw new Error(`Account ${opts.accountCode} does not exist.`);
+  if (!account) throw new LedgerError(`Account ${opts.accountCode} does not exist.`);
 
   const lines = await prisma.journalLine.findMany({
     where: {

@@ -1104,6 +1104,10 @@ model PaymentRun {
   currency    String           @default("AED")
   /// draft | approved | released | cancelled
   status      String           @default("draft")
+  /// Who proposed the run. Recorded rather than passed in at approval time,
+  /// because a separation-of-duties control that depends on the approver
+  /// truthfully naming the preparer is not a control.
+  preparedBy  String?
   approvedBy  String?
   approvedAt  DateTime?
   releasedAt  DateTime?
@@ -1224,7 +1228,10 @@ model SalesOrderLine {
   unitPriceMinor BigInt
   /// Basis points off the line, so 1000 is ten percent.
   discountBps    Int        @default(0)
-  taxCode        String     @default("SR")
+  /// A TaxProfileCode, in the product's own spelling. "SR" is what a UAE
+  /// bookkeeper writes and the module accepts it, but it is stored canonically
+  /// so that one treatment cannot become two categories on the VAT return.
+  taxCode        String     @default("STANDARD_5")
   accountCode    String?
   /// How much of the line has been turned into an invoice.
   invoicedMilli  BigInt     @default(0)

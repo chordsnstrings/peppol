@@ -1,6 +1,7 @@
 import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
+import { LedgerError } from "@/lib/server/ledger/post";
 import { prisma } from "@/lib/server/prisma";
 
 export const runtime = "nodejs";
@@ -28,6 +29,7 @@ export async function GET(req: Request) {
     });
     return json({ accounts });
   } catch (e) {
+    if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
 }
@@ -61,6 +63,7 @@ export async function POST(req: Request) {
     });
     return json({ account });
   } catch (e) {
+    if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
 }
