@@ -241,12 +241,20 @@ try {
     ["/accounting/assets", "Fixed assets"],
     ["/accounting/year-end", "Year end"],
     ["/accounting/inventory", "Inventory"],
+    ["/accounting/payroll", "Payroll"],
+    ["/accounting/corporate-tax", "Corporate tax"],
+    ["/accounting/budget", "Budget"],
+    ["/accounting/revaluation", "revaluation"],
+    ["/accounting/cash-flow", "Cash flow"],
+    ["/accounting/expenses", "Expense claims"],
+    ["/accounting/recurring", "Recurring"],
+    ["/accounting/dimensions", "Cost centre"],
   ]) {
     await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("h1", { timeout: 20000 });
     const heading = await page.locator("h1").first().innerText();
     const crashed = await page.locator("text=Application error").count();
-    check(`${path} renders`, heading.includes(marker) && crashed === 0, heading);
+    check(`${path} renders`, heading.toLowerCase().includes(marker.toLowerCase()) && crashed === 0, heading);
   }
 
   // The statements screen is the one that has to prove an arithmetic claim.
@@ -330,6 +338,35 @@ try {
 
   const lockBox = page.locator('[data-testid="lock-periods"]');
   check("locking periods is opt-in, not the default", (await lockBox.isChecked()) === false);
+
+  console.log("\nNAVIGATION");
+  await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 20000 });
+  const groups = await page.locator("nav[aria-label='Accounting'] .sw-tab").allInnerTexts();
+  check("the nav is grouped rather than one long row", groups.length >= 4 && groups.length <= 6,
+    `${groups.length} groups: ${groups.join(", ")}`);
+
+  // Walk every group and check each destination actually resolves. A tab that
+  // 404s is worse than no tab, and this is the only way to know.
+  const seen = new Set();
+  let broken = [];
+  for (let g = 0; g < groups.length; g++) {
+    await page.locator("nav[aria-label='Accounting'] .sw-tab").nth(g).click();
+    await page.waitForTimeout(400);
+    const subs = await page.locator("nav[aria-label='Accounting'] .sw-subtab").evaluateAll((els) =>
+      els.map((e) => ({ href: e.getAttribute("href"), label: e.textContent })));
+    for (const s of subs) {
+      if (seen.has(s.href)) continue;
+      seen.add(s.href);
+      const res = await page.goto(`${B}${s.href}`, { waitUntil: "domcontentloaded" });
+      const crashed = await page.locator("text=Application error").count();
+      if (!res || res.status() >= 400 || crashed > 0) broken.push(`${s.label} (${s.href})`);
+      await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+    }
+    await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 15000 });
+  }
+  check("every nav destination resolves", broken.length === 0, broken.length ? broken.join("; ") : `${seen.size} screens reached`);
 
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });

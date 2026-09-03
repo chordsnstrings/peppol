@@ -23,6 +23,8 @@ async function wipe() {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
+    db.$executeRawUnsafe(`DELETE FROM "DimensionValue" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Dimension" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "AccountBalance" WHERE "orgId" = '${ORG}'`),
@@ -73,6 +75,76 @@ d("ledger", () => {
     });
     const entry = await db.journalEntry.findUnique({ where: { id: e.id }, include: { period: true } });
     expect(entry?.period.isAdjustment).toBe(true);
+  });
+
+  it("carries a line's dimensions through a reversal", async () => {
+    // Without this the total still reconciles while every column is wrong: the
+    // cost stays against the department and the credit lands in Unallocated.
+    // Because the total is right, nothing else catches it.
+    const dim = await db.dimension.create({
+      data: { orgId: ORG, code: "COST_CENTRE_T", name: "Cost centre" },
+    });
+    await db.dimensionValue.create({ data: { orgId: ORG, dimensionId: dim.id, code: "OPS_T", name: "Operations" } });
+
+    const e = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-04", source: "manual", memo: "Tagged cost",
+      lines: [
+        { account: "6900", debit: 40_000, dimensions: { COST_CENTRE_T: "OPS_T" } },
+        { account: "1010", credit: 40_000 },
+      ],
+    });
+    const r = await reverse({ orgId: ORG, entryId: e.id, entryDate: "2026-05-05" });
+    const reversedLine = await db.journalLine.findFirst({
+      where: { entryId: r.id, account: { code: "6900" } },
+      include: { dimensions: { include: { value: true } } },
+    });
+    expect(reversedLine?.dimensions).toHaveLength(1);
+    expect(reversedLine?.dimensions[0].value.code).toBe("OPS_T");
+  });
+
+  it("can reverse an entry on an account that requires a dimension", async () => {
+    // The more serious half. post() refuses a line with no dimension on such an
+    // account — including the reversal it builds itself — so correction was
+    // impossible on exactly the accounts carrying the strongest control.
+    const dim = await db.dimension.findFirst({ where: { orgId: ORG, code: "COST_CENTRE_T" } });
+    expect(dim).not.toBeNull();
+    await db.account.updateMany({
+      where: { orgId: ORG, entityId: ENT, code: "6250" },
+      data: { requiresDimension: "COST_CENTRE_T" },
+    });
+
+    const e = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-06", source: "manual", memo: "Controlled cost",
+      lines: [
+        { account: "6250", debit: 25_000, dimensions: { COST_CENTRE_T: "OPS_T" } },
+        { account: "1010", credit: 25_000 },
+      ],
+    });
+    await expect(reverse({ orgId: ORG, entryId: e.id, entryDate: "2026-05-07" })).resolves.toBeTruthy();
+
+    // Leave the chart as it was found.
+    await db.account.updateMany({
+      where: { orgId: ORG, entityId: ENT, code: "6250" },
+      data: { requiresDimension: null },
+    });
+  });
+
+  it("says which of the dimension and the value it does not recognise", async () => {
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-08", source: "manual",
+      lines: [
+        { account: "6900", debit: 1_000, dimensions: { NO_SUCH_DIMENSION: "OPS_T" } },
+        { account: "1010", credit: 1_000 },
+      ],
+    })).rejects.toThrow(/no dimension called "NO_SUCH_DIMENSION"/i);
+
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-05-08", source: "manual",
+      lines: [
+        { account: "6900", debit: 1_000, dimensions: { COST_CENTRE_T: "NO_SUCH_VALUE" } },
+        { account: "1010", credit: 1_000 },
+      ],
+    })).rejects.toThrow(/"NO_SUCH_VALUE" is not a value of COST_CENTRE_T/i);
   });
 
   it("posts a balanced sale with VAT and returns a numbered entry", async () => {

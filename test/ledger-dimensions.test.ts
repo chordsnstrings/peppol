@@ -313,7 +313,10 @@ d("dimensions and cost-centre reporting", () => {
     await expect(P("2026-04-05", [
       { account: "6900", debit: 10_000, dimensions: CC("MARKETING") },
       { account: "1010", credit: 10_000 },
-    ])).rejects.toThrow(/Unknown COST_CENTRE value "MARKETING"/);
+      // The refusal names the value as the thing that is wrong, and lists the
+      // ones that exist — blaming the dimension here would send someone looking
+      // in the wrong place.
+    ])).rejects.toThrow(/"MARKETING" is not a value of COST_CENTRE/);
   });
 
   it("refuses a posting to an account that requires a dimension it does not carry", async () => {
@@ -353,7 +356,6 @@ d("dimensions and cost-centre reporting", () => {
     await expect(requireDimensionOn({ orgId: ORG, entityId: ENT, accountCode: "6", dimensionCode: "COST_CENTRE" }))
       .rejects.toThrow(/is a heading/i);
   });
-}
 
   it("survives a reversal without losing the entry from the report", async () => {
     // Nothing else touches June, so this cannot disturb the figures above.

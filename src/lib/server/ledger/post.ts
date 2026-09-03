@@ -203,8 +203,22 @@ export async function post(input: PostInput) {
       for (const d of dims) {
         for (const v of d.values) dimValues.set(`${d.code}:${v.code}`, { dimensionId: d.id, valueId: v.id });
       }
+      const known = new Set(dims.map((x) => x.code));
       for (const [d, v] of dimPairs) {
-        if (!dimValues.has(`${d}:${v}`)) throw new LedgerError(`Unknown ${d} value "${v}".`);
+        // Blaming the value when the dimension itself is unknown sends someone
+        // looking in the wrong place entirely.
+        if (!known.has(d)) {
+          throw new LedgerError(
+            `There is no dimension called "${d}" in this organisation. ` +
+              `Create it before posting against it, or check the spelling.`,
+          );
+        }
+        if (!dimValues.has(`${d}:${v}`)) {
+          const options = dims.find((x) => x.code === d)?.values.map((x) => x.code).slice(0, 6) ?? [];
+          throw new LedgerError(
+            `"${v}" is not a value of ${d}.` + (options.length ? ` The ones that exist are ${options.join(", ")}.` : ""),
+          );
+        }
       }
     }
 
@@ -311,7 +325,18 @@ export async function reverse(opts: {
 }) {
   const original = await prisma.journalEntry.findFirst({
     where: { id: opts.entryId, orgId: opts.orgId },
-    include: { lines: { include: { account: true }, orderBy: { lineNo: "asc" } }, book: true },
+    include: {
+      lines: {
+        include: {
+          account: true,
+          // The reversal has to rebuild the line's dimensions, so the codes
+          // have to come back with it — see the note where they are copied.
+          dimensions: { include: { value: { include: { dimension: true } } } },
+        },
+        orderBy: { lineNo: "asc" },
+      },
+      book: true,
+    },
   });
   if (!original) throw new LedgerError("That journal entry does not exist.");
   if (original.status !== "posted") throw new LedgerError(`Only a posted entry can be reversed; this one is ${original.status}.`);
@@ -341,6 +366,16 @@ export async function reverse(opts: {
         // invoice would quietly leave its supply on the VAT return.
         taxCode: l.taxCode ?? undefined,
         taxEmirate: l.taxEmirate ?? undefined,
+        // And its dimensions, for two reasons. Without them a cost-centre
+        // report is right in total and wrong in every column — the cost stays
+        // against the department and the credit lands in Unallocated, and
+        // because the total still reconciles nothing catches it. Worse, an
+        // account marked requiresDimension could not be reversed at all: post()
+        // would refuse its own reversal, making correction impossible on
+        // exactly the accounts carrying the strongest control.
+        dimensions: l.dimensions.length
+          ? Object.fromEntries(l.dimensions.map((d) => [d.value.dimension.code, d.value.code]))
+          : undefined,
       };
     }),
   });
