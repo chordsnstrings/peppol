@@ -1375,3 +1375,60 @@ model DeferredTaxPosting {
   @@unique([orgId, entityId, asOf])
   @@index([orgId, entityId])
 }
+
+
+/// A provision (IAS 37): a liability of uncertain timing or amount. The
+/// register is separate from the ledger because the standard's disclosures ask
+/// for the movement in each class — opened, used, released, unwound — and a
+/// balance alone cannot answer that.
+model Provision {
+  id              String              @id @default(cuid())
+  orgId           String
+  entityId        String
+  code            String
+  name            String
+  /// LEGAL | WARRANTY | RESTRUCTURING | ONEROUS | DECOMMISSIONING | OTHER
+  category        String              @default("OTHER")
+  /// PROVISION | CONTINGENT_LIABILITY | CONTINGENT_ASSET — a contingency is
+  /// disclosed, never recognised (IAS 37.27/31), which is the distinction the
+  /// whole standard turns on.
+  kind            String              @default("PROVISION")
+  recognisedOn    DateTime            @db.Date
+  /// The best estimate of the outflow required to settle (IAS 37.36).
+  estimateMinor   BigInt
+  /// Where the time value of money is material the estimate is discounted
+  /// (IAS 37.45) and the discount unwinds as a finance cost.
+  discountRateBps Int                 @default(0)
+  expectedOn      DateTime?           @db.Date
+  /// What the balance sheet carries now — nil for a contingency.
+  carryingMinor   BigInt              @default(0)
+  accountCode     String              @default("2150")
+  expenseAccount  String              @default("6900")
+  /// open | settled | released
+  status          String              @default("open")
+  note            String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  movements       ProvisionMovement[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+model ProvisionMovement {
+  id          String    @id @default(cuid())
+  orgId       String
+  provisionId String
+  provision   Provision @relation(fields: [provisionId], references: [id], onDelete: Cascade)
+  seq         Int
+  /// RECOGNISE | REMEASURE | UNWIND | UTILISE | RELEASE
+  kind        String
+  movedOn     DateTime  @db.Date
+  /// Signed: what the movement did to the carrying amount.
+  amountMinor BigInt
+  note        String?
+  entryId     String?
+
+  @@unique([provisionId, seq])
+  @@index([orgId, provisionId])
+}
