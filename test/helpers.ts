@@ -14,6 +14,7 @@ export function line(partial: Partial<InvoiceLine> = {}): InvoiceLine {
     unitPriceMinor: partial.unitPriceMinor ?? 50000,
     taxProfileCode: (partial.taxProfileCode ?? "STANDARD_5") as TaxProfileCode,
     exemptionReason: partial.exemptionReason,
+    marginPurchaseMinor: partial.marginPurchaseMinor,
     lineNetMinor: 0,
     lineVatMinor: 0,
   };

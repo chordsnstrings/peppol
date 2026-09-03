@@ -170,6 +170,109 @@ d("VAT 201 return", () => {
     expect(after.reconciliation.outputMatches).toBe(true);
   });
 
+  it("keeps a designated-zone supply of goods off box 4 and reports it separately", async () => {
+    // Article 51 of Federal Decree-Law 8/2017 and Article 51 of the Executive
+    // Regulation treat a designated zone as outside the State for goods, so the
+    // supply is outside the scope. Box 4 is zero-rated supplies, which are IN
+    // scope at a rate of nothing — putting the zone figure there overstates the
+    // taxable supplies the business declares it made.
+    //
+    // AED 4,000 zero-rated export and AED 2,500 of goods sold inside a zone.
+    // Box 4 must read 400,000 fils, not 650,000.
+    await postInvoice({
+      orgId: ORG,
+      invoice: doc("OUTBOUND", [line(400_000, 0, "ZERO_EXPORT")], { issueDate: "2026-09-05", supplyDate: "2026-09-05" }),
+    });
+    await postInvoice({
+      orgId: ORG,
+      invoice: doc("OUTBOUND", [line(250_000, 0, "DESIGNATED_ZONE")], { issueDate: "2026-09-08", supplyDate: "2026-09-08" }),
+    });
+
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-09-01", to: "2026-09-30" });
+    expect(box(r, "sales", "4").amountMinor).toBe("400000");
+    expect(box(r, "sales", "4").vatMinor).toBeNull();
+    // On no other box either.
+    expect(box(r, "sales", "1").amountMinor).toBe("0");
+    expect(box(r, "sales", "3").amountMinor).toBe("0");
+    expect(box(r, "sales", "5").amountMinor).toBe("0");
+
+    const dz = r.outsideTheReturn.find((o) => o.taxCode === "DESIGNATED_ZONE")!;
+    expect(dz.amountMinor).toBe("250000");
+    // And it says the thing a bookkeeper has to know: services in a zone are
+    // not out of scope at all.
+    expect(dz.note).toMatch(/SERVICES/);
+    expect(dz.note).toMatch(/standard rated/i);
+    expect(dz.note).toMatch(/Article 51/);
+  });
+
+  it("puts a capital asset adjustment in box 9's adjustment column, not its VAT column", async () => {
+    // AED 2,000 of standard-rated purchases bearing AED 100 of tax, and an
+    // AED 300 capital asset adjustment under Executive Regulation Articles 57
+    // and 58, which restates tax on a supply years old and no supply of this
+    // period. Box 9 must read 200,000 net, 10,000 VAT and 30,000 adjustment —
+    // and 40,000 of input tax in total, which is what it was before.
+    await postBill({
+      orgId: ORG,
+      bill: doc("INBOUND", [line(200_000, 10_000)], { issueDate: "2026-10-04", supplyDate: "2026-10-04" }),
+    });
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-10-20",
+      // Not "manual": 1350 is a control account and the database refuses a
+      // manual journal against one. This is the shape `vat-schemes.ts` posts.
+      source: "vat",
+      sourceType: "CAPITAL_ASSET_ADJUSTMENT",
+      memo: "Capital asset adjustment — interval 3",
+      lines: [
+        { account: "1350", debit: 30_000, taxCode: "INPUT_VAT" },
+        { account: "6900", credit: 30_000 },
+      ],
+    });
+
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-10-01", to: "2026-10-31" });
+    const box9 = box(r, "expenses", "9");
+    expect(box9.amountMinor).toBe("200000");
+    expect(box9.vatMinor).toBe("10000");
+    expect(box9.adjustmentMinor).toBe("30000");
+    // The layout changed; the total did not.
+    expect(r.totalInputVatMinor).toBe("40000");
+    expect(BigInt(box9.vatMinor!) + BigInt(box9.adjustmentMinor!)).toBe(40_000n);
+    expect(r.reconciliation.inputMatches).toBe(true);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("says which boxes it does not report an adjustment column for, rather than reporting a nil", async () => {
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-10-01", to: "2026-10-31" });
+    // The real VAT 201 carries an Adjustment column on more boxes than box 9.
+    // Nothing in this codebase establishes which, and nothing posts into one,
+    // so they report null — "not reported here" — instead of a nought that
+    // would read as "there were no adjustments".
+    for (const b of r.sales) expect(b.adjustmentMinor).toBeNull();
+    expect(box(r, "expenses", "10").adjustmentMinor).toBeNull();
+  });
+
+  it("warns that a margin-scheme supply carries tax the ledger never saw", async () => {
+    // A used car sold for AED 35,000, bought for AED 30,000. The invoice states
+    // no tax (Executive Regulation Article 43), so nothing reaches 2100 — but
+    // AED 238.10 of output tax is still due on the margin under Article 29.
+    // The return can see the supply and cannot see the purchase price, so it
+    // says so rather than reporting a nil and letting it be filed.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-11-09", source: "invoice",
+      memo: "Used vehicle — profit margin scheme",
+      lines: [
+        { account: "1010", debit: 3_500_000 },
+        { account: "4000", credit: 3_500_000, taxCode: "MARGIN_SCHEME" },
+      ],
+    });
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-11-01", to: "2026-11-30" });
+    // Not silently folded into box 1 with the standard-rated supplies.
+    expect(box(r, "sales", "1").amountMinor).toBe("0");
+    const w = r.warnings.find((x) => /profit margin scheme/i.test(x))!;
+    expect(w).toMatch(/5\/105/);
+    expect(w).toMatch(/Article 29/);
+    expect(w).toMatch(/2100/);
+  });
+
   it("refuses a period that ends before it starts", async () => {
     await expect(vatReturn({ orgId: ORG, entityId: ENT, from: "2026-05-31", to: "2026-05-01" }))
       .rejects.toThrow(/ends before it starts/i);

@@ -5,10 +5,12 @@ import Link from "next/link";
 import { useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading } from "@/components/ledger/primitives";
 
-interface Box { box: string; label: string; amountMinor: string; vatMinor: string | null }
+interface Box { box: string; label: string; amountMinor: string; vatMinor: string | null; adjustmentMinor: string | null }
+interface Outside { taxCode: string; label: string; amountMinor: string; note: string }
 interface Ret {
   periodFrom: string; periodTo: string; currency: string;
   sales: Box[]; expenses: Box[];
+  outsideTheReturn: Outside[];
   totalOutputVatMinor: string; totalInputVatMinor: string; netVatMinor: string; payable: boolean;
   reconciliation: { outputVatPerLedgerMinor: string; inputVatPerLedgerMinor: string; outputMatches: boolean; inputMatches: boolean };
   warnings: string[];
@@ -80,6 +82,8 @@ export default function VatReturnPage() {
             <BoxTable title="VAT on expenses and all other inputs" rows={data.expenses} currency={data.currency} />
           </div>
 
+          <OutsideTheReturn rows={data.outsideTheReturn} currency={data.currency} />
+
           <Panel className="mt-4 p-4">
             <div className="sw-label">Net VAT due</div>
             <div className="mt-3 grid gap-4 sm:grid-cols-3">
@@ -137,6 +141,10 @@ export default function VatReturnPage() {
 }
 
 function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; currency: string }) {
+  // The Adjustment column appears only where a box on this side of the form has
+  // one. An empty fourth column on the sales table would read as "no
+  // adjustments" when what it means is "not reported here".
+  const hasAdjustments = rows.some((b) => b.adjustmentMinor !== null);
   return (
     <Panel className="overflow-hidden">
       <div className="border-b px-3 py-2" style={{ borderColor: "var(--sw-line)", background: "var(--sw-surface-2)" }}>
@@ -151,6 +159,9 @@ function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; curre
               <th>Description</th>
               <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
               <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>VAT</th>
+              {hasAdjustments && (
+                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Adjustment</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -164,11 +175,62 @@ function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; curre
                     ? <span className="sw-zero" title="This box carries no VAT">–</span>
                     : <Figure minor={b.vatMinor} currency={currency} colour={false} />}
                 </td>
+                {hasAdjustments && (
+                  <td className="sw-num" data-testid={`vat-adjustment-${b.box}`}>
+                    {b.adjustmentMinor === null
+                      ? <span className="sw-zero" title="No adjustment column is reported for this box">–</span>
+                      : <Figure minor={b.adjustmentMinor} currency={currency} colour={false} />}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {hasAdjustments && (
+        <p className="sw-sub border-t px-3 py-2" style={{ borderColor: "var(--sw-line)" }}>
+          An adjustment is tax that belongs to this period without a supply of this period behind it — a capital
+          asset adjustment under Articles 57 and 58 of the Executive Regulation. It has its own column so that it is
+          never shown as tax on expenses nobody incurred. It is already inside the totals below.
+        </p>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * Supplies that reached the books under a treatment no box of the VAT 201
+ * carries. Shown rather than dropped: a figure that is on none of the boxes is
+ * still a figure somebody has to be able to find, and the panel is where the
+ * revenue in the books ties back to the revenue on the return.
+ */
+function OutsideTheReturn({ rows, currency }: { rows: Outside[]; currency: string }) {
+  const shown = rows.filter((r) => BigInt(r.amountMinor) !== 0n);
+  if (!shown.length) return null;
+  return (
+    <Panel className="mt-4 p-4">
+      <div className="sw-label">Outside the return</div>
+      <p className="sw-sub mt-1.5 max-w-[70ch]">
+        These supplies are on the books for the period and on none of the boxes above. They are not zero rated —
+        a zero-rated supply is inside the scope of UAE VAT at a rate of nothing, and these are outside it
+        altogether.
+      </p>
+      <table className="sw-table mt-3">
+        <caption className="sr-only">Supplies that belong on no box of the return</caption>
+        <tbody>
+          {shown.map((r) => (
+            <tr key={r.taxCode} data-testid={`vat-outside-${r.taxCode}`}>
+              <td>
+                {r.label}
+                <p className="sw-sub mt-1 max-w-[70ch]">{r.note}</p>
+              </td>
+              <td className="sw-num" style={{ width: "var(--sw-col-amount)", verticalAlign: "top" }}>
+                <Figure minor={r.amountMinor} currency={currency} colour={false} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </Panel>
   );
 }

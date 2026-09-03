@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { marginSchemeLineTax } from "@/lib/domain/tax";
 import { vatReturn } from "@/lib/server/ledger/vat";
 import {
   BUILDING_INTERVALS,
@@ -345,9 +346,16 @@ d("VAT schemes — capital assets, profit margin, designated zones", () => {
     expect(r.reconciliation.inputMatches).toBe(true);
     expect(r.warnings).toEqual([]);
     const box9 = r.expenses.find((b) => b.box === "9")!;
-    expect(box9.vatMinor).toBe("6100000");
     // No supply is restated: only the tax moved.
     expect(box9.amountMinor).toBe("0");
+    // …which is why the whole of it sits in the Adjustment column and none of
+    // it in the VAT column. Tax in the VAT column beside a net of nought is a
+    // recovery against expenses the business did not incur this period, and
+    // the form has a separate column so that it never has to be written that
+    // way. The total is the same figure either way.
+    expect(box9.vatMinor).toBe("0");
+    expect(box9.adjustmentMinor).toBe("6100000");
+    expect(BigInt(box9.vatMinor!) + BigInt(box9.adjustmentMinor!)).toBe(6_100_000n);
   });
 
   it("taxes the margin, not the price, on a second-hand sale", () => {
@@ -378,6 +386,35 @@ d("VAT schemes — capital assets, profit margin, designated zones", () => {
     expect(m.marginMinor).toBe("0");
     expect(m.taxMinor).toBe("0");
     expect(m.refusal).toBeNull();
+  });
+
+  it("agrees, to the fils, with the margin an invoice line computes", () => {
+    // Two modules carry this arithmetic: this one for a supply worked out on
+    // its own, and `marginSchemeLineTax` in `src/lib/domain/tax.ts` for a line
+    // on a document. The second cannot import the first — that module opens a
+    // Prisma client and the invoice editor runs in a browser, and this module
+    // already imports the rate table from it, so the import would be a cycle
+    // as well. This test is what holds them to the same figures instead.
+    const cases: [purchase: number, sale: number][] = [
+      [3_000_000, 3_500_000], // AED 30,000 → 35,000: tax 23,810
+      [1_000_000, 1_000_210], // a 210-fils margin: tax 10
+      [1_000_000, 1_000_001], // a one-fils margin: tax nil
+      [3_000_000, 3_000_000], // sold at cost: tax nil
+      [3_500_000, 3_000_000], // sold at a loss: tax nil, never a credit
+      [0, 7_777_777], // bought for nothing: the whole price is the margin
+      [12_345_678, 98_765_432],
+    ];
+    for (const [purchase, sale] of cases) {
+      const scheme = marginSchemeSupply({ purchaseMinor: String(purchase), saleMinor: String(sale) });
+      const onALine = marginSchemeLineTax({
+        qty: 1,
+        unitPriceMinor: sale,
+        taxProfileCode: "MARGIN_SCHEME",
+        marginPurchaseMinor: purchase,
+      });
+      expect(String(onALine.taxMinor)).toBe(scheme.taxMinor);
+      expect(String(onALine.marginMinor)).toBe(scheme.marginMinor);
+    }
   });
 
   it("treats goods in a designated zone as outside the State, and services as inside it", () => {

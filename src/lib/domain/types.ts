@@ -80,6 +80,19 @@ export interface InvoiceLine {
   unitPriceMinor: number; // exclusive of VAT
   taxProfileCode: TaxProfileCode;
   exemptionReason?: string;
+  /**
+   * What the goods on this line cost to buy, for a profit-margin-scheme line.
+   *
+   * The tax under the scheme is a share of the margin (Article 29 of Federal
+   * Decree-Law 8/2017, Article 43 of the Executive Regulation), and the margin
+   * is the selling price less this. Without it there is no margin to tax and
+   * nothing to compute, which is why it is carried on the line rather than
+   * inferred: the purchase price of second-hand goods is a fact about how they
+   * were acquired, and no rate table holds it.
+   *
+   * Ignored on every other treatment.
+   */
+  marginPurchaseMinor?: number;
   // computed
   lineNetMinor: number;
   lineVatMinor: number;
@@ -102,6 +115,22 @@ export interface InvoiceTotals {
   perCategory: CategoryBreakdown[];
   vatMinorAED?: number;
   payableMinorAED?: number;
+  /**
+   * The tax inside the margin on profit-margin-scheme lines, which the supplier
+   * accounts for and the buyer never sees.
+   *
+   * It is deliberately not part of `vatMinor` or `payableMinor`. Executive
+   * Regulation Article 43 forbids stating a tax amount on a margin-scheme
+   * invoice, and the price the buyer pays already contains this tax — adding it
+   * to the payable would charge it a second time.
+   */
+  marginTaxMinor?: number;
+  /**
+   * How many margin-scheme lines carry no purchase cost, so no margin could be
+   * computed and no tax worked out. Reported rather than assumed away: the
+   * alternative is a document that quietly claims nil tax on a real margin.
+   */
+  marginLinesWithoutCostCount?: number;
 }
 
 export interface FxInfo {
