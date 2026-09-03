@@ -120,6 +120,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/consolidation", label: "Consolidation" },
       { href: "/accounting/intercompany", label: "Intercompany" },
       { href: "/accounting/equity", label: "Equity and notes" },
+      { href: "/accounting/related-parties", label: "Related parties" },
       { href: "/accounting/audit", label: "Audit trail" },
       { href: "/accounting/analytics", label: "Analytics" },
     ],

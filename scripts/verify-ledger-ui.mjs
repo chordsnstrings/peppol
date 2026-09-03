@@ -405,6 +405,7 @@ try {
     ["/accounting/credit-control", /credit/i],
     ["/accounting/borrowings", /borrowing|loan/i],
     ["/accounting/numbering", /number/i],
+    ["/accounting/related-parties", /related part/i],
   ];
   for (const [href, heading] of screens) {
     const res = await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
