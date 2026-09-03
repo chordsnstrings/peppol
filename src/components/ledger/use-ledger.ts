@@ -34,12 +34,19 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
  */
 export function useLedgerQuery<T>(
   path: string | null,
+  /**
+   * Anything else the read depends on. Joined into one string rather than
+   * spread into the dependency array: React requires that array to be the same
+   * length on every render, and a caller passing a list whose length varies
+   * would break in a way that only shows up on the render where it changes.
+   */
   deps: React.DependencyList = [],
 ): { data: T | null; error: string | null; loading: boolean; reload: () => void } {
   const [data, setData] = React.useState<T | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(Boolean(path));
   const [nonce, setNonce] = React.useState(0);
+  const depKey = deps.map((d) => String(d)).join("\u0000");
 
   React.useEffect(() => {
     if (!path) { setLoading(false); return; }
@@ -52,7 +59,7 @@ export function useLedgerQuery<T>(
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, nonce, ...deps]);
+  }, [path, nonce, depKey]);
 
   return { data, error, loading, reload: () => setNonce((n) => n + 1) };
 }

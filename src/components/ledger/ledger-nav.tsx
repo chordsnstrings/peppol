@@ -93,8 +93,10 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting/statements", label: "Statements" },
       { href: "/accounting/cash-flow", label: "Cash flow" },
+      { href: "/accounting/forecast", label: "Cash forecast" },
       { href: "/accounting/trial-balance", label: "Trial balance" },
       { href: "/accounting/budget", label: "Budget" },
+      { href: "/accounting/layouts", label: "Report layouts" },
       { href: "/accounting/dimensions", label: "Cost centres" },
       { href: "/accounting/projects", label: "Projects" },
       { href: "/accounting/insights", label: "Insights" },

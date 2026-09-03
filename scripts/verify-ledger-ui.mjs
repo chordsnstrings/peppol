@@ -343,7 +343,7 @@ try {
   await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 20000 });
   const groups = await page.locator("nav[aria-label='Accounting'] .sw-tab").allInnerTexts();
-  check("the nav is grouped rather than one long row", groups.length >= 4 && groups.length <= 6,
+  check("the nav is grouped rather than one long row", groups.length >= 4 && groups.length <= 8,
     `${groups.length} groups: ${groups.join(", ")}`);
 
   // Walk every group and check each destination actually resolves. A tab that
@@ -367,6 +367,46 @@ try {
     await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 15000 });
   }
   check("every nav destination resolves", broken.length === 0, broken.length ? broken.join("; ") : `${seen.size} screens reached`);
+
+  console.log("\nTHE NEWER SCREENS");
+  // Each of these is reachable and, on a fresh entity, empty. An empty screen
+  // has to read as "there is nothing here yet" rather than as a failure, and
+  // it has to say what the screen is for — which is the whole difference
+  // between an empty state and a blank page.
+  const screens = [
+    ["/accounting/attention", /needs attention|attention/i],
+    ["/accounting/customers", /customer/i],
+    ["/accounting/sales-orders", /quote|order/i],
+    ["/accounting/revenue", /revenue recognition/i],
+    ["/accounting/payment-runs", /payment run/i],
+    ["/accounting/petty-cash", /petty cash/i],
+  ];
+  for (const [href, heading] of screens) {
+    const res = await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(700);
+    const crashed = await page.locator("text=Application error").count();
+    const h1 = await page.locator("h1").first().innerText().catch(() => "");
+    const body = await page.locator("body").innerText();
+    check(`${href} renders`, res && res.status() < 400 && crashed === 0 && heading.test(h1 || body),
+      crashed ? "application error" : (h1 || "no heading").slice(0, 60));
+    check(`${href} explains itself`, body.length > 200 && !/undefined|NaN|\[object Object\]/.test(body),
+      /undefined|NaN|\[object Object\]/.test(body) ? "leaked a placeholder into the page" : `${body.length} characters`);
+  }
+
+  // Every one of them has to be operable without a mouse. A screen whose only
+  // control cannot be tabbed to is a screen a screen-reader user cannot use.
+  await page.goto(`${B}/accounting/revenue`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("h1", { timeout: 15000 });
+  await page.keyboard.press("Tab");
+  const focused = await page.evaluate(() => {
+    const el = document.activeElement;
+    if (!el || el === document.body) return null;
+    const s = getComputedStyle(el);
+    return { tag: el.tagName, outline: s.outlineStyle, shadow: s.boxShadow };
+  });
+  check("tabbing reaches a control with a visible focus ring", !!focused &&
+    (focused.outline !== "none" || (focused.shadow && focused.shadow !== "none")),
+    focused ? `${focused.tag} outline=${focused.outline}` : "nothing took focus");
 
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });

@@ -77,7 +77,7 @@ type Bal = { code: string; name: string; nameAr: string | null; type: string; su
  * matters most — a balance sheet "as at today" would omit the whole current
  * month, which is the month anyone actually asks about.
  */
-async function balances(opts: {
+export async function balances(opts: {
   orgId: string; entityId: string; to: Date; from?: Date;
 }): Promise<{ rows: Bal[]; currency: string }> {
   const book = await prisma.book.findFirst({
@@ -169,6 +169,15 @@ function section(key: string, label: string, rows: Bal[], naturalSide: "debit" |
   return { key, label, lines, totalMinor: total.toString() };
 }
 
+/** A ratio in basis points, rounded to the nearest and away from zero. */
+function roundedBps(numerator: bigint, denominator: bigint): bigint {
+  const n = numerator * 10_000n;
+  const d = denominator < 0n ? -denominator : denominator;
+  const signed = denominator < 0n ? -n : n;
+  const half = d / 2n;
+  return signed >= 0n ? (signed + half) / d : -((-signed + half) / d);
+}
+
 /** Cost of sales is the 5xxx block; other expenses are 6xxx. */
 const isCostOfSales = (r: Bal) => r.code.startsWith("5");
 
@@ -193,9 +202,12 @@ export async function profitAndLoss(opts: {
     from: opts.from, to: opts.to, currency,
     revenue, costOfSales: cos, grossProfitMinor: gross.toString(),
     expenses: opex, netProfitMinor: net.toString(),
-    // Basis points keep this exact; a margin as a float is a margin that
-    // disagrees with itself at the fourth decimal place.
-    grossMarginBps: rev === 0n ? null : Number((gross * 10_000n) / rev),
+    // Basis points rather than a float, because a margin held as a double
+    // disagrees with itself at the fourth decimal place. Rounded to the
+    // nearest, away from zero: integer division truncates towards zero, which
+    // would round a negative margin up and a positive one down and make the
+    // two directions read differently for the same distance from the mark.
+    grossMarginBps: rev === 0n ? null : Number(roundedBps(gross, rev)),
   };
 }
 
