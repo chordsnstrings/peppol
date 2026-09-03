@@ -404,6 +404,7 @@ try {
     ["/accounting/cash-flow-direct", /cash flow/i],
     ["/accounting/credit-control", /credit/i],
     ["/accounting/borrowings", /borrowing|loan/i],
+    ["/accounting/numbering", /number/i],
   ];
   for (const [href, heading] of screens) {
     const res = await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });

@@ -47,6 +47,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/opening", label: "Opening balances" },
       { href: "/accounting/exports", label: "Export and migration" },
       { href: "/accounting/roles", label: "Who may do what" },
+      { href: "/accounting/numbering", label: "Document numbering" },
     ],
   },
   {

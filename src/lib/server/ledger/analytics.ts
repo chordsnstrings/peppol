@@ -1173,7 +1173,7 @@ const numbering: Test = {
       }),
       prisma.documentSequence.findMany({
         where: { orgId: ctx.orgId, entityId: ctx.entityId },
-        select: { scope: true, prefix: true, nextNo: true, padding: true },
+        select: { scope: true, prefix: true, nextNo: true, padding: true, restartYearly: true, cycleStart: true },
       }),
     ]);
     const sequenceFor = new Map(sequences.map((s) => [s.scope, s]));
@@ -1186,20 +1186,37 @@ const numbering: Test = {
     }
 
     const findings: Finding[] = [];
-    const bySeries = new Map<string, Map<number, string[]>>();
+    /** series → the literal prefix the document carries → number → entry ids. */
+    const bySeries = new Map<string, Map<string, Map<number, string[]>>>();
     const unparsed: string[] = [];
 
+    /*
+     * The number is the trailing run of digits, and the prefix is whatever
+     * comes before it on the document itself.
+     *
+     * It used to strip the sequence's *currently configured* prefix and treat
+     * anything left over as unreadable. Two things break that. A series whose
+     * prefix has been changed carries the old one on every document issued
+     * before the change, and none of them would match. A prefix carrying a
+     * year token is stored as "INV-{YYYY}-" and carried as "INV-2026-", so no
+     * document would ever match it. Either way the numbers went into the
+     * unreadable pile and then every number from 1 to the counter was reported
+     * as allocated and never seen — a high-severity finding, in a product
+     * whose whole claim about numbering is that a gap cannot happen.
+     */
     for (const r of rows) {
-      const seq = sequenceFor.get(r.series);
-      const digits = seq && seq.prefix && r.number.startsWith(seq.prefix) ? r.number.slice(seq.prefix.length) : r.number;
-      if (!/^\d+$/.test(digits)) {
+      const m = /^(.*?)(\d+)$/.exec(r.number);
+      if (!m) {
         unparsed.push(`${r.series}-${r.number}`);
         continue;
       }
+      const [, prefix, digits] = m;
+      const byPrefix = bySeries.get(r.series) ?? new Map<string, Map<number, string[]>>();
+      const held = byPrefix.get(prefix) ?? new Map<number, string[]>();
       const n = Number(digits);
-      const held = bySeries.get(r.series) ?? new Map<number, string[]>();
       held.set(n, [...(held.get(n) ?? []), r.id]);
-      bySeries.set(r.series, held);
+      byPrefix.set(prefix, held);
+      bySeries.set(r.series, byPrefix);
     }
 
     const missingBySeries: string[] = [];
@@ -1207,13 +1224,18 @@ const numbering: Test = {
     const reusedLabels: string[] = [];
     let sequenceless = 0;
 
-    for (const [series, held] of bySeries) {
-      const seq = sequenceFor.get(series);
-      const pad = (n: number) => `${series}-${seq?.prefix ?? ""}${String(n).padStart(seq?.padding ?? 5, "0")}`;
+    const uncheckable: string[] = [];
 
-      for (const [n, ids] of held) if (ids.length > 1) {
-        reusedIds.push(...ids);
-        reusedLabels.push(pad(n));
+    for (const [series, byPrefix] of bySeries) {
+      const seq = sequenceFor.get(series);
+
+      // A number reused is a number reused whatever format it was issued
+      // under, so this runs across every prefix the series has ever carried.
+      for (const [prefix, held] of byPrefix) {
+        for (const [n, ids] of held) if (ids.length > 1) {
+          reusedIds.push(...ids);
+          reusedLabels.push(`${series}-${prefix}${String(n).padStart(seq?.padding ?? 5, "0")}`);
+        }
       }
 
       if (!seq) {
@@ -1223,6 +1245,35 @@ const numbering: Test = {
         sequenceless++;
         continue;
       }
+
+      // The counter counts one thing: how many numbers the series has issued
+      // in its current cycle, under its current format. So it can only be
+      // compared against the documents issued under that same format — and a
+      // series that restarts each year cannot be compared at all from a single
+      // counter, because last year's run also started at 1 and the counter has
+      // forgotten how far it got.
+      if (seq.restartYearly) {
+        uncheckable.push(`${series} (restarts each year, so one counter cannot bound every run)`);
+        continue;
+      }
+      const live = seq.prefix.replace(/\{YYYY\}/g, String(new Date().getUTCFullYear()))
+        .replace(/\{YY\}/g, String(new Date().getUTCFullYear()).slice(2));
+      const held = byPrefix.get(live);
+      if (!held) {
+        uncheckable.push(`${series} (no document carries the format "${live}" the counter is issuing)`);
+        continue;
+      }
+      const others = [...byPrefix.keys()].filter((p) => p !== live);
+      if (others.length) {
+        // Documents under an old format are real and are not gaps; the counter
+        // simply cannot say how many of them there should have been.
+        uncheckable.push(
+          `${series} (${plural(others.length, "earlier format", "earlier formats")}: ` +
+          `${others.map((o) => `"${o}"`).join(", ")} — those runs are outside what the counter can bound)`,
+        );
+      }
+
+      const pad = (n: number) => `${series}-${live}${String(n).padStart(seq.padding, "0")}`;
       const allocated = seq.nextNo - 1;
       let missing = 0;
       const shown: string[] = [];
@@ -1231,7 +1282,12 @@ const numbering: Test = {
         missing++;
         if (shown.length < 12) shown.push(pad(n));
       }
-      if (missing > 0) {
+      // Numbers issued under an earlier format still consumed the counter, so
+      // a series that has changed format will look short by exactly that many.
+      // Reporting it as missing would be the same false alarm in a new
+      // disguise, so where any of the shortfall can be explained by an earlier
+      // run it goes to the uncheckable list instead.
+      if (missing > 0 && others.length === 0) {
         missingBySeries.push(
           `${series}: ${plural(missing, "number", "numbers")} allocated and never seen again ` +
             `(${shown.join(", ")}${missing > shown.length ? ", …" : ""}), out of ${allocated} allocated`,
@@ -1294,8 +1350,16 @@ const numbering: Test = {
           `${sequenceless === 1 ? "it was" : "they were"} checked for reuse only`,
       );
     }
+    if (uncheckable.length > 0) {
+      // Named rather than silently passed. A test that quietly skips a series
+      // reads exactly like a test that checked it and found nothing.
+      caveats.push(
+        `${plural(uncheckable.length, "series could", "series could")} not be bounded by ${uncheckable.length === 1 ? "its" : "their"} ` +
+          `counter and ${uncheckable.length === 1 ? "was" : "were"} checked for reuse only: ${uncheckable.join("; ")}`,
+      );
+    }
     if (unparsed.length > 0) {
-      caveats.push(`${plural(unparsed.length, "number", "numbers")} are not numeric and were not checked (${unparsed.slice(0, 5).join(", ")})`);
+      caveats.push(`${plural(unparsed.length, "number", "numbers")} carry no digits at all and were not checked (${unparsed.slice(0, 5).join(", ")})`);
     }
 
     return {
