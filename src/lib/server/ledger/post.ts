@@ -93,6 +93,18 @@ function toFunctional(amount: bigint, rate: number): bigint {
  * Post a balanced journal entry. Atomic: the number allocation, the entry, its
  * lines and the balance cache all commit together or not at all.
  */
+/**
+ * The database raises `ledger: …` for every invariant it enforces. Surface those
+ * as LedgerError so a guard we have not mirrored in application code still
+ * reaches the user as an actionable message rather than a generic 500.
+ */
+function rethrowLedgerErrors(e: unknown): never {
+  const msg = e instanceof Error ? e.message : String(e);
+  const m = /ledger:\s*([^\n"]+)/.exec(msg);
+  if (m) throw new LedgerError(m[1].trim().replace(/^entry \S+ /, "This entry "));
+  throw e;
+}
+
 export async function post(input: PostInput) {
   const {
     orgId, entityId, bookCode = "PRIMARY", entryDate, memo, source = "manual",
@@ -160,6 +172,20 @@ export async function post(input: PostInput) {
       if (account.requiresDimension && !(l.dimensions ?? {})[account.requiresDimension]) {
         throw new LedgerError(`Account ${account.code} requires a ${account.requiresDimension}.`);
       }
+      // These are enforced by the database too; checking here means the message
+      // names the account and tells the user what to do instead of raising a 500.
+      if (!account.isPostable) {
+        throw new LedgerError(`${account.code} ${account.name} is a heading, not a postable account. Choose one of its sub-accounts.`);
+      }
+      if (account.status !== "active") {
+        throw new LedgerError(`Account ${account.code} ${account.name} is archived.`);
+      }
+      if (account.isControl && source === "manual") {
+        throw new LedgerError(`${account.code} ${account.name} is a control account — it is maintained by its subledger. Raise the underlying document instead of a manual journal.`);
+      }
+      if (account.currency && account.currency !== currency) {
+        throw new LedgerError(`Account ${account.code} ${account.name} only accepts ${account.currency}.`);
+      }
       return {
         lineNo: i + 1,
         orgId,
@@ -216,7 +242,7 @@ export async function post(input: PostInput) {
 
     await bumpBalances(tx, { orgId, entityId, bookId: book.id, periodId: period.id }, prepared);
     return entry;
-  });
+  }).catch(rethrowLedgerErrors);
 }
 
 /**
