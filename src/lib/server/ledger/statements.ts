@@ -65,9 +65,17 @@ export interface BalanceSheet {
 type Bal = { code: string; name: string; nameAr: string | null; type: string; subtype: string | null; balance: bigint };
 
 /**
- * Read balances from the anchor cache for every period ending on or before
- * `to`, optionally from `from` (used by the profit and loss, which is a
- * period measure rather than a point-in-time one).
+ * Balances for a date range.
+ *
+ * Periods that have fully elapsed come from the anchor cache, which is what
+ * keeps this fast as the ledger grows. A period that straddles either end of
+ * the range cannot: its anchor covers the whole period, including postings
+ * outside the range. Those are summed from the journal lines themselves, which
+ * is at most one or two periods' worth of rows.
+ *
+ * Reading only fully-elapsed periods would be simpler and wrong in the way that
+ * matters most — a balance sheet "as at today" would omit the whole current
+ * month, which is the month anyone actually asks about.
  */
 async function balances(opts: {
   orgId: string; entityId: string; to: Date; from?: Date;
@@ -77,29 +85,57 @@ async function balances(opts: {
   });
   if (!book) throw new LedgerError("No ledger has been opened for this entity.");
 
-  const periods = await prisma.accountingPeriod.findMany({
+  const inRange = await prisma.accountingPeriod.findMany({
     where: {
       orgId: opts.orgId, entityId: opts.entityId,
-      endsOn: { lte: opts.to },
-      ...(opts.from ? { startsOn: { gte: opts.from } } : {}),
+      startsOn: { lte: opts.to },
+      ...(opts.from ? { endsOn: { gte: opts.from } } : {}),
     },
-    select: { id: true },
+    select: { id: true, startsOn: true, endsOn: true },
   });
 
-  const cached = await prisma.accountBalance.findMany({
-    where: { bookId: book.id, periodId: { in: periods.map((p) => p.id) }, currency: book.functionalCurrency },
-    include: { account: true },
-  });
+  // A period is wholly inside the range only if both its ends are.
+  const whole = inRange.filter(
+    (p) => p.endsOn <= opts.to && (!opts.from || p.startsOn >= opts.from),
+  );
+  const partial = inRange.filter((p) => !whole.some((w) => w.id === p.id));
 
   const byAccount = new Map<string, Bal>();
-  for (const b of cached) {
-    const prev = byAccount.get(b.accountId);
-    if (prev) prev.balance += b.closingMinor;
-    else byAccount.set(b.accountId, {
-      code: b.account.code, name: b.account.name, nameAr: b.account.nameAr,
-      type: b.account.type, subtype: b.account.subtype, balance: b.closingMinor,
+  const add = (
+    acc: { id: string; code: string; name: string; nameAr: string | null; type: string; subtype: string | null },
+    amount: bigint,
+  ) => {
+    const prev = byAccount.get(acc.id);
+    if (prev) prev.balance += amount;
+    else byAccount.set(acc.id, {
+      code: acc.code, name: acc.name, nameAr: acc.nameAr,
+      type: acc.type, subtype: acc.subtype, balance: amount,
     });
+  };
+
+  if (whole.length) {
+    const cached = await prisma.accountBalance.findMany({
+      where: { bookId: book.id, periodId: { in: whole.map((p) => p.id) }, currency: book.functionalCurrency },
+      include: { account: true },
+    });
+    for (const b of cached) add(b.account, b.closingMinor);
   }
+
+  if (partial.length) {
+    const lines = await prisma.journalLine.findMany({
+      where: {
+        orgId: opts.orgId,
+        entry: {
+          entityId: opts.entityId, bookId: book.id, status: "posted",
+          periodId: { in: partial.map((p) => p.id) },
+          entryDate: { lte: opts.to, ...(opts.from ? { gte: opts.from } : {}) },
+        },
+      },
+      include: { account: true },
+    });
+    for (const l of lines) add(l.account, l.functionalAmountMinor);
+  }
+
   return {
     rows: [...byAccount.values()].sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true })),
     currency: book.functionalCurrency,

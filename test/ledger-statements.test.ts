@@ -119,6 +119,36 @@ d("financial statements", () => {
     expect(bs.assets.lines.every((l) => l.presentedMinor !== "0")).toBe(true);
   });
 
+  it("includes the period still running, not only the ones that have closed", async () => {
+    // The bug this pins: reading only fully-elapsed periods means a balance
+    // sheet "as at today" omits the whole current month — the month anyone
+    // actually asks about. 15 March is mid-period.
+    const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: "2026-03-20" });
+    // The 900,000 posted on 15 March must be in it.
+    expect(bs.currentYearEarningsMinor).toBe("-640000");
+    expect(bs.balanced).toBe(true);
+  });
+
+  it("stops at the as-at date rather than swallowing the rest of the period", async () => {
+    // A cut-off before the 15 March posting must exclude it, even though both
+    // dates fall inside the same accounting period.
+    const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: "2026-03-10" });
+    expect(bs.currentYearEarningsMinor).toBe("260000"); // February's result only
+    expect(bs.balanced).toBe(true);
+  });
+
+  it("measures a profit and loss between two mid-period dates", async () => {
+    const pl = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: "2026-03-31" });
+    expect(pl.expenses.totalMinor).toBe("900000");
+    expect(pl.revenue.totalMinor).toBe("0");
+    expect(pl.netProfitMinor).toBe("-900000");
+  });
+
+  it("excludes a posting that falls just after the cut-off", async () => {
+    const pl = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: "2026-03-14" });
+    expect(pl.expenses.totalMinor).toBe("0");
+  });
+
   it("refuses a period that ends before it starts", async () => {
     await expect(profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-31", to: "2026-03-01" }))
       .rejects.toThrow(/ends before it starts/i);

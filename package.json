@@ -14,7 +14,8 @@
     "verify:ledger": "node scripts/verify-ledger.mjs",
     "verify:ledger-api": "node scripts/verify-ledger-api.mjs",
     "verify:ledger-ui": "node scripts/verify-ledger-ui.mjs",
-    "verify:ledger-ar": "node scripts/verify-ledger-ar.mjs"
+    "verify:ledger-ar": "node scripts/verify-ledger-ar.mjs",
+    "verify": "node scripts/verify-all.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

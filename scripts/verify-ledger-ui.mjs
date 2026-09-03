@@ -229,6 +229,60 @@ try {
   const spoken = await page.locator('[role="status"][aria-live="polite"]').innerText();
   check("the live region speaks a sentence, not a bare number", /Balanced at 2,000\.00/.test(spoken), spoken);
 
+  console.log("\nSUBLEDGER AND REPORT SCREENS");
+  // Every accounting screen has to survive having no data at all — an empty
+  // state that throws is the first thing a new customer would meet.
+  for (const [path, marker] of [
+    ["/accounting/receivables", "Receivables"],
+    ["/accounting/payables", "Payables"],
+    ["/accounting/vat", "VAT return"],
+    ["/accounting/statements", "Financial statements"],
+    ["/accounting/bank", "Bank reconciliation"],
+  ]) {
+    await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("h1", { timeout: 20000 });
+    const heading = await page.locator("h1").first().innerText();
+    const crashed = await page.locator("text=Application error").count();
+    check(`${path} renders`, heading.includes(marker) && crashed === 0, heading);
+  }
+
+  // The statements screen is the one that has to prove an arithmetic claim.
+  await page.goto(`${B}/accounting/statements`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="net-profit"]', { timeout: 20000 });
+  const netProfit = (await page.locator('[data-testid="net-profit"]').innerText()).trim();
+  const liabEq = (await page.locator('[data-testid="total-liab-eq"]').innerText()).trim();
+  check("the statements screen shows a net result", netProfit.length > 0, netProfit);
+  const bsUnbalanced = await page.locator("text=Out of balance by").count();
+  check("the balance sheet balances on screen", bsUnbalanced === 0, `liabilities and equity ${liabEq}`);
+  // The capital entry posted earlier in this run falls in the period that is
+  // still running. Reading only closed periods would show a zero here, which
+  // is how the current month used to vanish from the statements.
+  check("and includes the period that has not closed yet", liabEq === "2,500.00", liabEq);
+  const bsNote = await page.locator('[data-testid="bs-note"]').innerText();
+  check("and explains where this year's result sits", /earned so far this year/.test(bsNote), bsNote.slice(0, 70));
+
+  // The VAT screen must show its reconciliation rather than assert it quietly.
+  await page.goto(`${B}/accounting/vat`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("text=Reconciliation to the ledger", { timeout: 20000 });
+  const agrees = await page.locator('.sw-chip:has-text("agrees")').count();
+  check("the VAT return shows it reconciles to both control accounts", agrees === 2, `${agrees} of 2 agree`);
+
+  // Bank: the import parser is the part a user meets first.
+  await page.goto(`${B}/accounting/bank`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="import-statement"]', { timeout: 20000 });
+  const importBtn = page.locator('[data-testid="import-statement"]');
+  check("import is blocked until there is something to import",
+    (await importBtn.getAttribute("aria-disabled")) === "true");
+
+  await page.fill('textarea[aria-label="Bank statement to import"]',
+    "Date,Description,Reference,Amount,Balance\n05/02/2026,Opening transfer,FT900,1500.00,1500.00\n07/02/2026,Card fee,,-25.50,1474.50");
+  await page.click('[data-testid="import-statement"]');
+  await page.waitForSelector("text=Imported 2 lines", { timeout: 20000 });
+  ok("a pasted dd/mm/yyyy statement imports");
+
+  const verdict = await page.locator('[data-testid="rec-verdict"]').innerText();
+  check("the reconciliation states its position in words", verdict.length > 20, verdict.slice(0, 80));
+
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${B}/accounting/trial-balance`, { waitUntil: "domcontentloaded" });
