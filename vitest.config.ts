@@ -28,6 +28,27 @@ function loadEnv() {
 }
 loadEnv();
 
+/**
+ * Cap what one worker may hold open.
+ *
+ * Prisma's default pool is (cores * 2 + 1) connections per client, every test
+ * file constructs its own client alongside the singleton the modules share,
+ * and vitest runs a worker per core. On a four-core box that is comfortably
+ * more than PostgreSQL's hundred, and the failure it produces is the worst
+ * kind: sixty test files at once reporting "too many clients already", every
+ * one of which passes on its own. A run like that reads as sixty regressions
+ * and is none.
+ *
+ * Two connections per client is plenty — a test file does one thing at a time
+ * — and the wait rather than the refusal is what makes a busy box slow instead
+ * of red.
+ */
+function pooled(url: string | undefined): string | undefined {
+  if (!url) return url;
+  if (/[?&]connection_limit=/.test(url)) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}connection_limit=2&pool_timeout=30`;
+}
+
 export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
@@ -35,5 +56,14 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
+    // Passed explicitly rather than mutated in this process: workers are
+    // separate processes, and inheriting an environment by accident is how
+    // the .env guard above went wrong in the first place.
+    env: { ...(pooled(process.env.DATABASE_URL) ? { DATABASE_URL: pooled(process.env.DATABASE_URL)! } : {}) },
+    poolOptions: {
+      // Four workers against one database is already the most this is worth
+      // running at; the tests are bound by round trips, not by processor.
+      threads: { maxThreads: 4, minThreads: 1 },
+    },
   },
 });

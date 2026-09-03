@@ -15,12 +15,12 @@ do, or one guarantee it makes and holds:
 
 | Kind | What it counts | Now |
 | --- | --- | --- |
-| operation | an exported function in a ledger module — the unit of work | 438 |
-| endpoint | an HTTP verb, or a named action within one | 331 |
-| rule | a constraint or trigger PostgreSQL enforces itself | 235 |
-| screen | a page somebody navigates to | 79 |
-| | **capabilities** | **1,083** |
-| check | an assertion in the verification suites | 1,645 |
+| operation | an exported function in a ledger module — the unit of work | 470 |
+| endpoint | an HTTP verb, or a named action within one | 351 |
+| rule | a constraint or trigger PostgreSQL enforces itself | 277 |
+| screen | a page somebody navigates to | 87 |
+| | **capabilities** | **1,185** |
+| check | an assertion in the verification suites | 1,806 |
 
 An operation reached over HTTP is counted once as each, because they are
 different things: one is what the code can do, the other is what is reachable
@@ -28,8 +28,8 @@ over the wire, and a product with the first and not the second has a gap.
 Checks are counted apart from capabilities — an assertion is how a capability
 is held, not another capability.
 
-Also as at this revision: **65 test files**, **91 database models**,
-**50 migrations**.
+Also as at this revision: **70 server modules**, **71 test files**,
+**103 database models**, **54 migrations**.
 
 ---
 
@@ -90,6 +90,10 @@ recognition under IFRS 15, which corrects to a target rather than posting
 increments, so running it twice posts nothing and running it after a
 modification posts the cumulative catch-up.
 
+**Credit control** — limits, holds, dunning and a statement of account that
+foots and ties. Exposure is computed from the ledger and the open orders, never
+stored, because a stored total drifts the first time somebody posts by hand.
+
 **Price lists** answer one question — what does this item cost this party, in
 this quantity, on this date — and answer it with the derivation attached. Two
 gist exclusions stop that question ever having two answers. A list in another
@@ -119,6 +123,12 @@ line per bill naming what it settles.
 
 ## Cash
 
+**Trade finance** — letters of credit, bank guarantees and trust receipts. A
+guarantee that has not been called is not a liability: the obligation depends
+on a future event outside the entity's control, so IAS 37.27 disclosed rather
+than recognised. The margin the bank holds is an asset and is deliberately not
+cash, because it cannot be spent while the facility is open.
+
 **Post-dated cheques** — the normal way a UAE business gets paid — with their
 own account outside cash and cash equivalents, because IAS 7.7 wants an
 insignificant risk of a change in value and a ninety-day cheque is nothing but
@@ -142,7 +152,12 @@ and net realisable value — where the allowance is derived rather than
 accumulated, which makes the IAS 2.33 ceiling structural instead of a guard.
 Stock locations, batches, expiry dates and reorder levels — where a transfer
 posts nothing at all, because it changes neither the quantity on hand nor its
-cost. Leases under IFRS 16, with the recognition exemptions disclosed because
+cost. Landed cost under IAS 2.10, apportioned per charge on its own basis —
+freight by weight, duty by value — with the share of stock already sold going
+to cost of sales rather than being loaded onto the units that survive.
+Borrowings at amortised cost under IFRS 9, where a flat-rate loan's effective
+rate is solved rather than quoted, and the current portion is posted so a
+statement can present it. Leases under IFRS 16, with the recognition exemptions disclosed because
 an exemption nobody can see is an exemption nobody can audit. Provisions and
 contingencies under IAS 37.
 
@@ -159,6 +174,16 @@ proportions that add up exactly and eleven ratios that each hand back their own
 numerator and denominator. A percentage change against a nil or negative base
 is left undefined rather than printed: "revenue improved 150%" against a loss
 is a sentence with no meaning.
+
+**Cash flow by the direct method** as well as the indirect one, each proved
+against the other, with every cash line attributed to the contra accounts of
+its own journal entry — and the entries where that attribution had to be
+apportioned counted and named rather than hidden.
+
+**A notification centre** that gathers what eight modules already compute,
+ranks it, and remembers what has been dealt with. An acknowledgement is keyed
+on what makes a finding the same finding, never on its wording, and it lapses
+the moment the problem gets worse.
 
 **Timesheets and work in progress** record time in minutes — a quarter of an
 hour is 15, and 0.25 of an hour is a float that stops adding up by the third

@@ -8,6 +8,20 @@ import { financialKpis, type Kpi } from "@/lib/server/ledger/kpi";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
+/**
+ * A ratio in basis points, rounded half away from zero — the one rounding the
+ * whole product now uses. Reconstructing it with plain BigInt division would
+ * truncate, and these assertions would then be pinning the bias rather than
+ * the figure.
+ */
+function bps(numerator: bigint, denominator: bigint): bigint {
+  const n = numerator * 10_000n;
+  const d = denominator < 0n ? -denominator : denominator;
+  const signed = denominator < 0n ? -n : n;
+  const half = d / 2n;
+  return signed >= 0n ? (signed + half) / d : -((-signed + half) / d);
+}
+
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
 
@@ -336,14 +350,14 @@ d("FTA Audit File and financial KPIs", () => {
     // tax 50,000).
     expect(k.inputs[0].amountMinor).toBe("1880000");
     expect(k.inputs[1].amountMinor).toBe("260000");
-    expect(k.valueBps).toBe((1_880_000n * 10_000n) / 260_000n);
+    expect(k.valueBps).toBe(bps(1_880_000n, 260_000n));
     expect(k.interpretation).toMatch(/7\.23/);
   });
 
   it("excludes stock and prepayments from the quick ratio", async () => {
     const r = await financialKpis({ orgId: ORG, entityId: ENT, ...MAY });
     const k = kpi(r, "quick_ratio");
-    expect(k.valueBps).toBe(((1_880_000n - 420_000n) * 10_000n) / 260_000n);
+    expect(k.valueBps).toBe(bps(1_880_000n - 420_000n, 260_000n));
     expect(k.valueBps! < kpi(r, "current_ratio").valueBps!).toBe(true);
   });
 
@@ -355,7 +369,7 @@ d("FTA Audit File and financial KPIs", () => {
     // 1,450,000 / 1,400,000 × 31 days = 32.1071… days, held in ten-thousandths
     // and read out to two places.
     expect(k.valueBps).toBe(321_071n);
-    expect(k.valueBps).toBe((1_450_000n * 31n * 10_000n) / 1_400_000n);
+    expect(k.valueBps).toBe(bps(1_450_000n * 31n, 1_400_000n));
     expect(k.interpretation).toMatch(/32\.11 days/);
   });
 
@@ -388,7 +402,7 @@ d("FTA Audit File and financial KPIs", () => {
 
   it("reports gearing and working capital as figures a reader can act on", async () => {
     const r = await financialKpis({ orgId: ORG, entityId: ENT, ...MAY });
-    expect(kpi(r, "debt_to_equity").valueBps).toBe((260_000n * 10_000n) / 1_620_000n);
+    expect(kpi(r, "debt_to_equity").valueBps).toBe(bps(260_000n, 1_620_000n));
     expect(r.workingCapitalMinor).toBe("1620000");
     expect(kpi(r, "working_capital").amountMinor).toBe("1620000");
     expect(kpi(r, "working_capital").valueBps).toBeNull();

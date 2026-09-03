@@ -177,15 +177,23 @@ const routes = readdirSync('src/app/api/ledger', { withFileTypes: true })
   .map((e) => e.name)
   .sort();
 
+// 405 is not a refusal, it is a route that has no GET at all — setup, the
+// bank import and the opening balances are all write-only, and Next answers
+// with no body because there is nothing to say. Asking those for a sentence,
+// or for a 401, is asking the wrong question: the method never reaches the
+// handler that would check the session.
+const readable = [];
 const crashed = [];
 const mute = [];
 for (const name of routes) {
   r = await call('GET', `/api/ledger/${name}?entityId=${E2}`);
+  if (r.status === 405) continue;
+  readable.push(name);
   if (r.status >= 500) crashed.push(`${name} ${r.status}`);
   else if (r.status >= 400 && !/[a-z]{4,}/.test(r.body?.error ?? '')) mute.push(`${name} ${r.status}`);
 }
 crashed.length === 0
-  ? ok(`no route crashes on a GET`, `${routes.length} routes`)
+  ? ok(`no route crashes on a GET`, `${readable.length} readable of ${routes.length} routes`)
   : bad('routes that answered 5xx', crashed.join(', ').slice(0, 200));
 mute.length === 0
   ? ok('every refusal carries a sentence somebody can act on')
@@ -201,12 +209,12 @@ r.status === 401 ? ok('unauthenticated request refused 401') : bad('auth guard',
 // an entity id, and it would never show up in a test of the routes somebody
 // remembered.
 const open = [];
-for (const name of routes) {
+for (const name of readable) {
   r = await call('GET', `/api/ledger/${name}?entityId=${E2}`);
   if (r.status !== 401) open.push(`${name} ${r.status}`);
 }
 open.length === 0
-  ? ok('every ledger route refuses an unauthenticated read', `${routes.length} routes`)
+  ? ok('every ledger route refuses an unauthenticated read', `${readable.length} routes`)
   : bad('routes readable with no session', open.join(', ').slice(0, 200));
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
