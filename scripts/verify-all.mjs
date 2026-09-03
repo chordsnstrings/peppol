@@ -14,6 +14,15 @@ import { spawnSync } from "node:child_process";
 
 const BASE = process.env.BASE ?? "http://localhost:3000";
 
+/*
+ * A note for whoever meets this next. The HTTP suites each register a fresh
+ * account, and registration is rate limited per address in a fixed window held
+ * in the server's own memory. Running the suites two or three times against the
+ * same server inside that window gets a 429 on the register call and then a
+ * cascade of 401s — which reads as the product being broken and is the limiter
+ * doing its job. Restart the server and run again.
+ */
+
 const SUITES = [
   { name: "unit + database", cmd: "npx", args: ["vitest", "run"], needsServer: false },
   { name: "ledger invariants", cmd: "node", args: ["scripts/verify-ledger.mjs"], needsServer: false },

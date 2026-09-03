@@ -640,7 +640,14 @@ model InventoryItem {
   name            String
   nameAr          String?
   uom             String              @default("EA")
+  /// WEIGHTED_AVERAGE | FIFO. IAS 2.25 permits either, and requires the same
+  /// one to be used for all inventories of a similar nature — so it is a
+  /// decision recorded per item rather than a setting applied globally.
   costMethod      String              @default("WEIGHTED_AVERAGE")
+  /// Net realisable value per whole unit, where it has been assessed. IAS 2.9
+  /// carries stock at the lower of cost and this; nil means never assessed,
+  /// which is different from an assessment of nothing.
+  nrvMinor        BigInt?
   /// Quantity in thousandths, so 1.5 kg is 1500. Stock is not always whole.
   quantityMilli   BigInt              @default(0)
   /// What that quantity is carried at, in minor units.
@@ -652,6 +659,7 @@ model InventoryItem {
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
   movements       InventoryMovement[]
+  layers          InventoryLayer[]
 
   @@unique([orgId, entityId, sku])
   @@index([orgId, entityId, status])
@@ -1473,4 +1481,29 @@ model RoleAssignment {
 
   @@unique([orgId, userId, roleId, entityId])
   @@index([orgId, userId])
+}
+
+
+/// A FIFO cost layer: one receipt, at the cost it came in at, with what is
+/// left of it. Weighted average needs no layers — it carries one cost — but
+/// first-in-first-out cannot be reconstructed from a running average, so the
+/// layers are the record rather than a cache of one.
+model InventoryLayer {
+  id             String        @id @default(cuid())
+  orgId          String
+  itemId         String
+  item           InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  seq            Int
+  receivedOn     DateTime      @db.Date
+  /// Thousandths, as inventory quantities are.
+  quantityMilli  BigInt
+  /// What is left of this layer. Nil means it is fully consumed.
+  remainingMilli BigInt
+  /// Cost per whole unit, in minor units.
+  unitCostMinor  BigInt
+  /// The receipt that created it.
+  movementId     String?
+
+  @@unique([itemId, seq])
+  @@index([orgId, itemId, receivedOn])
 }
