@@ -1,0 +1,11 @@
+-- Let an item actually be costed first-in-first-out.
+--
+-- The original inventory migration constrained costMethod to
+-- ('WEIGHTED_AVERAGE','STANDARD'). The FIFO migration added a second CHECK for
+-- ('WEIGHTED_AVERAGE','FIFO') but left the first one in place, and two CHECKs on
+-- one column are an AND: the only value satisfying both is WEIGHTED_AVERAGE, so
+-- every attempt to set FIFO was refused by the database. Dropping the stale
+-- constraint is a correction rather than a change of policy — the one that
+-- survives says exactly what the newer migration meant to say, and STANDARD
+-- costing was never implemented in the first place.
+ALTER TABLE "InventoryItem" DROP CONSTRAINT IF EXISTS "InventoryItem_method_check";

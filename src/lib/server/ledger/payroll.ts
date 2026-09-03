@@ -213,6 +213,12 @@ export interface NewEmployee {
   housingMinor?: number | bigint | string;
   transportMinor?: number | bigint | string;
   otherMinor?: number | bigint | string;
+  /**
+   * Calendar days of annual leave a full year of service earns. Federal
+   * Decree-Law 33/2021 Article 29 gives 30; a contract may give more and never
+   * less, which is what the database holds.
+   */
+  leaveDaysPerYear?: number;
 }
 
 const UAE_IBAN = /^AE\d{21}$/;
@@ -267,6 +273,24 @@ function checkPay(e: {
 }
 
 /** Put someone on the payroll. */
+/**
+ * The leave a contract gives, checked before the database has to.
+ *
+ * The floor is the law's, not a preference: Article 29 gives 30 calendar days
+ * and a contract cannot take them away, so a lower figure is a data-entry
+ * mistake and refusing it is more useful than storing it.
+ */
+function checkLeaveDays(v: number | undefined, who: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (!Number.isInteger(v) || v < 30 || v > 365) {
+    throw new LedgerError(
+      `${who} is given ${v} days of annual leave a year. Federal Decree-Law 33/2021 Article 29 gives 30 calendar ` +
+        `days after a year of service, and a contract may improve on that but never reduce it.`,
+    );
+  }
+  return v;
+}
+
 export async function addEmployee(opts: { orgId: string; entityId: string; employee: NewEmployee }) {
   const e = opts.employee;
   const code = (e.code ?? "").trim();
@@ -309,6 +333,7 @@ export async function addEmployee(opts: { orgId: string; entityId: string; emplo
       housingMinor: pay.housing,
       transportMinor: pay.transport,
       otherMinor: pay.other,
+      ...(e.leaveDaysPerYear === undefined ? {} : { leaveDaysPerYear: checkLeaveDays(e.leaveDaysPerYear, who)! }),
     },
   });
 }
@@ -326,6 +351,12 @@ export interface EmployeeChanges {
   housingMinor?: number | bigint | string;
   transportMinor?: number | bigint | string;
   otherMinor?: number | bigint | string;
+  /**
+   * Calendar days of annual leave a full year of service earns. Federal
+   * Decree-Law 33/2021 Article 29 gives 30; a contract may give more and never
+   * less, which is what the database holds.
+   */
+  leaveDaysPerYear?: number;
 }
 
 /**
@@ -407,6 +438,7 @@ export async function updateEmployee(opts: {
       housingMinor: pay.housing,
       transportMinor: pay.transport,
       otherMinor: pay.other,
+      leaveDaysPerYear: checkLeaveDays(c.leaveDaysPerYear, who),
     },
   });
 }

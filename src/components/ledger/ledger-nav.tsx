@@ -78,6 +78,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/bank-import", label: "Import a statement" },
       { href: "/accounting/petty-cash", label: "Petty cash" },
       { href: "/accounting/payroll", label: "Payroll" },
+      { href: "/accounting/leave", label: "Leave" },
     ],
   },
   {
@@ -120,6 +121,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/vat", label: "VAT return" },
       { href: "/accounting/corporate-tax", label: "Corporate tax" },
       { href: "/accounting/deferred-tax", label: "Deferred tax" },
+      { href: "/accounting/month-end", label: "Month end" },
       { href: "/accounting/periods", label: "Periods" },
       { href: "/accounting/year-end", label: "Year end" },
     ],

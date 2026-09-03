@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { post } from "@/lib/server/ledger/post";
 import { profitAndLoss } from "@/lib/server/ledger/statements";
-import { cashFlowStatement } from "@/lib/server/ledger/cashflow";
-import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { cashFlowStatement, CLASSIFICATION, CASH_CODES } from "@/lib/server/ledger/cashflow";
+import { openBooks, openFiscalYear, UAE_CHART } from "@/lib/server/ledger/setup";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -264,5 +264,34 @@ d("cash flow statement", () => {
 
   it("refuses dates it cannot read", async () => {
     await expect(CF("not-a-date", "2026-03-01")).rejects.toThrow(/valid start and end date/i);
+  });
+});
+
+describe("the classification map against the chart", () => {
+  it("classifies every balance-sheet account the standard chart has", () => {
+    // The map was written once and the chart went on growing. Every account
+    // added since — provisions, contract assets and liabilities, deferred tax,
+    // the revaluation surplus, the leave provision — went unclassified, and an
+    // unclassified movement is reported as a warning and left out of the
+    // statement. This test is what stops it happening again.
+    const cash = new Set(CASH_CODES);
+    const missing = UAE_CHART
+      .filter((a) => a.isPostable !== false)
+      .filter((a) => ["ASSET", "LIABILITY", "EQUITY"].includes(a.type))
+      .filter((a) => !cash.has(a.code))
+      .filter((a) => !(a.code in CLASSIFICATION))
+      .map((a) => `${a.code} ${a.name}`);
+    expect(missing).toEqual([]);
+  });
+
+  it("classifies nothing that is not on the balance sheet", () => {
+    // A profit-and-loss account in the map would be double counted: its effect
+    // is already in the profit the statement starts from.
+    const byCode = new Map(UAE_CHART.map((a) => [a.code, a]));
+    const wrong = Object.keys(CLASSIFICATION)
+      .map((code) => byCode.get(code))
+      .filter((a) => a && ["INCOME", "EXPENSE"].includes(a.type))
+      .map((a) => `${a!.code} ${a!.name}`);
+    expect(wrong).toEqual([]);
   });
 });

@@ -58,7 +58,7 @@ import { balanceSheet, profitAndLoss } from "./statements";
 
 /** Cash and cash equivalents (IAS 7.6-.9). Savings sits here for an SMB: it is
  *  short-term, highly liquid and held to meet commitments, not to invest. */
-const CASH_CODES = ["1000", "1010", "1020", "1050"];
+export const CASH_CODES = ["1000", "1010", "1020", "1050"];
 
 /** Fixed asset accounts whose gross movement is an investing flow. */
 const FIXED_ASSET_CODES = ["1500", "1600", "1700"];
@@ -89,10 +89,22 @@ type Bucket = "operating_noncash" | "operating_working_capital" | "investing" | 
  * an unclassified movement is the single commonest reason a cash flow statement
  * does not reconcile, and it is invisible unless the report names it.
  */
-const CLASSIFICATION: Record<string, Bucket> = {
+/**
+ * Every balance-sheet account that is not cash, and where its movement belongs.
+ *
+ * Exported so a test can hold it against the chart. The map was written once
+ * and the chart kept growing: provisions, contract assets and liabilities,
+ * deferred tax and the revaluation surplus were all added later and none of
+ * them was classified, so every entity using them got a warning and a line
+ * left out of the statement. A map that has to be remembered is a map that
+ * goes stale; a test that fails when the chart gains an account is not.
+ */
+export const CLASSIFICATION: Record<string, Bucket> = {
   // Non-cash charges taken against profit. IAS 7.20(b).
   "1150": "operating_noncash", // allowance for doubtful debts
+  "2150": "operating_noncash", // provisions (IAS 37)
   "2250": "operating_noncash", // end-of-service benefits provision
+  "2260": "operating_noncash", // untaken leave provision
 
   // Working capital. IAS 7.20(c).
   "1100": "operating_working_capital", // trade receivables
@@ -109,6 +121,11 @@ const CLASSIFICATION: Record<string, Bucket> = {
   "2200": "operating_working_capital", // salaries payable
   "2300": "operating_working_capital", // customer deposits and advances
   "2400": "operating_working_capital", // corporate tax payable
+  // IFRS 15 presentation. A contract asset is revenue earned and not yet
+  // invoiced and a contract liability is the reverse, so both move with the
+  // working capital cycle exactly as receivables and deferred income do.
+  "1310": "operating_working_capital", // contract assets (unbilled revenue)
+  "2310": "operating_working_capital", // contract liabilities (deferred revenue)
 
   // Investing. IAS 7.16.
   "1500": "investing", // property, plant and equipment
@@ -118,6 +135,15 @@ const CLASSIFICATION: Record<string, Bucket> = {
 
   // Financing. IAS 7.17. Dividends and drawings reach the books through
   // retained earnings or the shareholder current account; both are financing.
+  // Deferred tax is a non-cash charge: nothing moves until the difference
+  // reverses, and IAS 7 has no separate line for it.
+  "1320": "operating_noncash", // deferred tax asset
+  "2320": "operating_noncash", // deferred tax liability
+  // A revaluation surplus never touches cash — it arises in equity and is
+  // realised within equity. It is here so that a movement in it is classified
+  // rather than reported as an account nobody thought about.
+  "3300": "operating_noncash", // revaluation surplus
+
   "2500": "financing", // long-term loans
   "2600": "financing", // lease liabilities
   "3000": "financing", // share capital
