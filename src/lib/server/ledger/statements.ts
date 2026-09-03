@@ -211,21 +211,22 @@ export async function balanceSheet(opts: {
   const liabilities = section("liabilities", "Liabilities", rows.filter((r) => r.type === "LIABILITY"), "credit");
   const postedEquity = rows.filter((r) => r.type === "EQUITY");
 
-  // Profit earned so far this fiscal year has not been closed to equity yet,
-  // so it is not a posted balance anywhere. Without it the sheet is out by
-  // exactly the year's profit — which is the classic first bug in a new set of
-  // books, and it looks like a ledger fault rather than a missing line.
-  const year = await prisma.fiscalYear.findFirst({
-    where: { orgId: opts.orgId, entityId: opts.entityId, startsOn: { lte: asOf }, endsOn: { gte: asOf } },
-  });
-  const pl = year
-    ? await profitAndLoss({
-        orgId: opts.orgId, entityId: opts.entityId,
-        from: year.startsOn.toISOString().slice(0, 10),
-        to: opts.asOf,
-      })
-    : null;
-  const currentYear = pl ? BigInt(pl.netProfitMinor) : 0n;
+  // Profit earned but not yet closed to equity is not a posted balance
+  // anywhere, so the sheet is out by exactly that amount without it — the
+  // classic first defect in a new set of books, and one that reads as a ledger
+  // fault rather than a missing line.
+  //
+  // It is the sum of every income and expense balance as at this date, which is
+  // exact by construction: closing a year brings those accounts to zero and
+  // moves the result to retained earnings, so whatever is left in them is
+  // precisely what has not been closed. Deriving it from a fiscal year instead
+  // meant a date beyond the last one opened silently produced zero here while
+  // assets and equity read the whole elapsed ledger — the sheet then reported
+  // itself unbalanced and the screen told the reader to report a defect that
+  // was not in their data.
+  const currentYear = rows
+    .filter((r) => r.type === "INCOME" || r.type === "EXPENSE")
+    .reduce((a, r) => a - r.balance, 0n);
 
   const equity = section("equity", "Equity", postedEquity, "credit");
   if (currentYear !== 0n) {

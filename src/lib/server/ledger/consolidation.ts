@@ -1,0 +1,726 @@
+import { prisma } from "@/lib/server/prisma";
+import { LedgerError } from "./post";
+import { profitAndLoss, balanceSheet, type StatementLine } from "./statements";
+
+/**
+ * Group accounts: one set of statements for several legal entities.
+ *
+ * The whole module is a report. Nothing here posts, and nothing here can move a
+ * balance in any member's ledger. A consolidation is a view taken over books
+ * that stay exactly as their entities keep them — the moment consolidation
+ * could write back, the group and the statutory accounts would start to drift
+ * and no one could say which was right.
+ *
+ * Four decisions carry it.
+ *
+ *  - Members are consolidated line by line on account code, so every member's
+ *    1010 lands in one row. Each row keeps its per-member figures alongside the
+ *    total, because "cash 16,300,000" is a number nobody can check and "parent
+ *    11,500,000 plus subsidiary 4,800,000" is a number anybody can.
+ *
+ *  - A controlled subsidiary is consolidated in FULL, whatever the ownership
+ *    percentage, and the minority's share is presented separately as the
+ *    non-controlling interest. IFRS 10 consolidates on control, not on
+ *    proportion: the parent controls all of the subsidiary's assets and all of
+ *    its revenue, so all of them appear, and the claim other shareholders have
+ *    on the net assets and the profit is shown as a line of its own (IFRS 10.22,
+ *    B94). Consolidating 75% of a 75%-owned subsidiary — proportional
+ *    consolidation — would report a group that controls less than it does, and
+ *    would put a number on the face of the accounts that reconciles to nothing
+ *    in either set of books. We do not do it.
+ *
+ *  - Intercompany balances are PROPOSED for elimination, never eliminated
+ *    silently. A journal line records no counterparty, so nothing in the ledger
+ *    says that the parent's receivable is owed by the subsidiary rather than by
+ *    a customer. What we can do is notice that one member's trade receivables
+ *    exactly equal another member's trade payables and say so. An automatic
+ *    elimination on that evidence would, when the guess is wrong, remove a real
+ *    third-party receivable and a real third-party payable and leave a balance
+ *    sheet that still balances — a hidden error is worse than a visible one.
+ *    So `eliminations` is returned as a list of candidates and `applyEliminations`
+ *    is a flag a human sets after reading them.
+ *
+ *  - The statement checks itself. Consolidated assets must equal consolidated
+ *    liabilities plus equity attributable to the parent plus the
+ *    non-controlling interest, and the difference is reported rather than
+ *    plugged. A consolidation that quietly balances itself is a consolidation
+ *    that will one day quietly hide a member whose own books do not.
+ *
+ * Deliberately out of scope, and worth stating because their absence changes
+ * what these figures mean:
+ *
+ *  - The parent's investment in the subsidiary is not eliminated against the
+ *    subsidiary's equity (IFRS 10.B86(b)), and no goodwill arises, because
+ *    nothing in the ledger links a shareholding to a member entity. Group
+ *    equity is therefore the members' equity added together and then split
+ *    between the parent's owners and the non-controlling interest.
+ *  - Intercompany revenue and the matching expense are not eliminated. They
+ *    net to nil in group profit but do gross up revenue and expenses.
+ *  - No currency translation. A member reporting in another currency is
+ *    included at face value and warned about, which is at least honest; a made-
+ *    up rate would not be.
+ *
+ * Amounts are BigInt minor units and ownership is basis points held in BigInt.
+ * No float touches any of it.
+ */
+
+/* --------------------------------------------------------------- vocabulary */
+
+/** Trade receivables and trade payables — the two control accounts a group's members owe each other across. */
+const AR_CODE = "1100";
+const AP_CODE = "2000";
+const WHOLLY_OWNED_BPS = 10_000n;
+
+export interface GroupMember {
+  entityId: string;
+  /** Percentage owned, in basis points. 10000 is wholly owned. */
+  ownershipBps: number;
+  isParent: boolean;
+}
+
+export interface GroupSummary {
+  code: string;
+  name: string;
+  currency: string;
+  memberCount: number;
+  /** Null when nobody has been marked as the parent — such a group cannot be consolidated. */
+  parentEntityId: string | null;
+}
+
+export interface GroupMemberDetail extends GroupMember {
+  /** The member's own functional currency, or null when it has no ledger yet. */
+  currency: string | null;
+  hasLedger: boolean;
+}
+
+export interface GroupDetail {
+  code: string;
+  name: string;
+  currency: string;
+  members: GroupMemberDetail[];
+}
+
+/** One account code, as every member reported it and as the group reports it. */
+export interface ConsolidatedLine {
+  code: string;
+  name: string;
+  nameAr: string | null;
+  /** entityId → the member's own figure, on the account's natural side. */
+  byEntity: Record<string, string>;
+  /** The members added together, before eliminations. */
+  combinedMinor: string;
+  /** Taken off by applied eliminations. Zero unless `applyEliminations` was set. */
+  eliminationMinor: string;
+  /** Combined less eliminations — the group's figure. */
+  totalMinor: string;
+}
+
+export interface ConsolidatedSection {
+  key: string;
+  label: string;
+  lines: ConsolidatedLine[];
+  byEntity: Record<string, string>;
+  combinedMinor: string;
+  eliminationMinor: string;
+  totalMinor: string;
+}
+
+/**
+ * A pair of balances that look like the two sides of one intragroup debt.
+ * A candidate, not a conclusion — see the note at the top of this file.
+ */
+export interface Elimination {
+  /** The member carrying the receivable (account 1100). */
+  receivableEntityId: string;
+  /** The member carrying the payable (account 2000). */
+  payableEntityId: string;
+  receivableCode: string;
+  payableCode: string;
+  amountMinor: string;
+  /** Why this pair was proposed, in words a reviewer can check. */
+  reason: string;
+  /** Whether it was taken off these figures, which only happens on request. */
+  applied: boolean;
+}
+
+/** The minority's claim on one member, held apart from the parent's owners. */
+export interface NonControllingInterest {
+  entityId: string;
+  ownershipBps: number;
+  /** 10000 less the ownership. The share these figures are of. */
+  minorityBps: number;
+  /** The member's net assets, all of them, before the split. */
+  memberNetAssetsMinor: string;
+  /** The member's profit for the period, all of it, before the split. */
+  memberProfitMinor: string;
+  /** The minority's share of the net assets. */
+  netAssetsMinor: string;
+  /** The minority's share of the profit. */
+  profitMinor: string;
+}
+
+export interface MemberColumn {
+  entityId: string;
+  ownershipBps: number;
+  isParent: boolean;
+  currency: string;
+  netProfitMinor: string;
+  totalAssetsMinor: string;
+  netAssetsMinor: string;
+  /** The member's own balance sheet balanced. A member that does not, breaks the group. */
+  ownBalanceSheetBalanced: boolean;
+}
+
+export interface ConsolidatedStatements {
+  groupCode: string;
+  groupName: string;
+  currency: string;
+  from: string;
+  to: string;
+  members: MemberColumn[];
+
+  revenue: ConsolidatedSection;
+  costOfSales: ConsolidatedSection;
+  grossProfitMinor: string;
+  expenses: ConsolidatedSection;
+  /** The whole group's profit, including the part the minority owns. */
+  netProfitMinor: string;
+  profitAttributableToParentMinor: string;
+  profitAttributableToNciMinor: string;
+
+  assets: ConsolidatedSection;
+  liabilities: ConsolidatedSection;
+  /** The members' equity added together — the parent's owners and the minority together. */
+  equity: ConsolidatedSection;
+  equityAttributableToParentMinor: string;
+  nonControllingInterestMinor: string;
+  nci: NonControllingInterest[];
+
+  totalAssetsMinor: string;
+  /** Liabilities plus parent equity plus the non-controlling interest. */
+  totalLiabilitiesEquityAndNciMinor: string;
+  /** The whole point. Never plugged. */
+  balanced: boolean;
+  differenceMinor: string;
+
+  eliminations: Elimination[];
+  eliminationsApplied: boolean;
+  warnings: string[];
+}
+
+/* ------------------------------------------------------------ group keeping */
+
+export async function createGroup(opts: {
+  orgId: string;
+  code: string;
+  name: string;
+  currency?: string;
+}): Promise<GroupSummary> {
+  const code = opts.code.trim();
+  if (!code) throw new LedgerError("A consolidation group needs a code, so it can be asked for by name.");
+  if (!opts.name.trim()) throw new LedgerError("A consolidation group needs a name.");
+
+  const existing = await prisma.consolidationGroup.findFirst({ where: { orgId: opts.orgId, code } });
+  if (existing) {
+    throw new LedgerError(
+      `A consolidation group with code ${code} already exists ("${existing.name}"). ` +
+        `Use a different code, or add members to the one that is already there.`,
+    );
+  }
+
+  const group = await prisma.consolidationGroup.create({
+    data: { orgId: opts.orgId, code, name: opts.name.trim(), currency: opts.currency ?? "AED" },
+  });
+  return { code: group.code, name: group.name, currency: group.currency, memberCount: 0, parentEntityId: null };
+}
+
+export async function addMember(opts: {
+  orgId: string;
+  groupCode: string;
+  entityId: string;
+  ownershipBps?: number;
+  isParent?: boolean;
+}): Promise<GroupDetail> {
+  const group = await mustFindGroup(opts.orgId, opts.groupCode);
+  const ownershipBps = opts.ownershipBps ?? 10_000;
+  const isParent = opts.isParent === true;
+
+  // The database enforces this too. Checking here means the message names the
+  // number the caller supplied and says what the range is, rather than
+  // surfacing a constraint name.
+  if (!Number.isInteger(ownershipBps) || ownershipBps <= 0 || ownershipBps > 10_000) {
+    throw new LedgerError(
+      `Ownership is held in basis points between 1 and 10000, where 10000 is wholly owned; ` +
+        `${ownershipBps} is not a share anyone can hold. 75% is 7500.`,
+    );
+  }
+
+  const already = group.members.find((m) => m.entityId === opts.entityId);
+  if (already) {
+    throw new LedgerError(
+      `${opts.entityId} is already a member of ${group.code}. Remove it first if you need to change its ownership.`,
+    );
+  }
+
+  // A member with no ledger contributes nothing and would fail mid-report with
+  // a message that does not say which entity was at fault.
+  const book = await prisma.book.findFirst({
+    where: { orgId: opts.orgId, entityId: opts.entityId, code: "PRIMARY" },
+  });
+  if (!book) {
+    throw new LedgerError(
+      `No ledger has been opened for ${opts.entityId}, so it has nothing to consolidate. ` +
+        `Open its books and chart of accounts first, then add it to ${group.code}.`,
+    );
+  }
+
+  if (isParent) {
+    const other = group.members.find((m) => m.isParent);
+    if (other) {
+      throw new LedgerError(
+        `${group.code} already has a parent, ${other.entityId}. A group has exactly one — ` +
+          `consolidation is about who controls whom, and two parents leaves that unanswered. ` +
+          `Remove ${other.entityId} first if ${opts.entityId} is the parent instead.`,
+      );
+    }
+  }
+
+  await prisma.consolidationMember.create({
+    data: { orgId: opts.orgId, groupId: group.id, entityId: opts.entityId, ownershipBps, isParent },
+  });
+  return groupDetail({ orgId: opts.orgId, groupCode: group.code });
+}
+
+export async function removeMember(opts: {
+  orgId: string;
+  groupCode: string;
+  entityId: string;
+}): Promise<GroupDetail> {
+  const group = await mustFindGroup(opts.orgId, opts.groupCode);
+  const member = group.members.find((m) => m.entityId === opts.entityId);
+  if (!member) {
+    throw new LedgerError(`${opts.entityId} is not a member of ${group.code}, so there is nothing to remove.`);
+  }
+  // Removing the parent while subsidiaries remain leaves a group that cannot be
+  // consolidated at all, and the failure would surface later, somewhere else.
+  if (member.isParent && group.members.length > 1) {
+    const others = group.members.filter((m) => m.entityId !== opts.entityId).map((m) => m.entityId);
+    throw new LedgerError(
+      `${opts.entityId} is the parent of ${group.code} and ${others.length} other member` +
+        `${others.length === 1 ? "" : "s"} (${others.join(", ")}) would be left without one. ` +
+        `Remove them first, or make one of them the parent.`,
+    );
+  }
+
+  await prisma.consolidationMember.delete({ where: { id: member.id } });
+  return groupDetail({ orgId: opts.orgId, groupCode: group.code });
+}
+
+export async function groupList(opts: { orgId: string }): Promise<GroupSummary[]> {
+  const groups = await prisma.consolidationGroup.findMany({
+    where: { orgId: opts.orgId },
+    include: { members: true },
+    orderBy: { code: "asc" },
+  });
+  return groups.map((g) => ({
+    code: g.code,
+    name: g.name,
+    currency: g.currency,
+    memberCount: g.members.length,
+    parentEntityId: g.members.find((m) => m.isParent)?.entityId ?? null,
+  }));
+}
+
+export async function groupDetail(opts: { orgId: string; groupCode: string }): Promise<GroupDetail> {
+  const group = await mustFindGroup(opts.orgId, opts.groupCode);
+  const books = await prisma.book.findMany({
+    where: { orgId: opts.orgId, entityId: { in: group.members.map((m) => m.entityId) }, code: "PRIMARY" },
+    select: { entityId: true, functionalCurrency: true },
+  });
+  const currencyOf = new Map(books.map((b) => [b.entityId, b.functionalCurrency]));
+
+  return {
+    code: group.code,
+    name: group.name,
+    currency: group.currency,
+    // Parent first: it is the entity the reader orients everything else around.
+    members: [...group.members]
+      .sort((a, b) => Number(b.isParent) - Number(a.isParent) || a.entityId.localeCompare(b.entityId))
+      .map((m) => ({
+        entityId: m.entityId,
+        ownershipBps: m.ownershipBps,
+        isParent: m.isParent,
+        currency: currencyOf.get(m.entityId) ?? null,
+        hasLedger: currencyOf.has(m.entityId),
+      })),
+  };
+}
+
+/* ----------------------------------------------------------- consolidation */
+
+export async function consolidatedStatements(opts: {
+  orgId: string;
+  groupCode: string;
+  from: string;
+  to: string;
+  /**
+   * Take the proposed intercompany eliminations off these figures. Off by
+   * default, deliberately: a caller has to have read the candidates and decided
+   * they are right. See the note at the top of this file.
+   */
+  applyEliminations?: boolean;
+}): Promise<ConsolidatedStatements> {
+  const group = await mustFindGroup(opts.orgId, opts.groupCode);
+  if (group.members.length === 0) {
+    throw new LedgerError(`${group.code} has no members yet, so there is nothing to consolidate. Add its parent entity first.`);
+  }
+
+  const parents = group.members.filter((m) => m.isParent);
+  if (parents.length === 0) {
+    throw new LedgerError(
+      `${group.code} has no parent, so there is no entity whose control the consolidation is built on. ` +
+        `Mark one of its members (${group.members.map((m) => m.entityId).join(", ")}) as the parent.`,
+    );
+  }
+  if (parents.length > 1) {
+    throw new LedgerError(
+      `${group.code} has ${parents.length} parents (${parents.map((m) => m.entityId).join(", ")}). ` +
+        `A group has exactly one — remove all but the entity that controls the others.`,
+    );
+  }
+
+  const members = [...group.members].sort(
+    (a, b) => Number(b.isParent) - Number(a.isParent) || a.entityId.localeCompare(b.entityId),
+  );
+  const order = members.map((m) => m.entityId);
+
+  // Every member's statements come from statements.ts, so the group's figures
+  // are the same figures as each entity's own accounts — including the rule
+  // about periods the range only half covers, which is worked out once there
+  // rather than restated here where the two could drift apart.
+  const reports = await Promise.all(
+    members.map(async (m) => ({
+      member: m,
+      pl: await profitAndLoss({ orgId: opts.orgId, entityId: m.entityId, from: opts.from, to: opts.to }),
+      bs: await balanceSheet({ orgId: opts.orgId, entityId: m.entityId, asOf: opts.to }),
+    })),
+  );
+
+  const warnings: string[] = [];
+
+  /* --- intercompany candidates ------------------------------------------ */
+
+  const eliminations = proposeEliminations(
+    reports.map((r) => ({
+      entityId: r.member.entityId,
+      receivableMinor: presented(r.bs.assets.lines, AR_CODE),
+      payableMinor: presented(r.bs.liabilities.lines, AP_CODE),
+    })),
+    warnings,
+  );
+  const applyEliminations = opts.applyEliminations === true;
+  for (const e of eliminations) e.applied = applyEliminations;
+
+  const eliminatedByCode = new Map<string, bigint>();
+  if (applyEliminations) {
+    for (const e of eliminations) {
+      const amount = BigInt(e.amountMinor);
+      eliminatedByCode.set(AR_CODE, (eliminatedByCode.get(AR_CODE) ?? 0n) + amount);
+      eliminatedByCode.set(AP_CODE, (eliminatedByCode.get(AP_CODE) ?? 0n) + amount);
+    }
+  }
+
+  /* --- line by line, on account code ------------------------------------ */
+
+  const build = (key: string, label: string, pick: (r: (typeof reports)[number]) => StatementLine[]) =>
+    combine(key, label, order, reports.map((r) => ({ entityId: r.member.entityId, lines: pick(r) })), eliminatedByCode);
+
+  const revenue = build("revenue", "Revenue", (r) => r.pl.revenue.lines);
+  const costOfSales = build("cost_of_sales", "Cost of sales", (r) => r.pl.costOfSales.lines);
+  const expenses = build("expenses", "Operating expenses", (r) => r.pl.expenses.lines);
+  const assets = build("assets", "Assets", (r) => r.bs.assets.lines);
+  const liabilities = build("liabilities", "Liabilities", (r) => r.bs.liabilities.lines);
+  const equity = build("equity", "Equity", (r) => r.bs.equity.lines);
+
+  const grossProfit = BigInt(revenue.totalMinor) - BigInt(costOfSales.totalMinor);
+  const netProfit = grossProfit - BigInt(expenses.totalMinor);
+
+  /* --- non-controlling interest ----------------------------------------- */
+
+  const nci: NonControllingInterest[] = [];
+  let nciNetAssets = 0n;
+  let nciProfit = 0n;
+
+  for (const r of reports) {
+    const minorityBps = WHOLLY_OWNED_BPS - BigInt(r.member.ownershipBps);
+    if (minorityBps === 0n) continue;
+
+    // Net assets, not equity, because that is what the minority has a claim on
+    // and it does not depend on the equity section being complete. The member
+    // is consolidated in full above; this is only the split of what it is worth.
+    const memberNetAssets = BigInt(r.bs.totalAssetsMinor) - BigInt(r.bs.liabilities.totalMinor);
+    const memberProfit = BigInt(r.pl.netProfitMinor);
+    const shareOfNetAssets = (memberNetAssets * minorityBps) / WHOLLY_OWNED_BPS;
+    const shareOfProfit = (memberProfit * minorityBps) / WHOLLY_OWNED_BPS;
+
+    nciNetAssets += shareOfNetAssets;
+    nciProfit += shareOfProfit;
+    nci.push({
+      entityId: r.member.entityId,
+      ownershipBps: r.member.ownershipBps,
+      minorityBps: Number(minorityBps),
+      memberNetAssetsMinor: memberNetAssets.toString(),
+      memberProfitMinor: memberProfit.toString(),
+      netAssetsMinor: shareOfNetAssets.toString(),
+      profitMinor: shareOfProfit.toString(),
+    });
+
+    if (r.member.isParent) {
+      warnings.push(
+        `${r.member.entityId} is the parent of ${group.code} but is only ${(r.member.ownershipBps / 100).toFixed(2)}% owned. ` +
+          `Its minority share is presented as a non-controlling interest, which is right only if the group really does ` +
+          `consolidate the parent's own outside shareholders.`,
+      );
+    }
+  }
+
+  // Splitting the equity that was added together, rather than adding anything
+  // to it: the group is worth what its members are worth, and this only says
+  // who the claim belongs to. That is why the sheet still balances afterwards.
+  const equityAttributableToParent = BigInt(equity.totalMinor) - nciNetAssets;
+
+  const totalAssets = BigInt(assets.totalMinor);
+  const totalLiabEqNci = BigInt(liabilities.totalMinor) + equityAttributableToParent + nciNetAssets;
+
+  /* --- warnings ---------------------------------------------------------- */
+
+  for (const r of reports) {
+    if (r.bs.currency !== group.currency) {
+      warnings.push(
+        `${r.member.entityId} reports in ${r.bs.currency} and ${group.code} reports in ${group.currency}. ` +
+          `No rate was applied — its figures are included at face value, so the group's totals add ` +
+          `${r.bs.currency} to ${group.currency}. Translate its ledger, or read this consolidation as indicative only.`,
+      );
+    }
+    const nothing =
+      r.pl.revenue.lines.length === 0 &&
+      r.pl.costOfSales.lines.length === 0 &&
+      r.pl.expenses.lines.length === 0 &&
+      r.bs.assets.lines.length === 0 &&
+      r.bs.liabilities.lines.length === 0 &&
+      r.bs.equity.lines.length === 0;
+    if (nothing) {
+      warnings.push(
+        `${r.member.entityId} has no postings between ${opts.from} and ${opts.to} and contributes nothing to ` +
+          `${group.code}. Either its ledger is not being posted to, or it should not be a member.`,
+      );
+    }
+    if (!r.bs.balanced) {
+      warnings.push(
+        `${r.member.entityId}'s own balance sheet is out by ${r.bs.differenceMinor} at ${opts.to}, and the group ` +
+          `carries that difference. Fix the member's ledger — the group figure cannot be corrected here.`,
+      );
+    }
+  }
+
+  return {
+    groupCode: group.code,
+    groupName: group.name,
+    currency: group.currency,
+    from: opts.from,
+    to: opts.to,
+    members: reports.map((r) => ({
+      entityId: r.member.entityId,
+      ownershipBps: r.member.ownershipBps,
+      isParent: r.member.isParent,
+      currency: r.bs.currency,
+      netProfitMinor: r.pl.netProfitMinor,
+      totalAssetsMinor: r.bs.totalAssetsMinor,
+      netAssetsMinor: (BigInt(r.bs.totalAssetsMinor) - BigInt(r.bs.liabilities.totalMinor)).toString(),
+      ownBalanceSheetBalanced: r.bs.balanced,
+    })),
+
+    revenue,
+    costOfSales,
+    grossProfitMinor: grossProfit.toString(),
+    expenses,
+    netProfitMinor: netProfit.toString(),
+    profitAttributableToParentMinor: (netProfit - nciProfit).toString(),
+    profitAttributableToNciMinor: nciProfit.toString(),
+
+    assets,
+    liabilities,
+    equity,
+    equityAttributableToParentMinor: equityAttributableToParent.toString(),
+    nonControllingInterestMinor: nciNetAssets.toString(),
+    nci,
+
+    totalAssetsMinor: totalAssets.toString(),
+    totalLiabilitiesEquityAndNciMinor: totalLiabEqNci.toString(),
+    balanced: totalAssets === totalLiabEqNci,
+    differenceMinor: (totalAssets - totalLiabEqNci).toString(),
+
+    eliminations,
+    eliminationsApplied: applyEliminations,
+    warnings,
+  };
+}
+
+/* ------------------------------------------------------------------ helpers */
+
+async function mustFindGroup(orgId: string, groupCode: string) {
+  const group = await prisma.consolidationGroup.findFirst({
+    where: { orgId, code: groupCode },
+    include: { members: true },
+  });
+  if (!group) {
+    throw new LedgerError(`There is no consolidation group with code ${groupCode} in this organisation.`);
+  }
+  return group;
+}
+
+/** A presented (natural-side, positive) figure for one account code, or zero. */
+function presented(lines: StatementLine[], code: string): bigint {
+  const line = lines.find((l) => l.code === code);
+  return line ? BigInt(line.presentedMinor) : 0n;
+}
+
+/**
+ * Add the members together on account code.
+ *
+ * Every line arrives already presented on its account's natural side by
+ * statements.ts, and a section has one natural side throughout, so the members
+ * can be added directly. A member with nothing on a code contributes an explicit
+ * zero rather than a gap, because a blank column reads as "not applicable" when
+ * what it means is "nil".
+ */
+function combine(
+  key: string,
+  label: string,
+  order: string[],
+  perMember: { entityId: string; lines: StatementLine[] }[],
+  eliminatedByCode: Map<string, bigint>,
+): ConsolidatedSection {
+  const rows = new Map<string, { name: string; nameAr: string | null; byEntity: Map<string, bigint> }>();
+
+  for (const m of perMember) {
+    for (const l of m.lines) {
+      let row = rows.get(l.code);
+      if (!row) {
+        row = { name: l.name, nameAr: l.nameAr, byEntity: new Map() };
+        rows.set(l.code, row);
+      }
+      row.byEntity.set(m.entityId, (row.byEntity.get(m.entityId) ?? 0n) + BigInt(l.presentedMinor));
+    }
+  }
+
+  const sectionByEntity = new Map<string, bigint>(order.map((e) => [e, 0n]));
+  let combined = 0n;
+  let eliminated = 0n;
+
+  const lines: ConsolidatedLine[] = [...rows.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+    .map(([code, row]) => {
+      const byEntity: Record<string, string> = {};
+      let rowTotal = 0n;
+      for (const entityId of order) {
+        const v = row.byEntity.get(entityId) ?? 0n;
+        byEntity[entityId] = v.toString();
+        rowTotal += v;
+        sectionByEntity.set(entityId, (sectionByEntity.get(entityId) ?? 0n) + v);
+      }
+      const elim = eliminatedByCode.get(code) ?? 0n;
+      combined += rowTotal;
+      eliminated += elim;
+      return {
+        code,
+        name: row.name,
+        nameAr: row.nameAr,
+        byEntity,
+        combinedMinor: rowTotal.toString(),
+        eliminationMinor: elim.toString(),
+        totalMinor: (rowTotal - elim).toString(),
+      };
+    });
+
+  return {
+    key,
+    label,
+    lines,
+    byEntity: Object.fromEntries(order.map((e) => [e, (sectionByEntity.get(e) ?? 0n).toString()])),
+    combinedMinor: combined.toString(),
+    eliminationMinor: eliminated.toString(),
+    totalMinor: (combined - eliminated).toString(),
+  };
+}
+
+/**
+ * Look for balances that are equal and opposite across two members: one
+ * member's trade receivables exactly matching another's trade payables.
+ *
+ * This is evidence, not proof. A control-account balance is the whole of an
+ * entity's receivables — group and third party together — so an exact match
+ * between two members is a strong hint and nothing more. The pairing is greedy
+ * and deterministic (members in the order the caller gave, receivable side
+ * first) so the same books always propose the same candidates; a reviewer who
+ * rejected a candidate yesterday sees the same one today.
+ *
+ * Anything left over is warned about rather than forced into a pair. If one
+ * member still has receivables and another still has payables, some of that may
+ * be intragroup and the group's receivables and payables are then both
+ * overstated — but the ledger records no counterparty, so only a human can say.
+ */
+function proposeEliminations(
+  balances: { entityId: string; receivableMinor: bigint; payableMinor: bigint }[],
+  warnings: string[],
+): Elimination[] {
+  const out: Elimination[] = [];
+  const receivableLeft = new Map(balances.map((b) => [b.entityId, b.receivableMinor]));
+  const payableLeft = new Map(balances.map((b) => [b.entityId, b.payableMinor]));
+
+  for (const a of balances) {
+    const ar = receivableLeft.get(a.entityId) ?? 0n;
+    if (ar <= 0n) continue;
+    for (const b of balances) {
+      if (b.entityId === a.entityId) continue;
+      const ap = payableLeft.get(b.entityId) ?? 0n;
+      if (ap !== ar) continue;
+      out.push({
+        receivableEntityId: a.entityId,
+        payableEntityId: b.entityId,
+        receivableCode: AR_CODE,
+        payableCode: AP_CODE,
+        amountMinor: ar.toString(),
+        reason:
+          `${a.entityId} carries ${ar} on ${AR_CODE} and ${b.entityId} carries the same amount on ${AP_CODE}. ` +
+          `Equal and opposite across two members of the group, which is what an unsettled intragroup invoice ` +
+          `looks like. Confirm the counterparty before eliminating — a journal line does not record one.`,
+        applied: false,
+      });
+      receivableLeft.set(a.entityId, 0n);
+      payableLeft.set(b.entityId, 0n);
+      break;
+    }
+  }
+
+  const strandedAr = balances.filter((b) => (receivableLeft.get(b.entityId) ?? 0n) > 0n);
+  const strandedAp = balances.filter((b) => (payableLeft.get(b.entityId) ?? 0n) > 0n);
+  // Only worth saying when both sides exist somewhere in the group. A member
+  // with third-party customers and no member owing anybody anything has nothing
+  // intragroup to eliminate, and warning about it every month teaches people to
+  // ignore the warnings.
+  if (strandedAr.length && strandedAp.length) {
+    for (const b of strandedAr) {
+      const others = strandedAp.filter((p) => p.entityId !== b.entityId);
+      if (!others.length) continue;
+      warnings.push(
+        `${b.entityId} has ${receivableLeft.get(b.entityId)} on ${AR_CODE} that no member's ${AP_CODE} balance ` +
+          `matches, while ${others.map((o) => `${o.entityId} owes ${payableLeft.get(o.entityId)}`).join(" and ")}. ` +
+          `If any of that is intragroup, the group's receivables and payables are both overstated by it. ` +
+          `A journal line records no counterparty, so this cannot be settled from the ledger alone.`,
+      );
+    }
+  }
+
+  return out;
+}

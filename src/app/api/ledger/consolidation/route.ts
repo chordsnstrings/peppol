@@ -1,0 +1,93 @@
+import { requireSession } from "@/lib/server/session";
+import { assertSameOrigin } from "@/lib/server/platform-admin";
+import { json, handleError } from "@/lib/server/http";
+import { LedgerError } from "@/lib/server/ledger/post";
+import {
+  consolidatedStatements,
+  groupList,
+  groupDetail,
+  createGroup,
+  addMember,
+  removeMember,
+} from "@/lib/server/ledger/consolidation";
+
+export const runtime = "nodejs";
+
+/**
+ * Group accounts for a consolidation group.
+ *
+ * Every member's figures come from /api/ledger/statements' own functions, so a
+ * member's column here and that entity's own accounts are the same read rather
+ * than two reads that can drift.
+ *
+ * Intercompany eliminations are returned as proposals and applied only when the
+ * caller asks for them by name. That is deliberate: a journal line records no
+ * counterparty, so an elimination is a judgement, and a GET that silently made
+ * one would hide a real imbalance behind a balanced-looking sheet.
+ */
+export async function GET(req: Request) {
+  try {
+    const { orgId } = await requireSession();
+    const url = new URL(req.url);
+    const group = url.searchParams.get("group");
+
+    if (!group) return json({ groups: await groupList({ orgId }) });
+
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    if (!from || !to) return json({ group: await groupDetail({ orgId, groupCode: group }) });
+
+    const applyEliminations = url.searchParams.get("applyEliminations") === "true";
+    const [detail, statements] = await Promise.all([
+      groupDetail({ orgId, groupCode: group }),
+      consolidatedStatements({ orgId, groupCode: group, from, to, applyEliminations }),
+    ]);
+    return json({ group: detail, consolidated: statements });
+  } catch (e) {
+    if (e instanceof LedgerError) return json({ error: e.message }, 422);
+    return handleError(e);
+  }
+}
+
+/** Create a group, or change who is in it. Nothing here posts. */
+export async function POST(req: Request) {
+  try {
+    await assertSameOrigin(req);
+    const { orgId } = await requireSession();
+    const b = (await req.json().catch(() => ({}))) as {
+      action?: "create" | "add-member" | "remove-member";
+      code?: string;
+      name?: string;
+      currency?: string;
+      group?: string;
+      entityId?: string;
+      ownershipBps?: number;
+      isParent?: boolean;
+    };
+
+    if (b.action === "create") {
+      if (!b.code || !b.name) return json({ error: "A group needs a code and a name." }, 400);
+      return json({ group: await createGroup({ orgId, code: b.code, name: b.name, currency: b.currency }) });
+    }
+
+    if (b.action === "add-member") {
+      if (!b.group || !b.entityId) return json({ error: "A member needs a group code and an entityId." }, 400);
+      return json({
+        group: await addMember({
+          orgId, groupCode: b.group, entityId: b.entityId,
+          ownershipBps: b.ownershipBps, isParent: b.isParent === true,
+        }),
+      });
+    }
+
+    if (b.action === "remove-member") {
+      if (!b.group || !b.entityId) return json({ error: "Removing a member needs a group code and an entityId." }, 400);
+      return json({ group: await removeMember({ orgId, groupCode: b.group, entityId: b.entityId }) });
+    }
+
+    return json({ error: 'action must be one of "create", "add-member" or "remove-member".' }, 400);
+  } catch (e) {
+    if (e instanceof LedgerError) return json({ error: e.message }, 422);
+    return handleError(e);
+  }
+}

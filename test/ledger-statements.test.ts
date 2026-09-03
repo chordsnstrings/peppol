@@ -174,6 +174,17 @@ d("financial statements", () => {
     expect(bs.balanced).toBe(true);
   });
 
+  it("balances at a date beyond every fiscal year", async () => {
+    // 2027 has no fiscal year in this fixture. Deriving current-year earnings
+    // from a FiscalYear row means it silently reads zero while the assets and
+    // equity read the whole elapsed ledger — so the sheet reports itself
+    // unbalanced, and the screen tells the reader to report a defect that is
+    // not in their data.
+    const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: "2027-06-30" });
+    expect(bs.balanced).toBe(true);
+    expect(bs.differenceMinor).toBe("0");
+  });
+
   it("refuses a period that ends before it starts", async () => {
     await expect(profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-31", to: "2026-03-01" }))
       .rejects.toThrow(/ends before it starts/i);
