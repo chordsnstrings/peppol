@@ -78,6 +78,12 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "2310", name: "Contract liabilities (deferred revenue)", nameAr: "التزامات العقود (إيرادات مؤجلة)", type: "LIABILITY", parent: "20", subtype: "CONTRACT_LIABILITY" },
   { code: "2400", name: "Corporate tax payable", nameAr: "ضريبة الشركات المستحقة", type: "LIABILITY", parent: "20", subtype: "CT_PAYABLE" },
   { code: "25", name: "Non-current liabilities", nameAr: "الالتزامات غير المتداولة", type: "LIABILITY", parent: "2", isPostable: false },
+  // IAS 1.69 wants what falls due within twelve months shown as current, and
+  // in this chart it is the code band that makes a liability current — the
+  // report layouts read 2000-2499 as current and 2500-2999 as not. So the
+  // current portion of a loan needs a code in the lower band; a note alone
+  // would not reach any statement the product prints.
+  { code: "2450", name: "Borrowings — current portion", nameAr: "الجزء المتداول من القروض", type: "LIABILITY", parent: "20" },
   { code: "2500", name: "Long-term loans", nameAr: "قروض طويلة الأجل", type: "LIABILITY", parent: "25" },
   { code: "2600", name: "Lease liabilities", nameAr: "التزامات عقود الإيجار", type: "LIABILITY", parent: "25" },
 

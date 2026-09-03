@@ -2105,3 +2105,382 @@ model DocumentSequenceChange {
 
   @@index([orgId, entityId, scope, changedAt])
 }
+
+/// A loan or other borrowing, measured at amortised cost under IFRS 9.
+///
+/// The facility's terms are a contract and the ledger records only their
+/// consequences, so the register and the books are two records on purpose —
+/// `borrowingRegister()` puts them side by side and reports the difference
+/// rather than reconciling it away.
+///
+/// The instalment and the effective rate are computed at drawdown and then
+/// FIXED. Everything else about the schedule follows from the terms, so it is
+/// derived rather than stored; but those two are what the postings were made
+/// from, and recomputing them later would let an edit to the register silently
+/// restate a period that has already been closed.
+model Borrowing {
+  id                  String   @id @default(cuid())
+  orgId               String
+  entityId            String
+  code                String
+  lender              String
+  /// Recorded, but a drawdown in anything but the book's own currency is
+  /// refused: IAS 21.23(a) retranslates a monetary liability at every reporting
+  /// date and nothing here does that.
+  currency            String   @default("AED")
+  /// Face amount advanced, in minor units.
+  principalMinor      BigInt
+  drawdownOn          DateTime @db.Date
+  /// The rate as the facility quotes it, annual, in basis points. 5% is 500.
+  statedRateBps       Int
+  /// REDUCING charges interest on the balance left; FLAT on the original sum.
+  interestBasis       String   @default("REDUCING")
+  /// MONTHLY | QUARTERLY | SEMIANNUAL | ANNUAL
+  frequency           String   @default("MONTHLY")
+  /// Whole months from the drawdown to the last instalment.
+  termMonths          Int
+  /// The level instalment, fixed at drawdown.
+  instalmentMinor     BigInt   @default(0)
+  /// The rate IFRS 9 measures at: the one that discounts the instalments back
+  /// to what was advanced. For a flat facility it is far above the quoted rate.
+  effectiveRateBps    Int      @default(0)
+  /// Carrying amount — the principal still outstanding at amortised cost.
+  outstandingMinor    BigInt   @default(0)
+  /// How much of `outstandingMinor` has been reclassified to the current-portion
+  /// account. Not the same as what IAS 1.69 says it should be today; the
+  /// register reports both, and their differing means the split has not been run.
+  currentPortionMinor BigInt   @default(0)
+  /// The last instalment number posted. Nought means none.
+  paidTo              Int      @default(0)
+  status              String   @default("draft")
+  notes               String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  covenants           BorrowingCovenant[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+/// A condition of the facility, and the threshold it has to stay the right side
+/// of. Only metrics the ledger can actually compute are testable; anything else
+/// is recorded with metric OTHER and reported as untested, never as a pass.
+model BorrowingCovenant {
+  id           String    @id @default(cuid())
+  orgId        String
+  borrowingId  String
+  code         String
+  /// CURRENT_RATIO | DEBT_TO_EQUITY | INTEREST_COVER | MIN_NET_WORTH | OTHER
+  metric       String
+  /// MIN sets a floor, MAX sets a ceiling.
+  direction    String    @default("MIN")
+  /// For a ratio: basis points. A current ratio of 1.25 is 12500. A ratio held
+  /// as a decimal disagrees with itself at the fourth place.
+  thresholdBps Int?
+  /// For an amount: minor units.
+  thresholdMinor BigInt?
+  /// What the covenant says, in the lender's own words.
+  wording      String?
+  createdAt    DateTime  @default(now())
+  borrowing    Borrowing @relation(fields: [borrowingId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, borrowingId, code])
+  @@index([orgId, borrowingId])
+}
+
+/// A landed cost voucher: the freight, insurance, duty and handling invoices
+/// for one shipment, and the goods receipts they are to be carried onto.
+///
+/// IAS 2.10 makes those charges part of what the goods cost. Expensing them
+/// understates inventory and overstates cost of sales in the period the goods
+/// arrive, then flatters the period they are sold in — an error that is largest
+/// exactly when stock is largest, which is usually the year end.
+model LandedCostVoucher {
+  id          String                 @id @default(cuid())
+  orgId       String
+  entityId    String
+  /// The voucher's own number.
+  number      String
+  /// The shipment, container or bill of lading the charges belong to. Several
+  /// vouchers can name one shipment — the duty invoice rarely arrives with the
+  /// freight invoice — and the report groups by it.
+  shipmentRef String
+  voucherDate DateTime               @db.Date
+  /// draft | applied | cancelled
+  status      String                 @default("draft")
+  notes       String?
+  /// When the charges were carried onto the goods, and the one entry that did it.
+  appliedOn   DateTime?              @db.Date
+  entryId     String?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  charges     LandedCostCharge[]
+  lines       LandedCostLine[]
+  allocations LandedCostAllocation[]
+
+  @@unique([orgId, entityId, number])
+  @@index([orgId, entityId, status])
+  @@index([orgId, entityId, shipmentRef])
+}
+
+/// One charge on the voucher — a freight invoice, a duty receipt — with the
+/// account it is currently sitting in and the basis it is to be spread on.
+///
+/// The basis is per charge rather than per voucher because the right one
+/// differs by charge: freight follows weight or volume, duty follows value.
+/// One basis for a whole voucher would be wrong for at least one of them.
+model LandedCostCharge {
+  id          String                 @id @default(cuid())
+  orgId       String
+  voucherId   String
+  voucher     LandedCostVoucher      @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  lineNo      Int
+  description String
+  /// Minor units. Always positive — a charge that reduces what goods cost is a
+  /// credit note against the supplier, not a landed cost.
+  amountMinor BigInt
+  /// The account the charge is sitting in now, and which this voucher credits.
+  accountCode String
+  /// VALUE | QUANTITY | WEIGHT | VOLUME
+  basis       String                 @default("VALUE")
+  allocations LandedCostAllocation[]
+
+  @@unique([voucherId, lineNo])
+  @@index([orgId, voucherId])
+}
+
+/// One lot of goods the voucher lands onto: an inventory receipt, named by the
+/// goods received note it came in under.
+model LandedCostLine {
+  id             String                 @id @default(cuid())
+  orgId          String
+  voucherId      String
+  voucher        LandedCostVoucher      @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  lineNo         Int
+  itemId         String
+  sku            String
+  /// The goods received note. The receipt movement it resolved to is held too,
+  /// because the note is the human's name for it and the movement is the record.
+  receiptRef     String
+  movementId     String
+  /// What came in, and what it cost before anything was landed on it.
+  quantityMilli  BigInt
+  valueMinor     BigInt
+  /// The shipped weight and volume of this lot where they were actually
+  /// weighed or measured, in the same thousandths as everything else: grams
+  /// and litres. Nil falls back to the item's recorded figure per unit.
+  weightMilli    BigInt?
+  volumeMilli    BigInt?
+  /// Filled in when the voucher is applied: what was still on the shelf then,
+  /// what was carried onto it in total, and how that total split.
+  onHandMilli    BigInt?
+  allocatedMinor BigInt?
+  inventoryMinor BigInt?
+  cogsMinor      BigInt?
+  allocations    LandedCostAllocation[]
+
+  @@unique([voucherId, lineNo])
+  @@index([orgId, voucherId])
+  @@index([orgId, itemId])
+}
+
+/// What one charge put on one lot of goods. Kept per pair rather than netted
+/// into a total, because "which charge landed this" is the question an auditor
+/// asks and a total cannot answer it.
+model LandedCostAllocation {
+  id             String            @id @default(cuid())
+  orgId          String
+  voucherId      String
+  voucher        LandedCostVoucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  chargeId       String
+  charge         LandedCostCharge  @relation(fields: [chargeId], references: [id], onDelete: Cascade)
+  lineId         String
+  line           LandedCostLine    @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  /// The weight this share was worked out on — value, quantity, grams or
+  /// litres, whichever the charge is spread by. Kept so the arithmetic can be
+  /// checked years later against a measure that may since have changed.
+  basisWeight    BigInt
+  allocatedMinor BigInt
+  /// Of that share, what went onto stock still held and what went to cost of
+  /// sales because those units had already been sold. The two always add back
+  /// to the share — the database checks it.
+  inventoryMinor BigInt
+  cogsMinor      BigInt
+
+  @@unique([chargeId, lineId])
+  @@index([orgId, voucherId])
+}
+
+/// What one unit of an item weighs and how much room it takes up.
+///
+/// Freight is charged by weight or by volume, so allocating it needs both, and
+/// neither is a fact about a transaction — they are facts about the item, kept
+/// once. Thousandths throughout: grams per whole unit, and litres per whole
+/// unit. Nil means nobody has recorded one, which is why a weight-based
+/// allocation refuses rather than treating the item as weightless.
+model LandedCostMeasure {
+  id              String   @id @default(cuid())
+  orgId           String
+  entityId        String
+  itemId          String
+  sku             String
+  unitWeightMilli BigInt?
+  unitVolumeMilli BigInt?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([orgId, entityId, itemId])
+  @@index([orgId, entityId])
+}
+
+
+/// A party somebody has declared to be related, under IAS 24.
+///
+/// Declared, not detected. Relatedness is a fact about people and control —
+/// a director's spouse, an entity under common control — and no chart of
+/// accounts holds it. A detector would produce a confident, incomplete list
+/// and a reader would take its silence as a statement.
+model RelatedParty {
+  id           String    @id @default(cuid())
+  orgId        String
+  entityId     String
+  /// The counterparty, by the folded key counterparties resolve to.
+  partyKey     String
+  name         String
+  /// PARENT | SUBSIDIARY | ASSOCIATE | JOINT_VENTURE | KEY_MANAGEMENT |
+  /// CLOSE_FAMILY | COMMON_CONTROL | POST_EMPLOYMENT_PLAN | OTHER
+  relationship String
+  /// Who said so, and when. A declaration nobody owns is not a declaration.
+  declaredBy   String
+  declaredOn   DateTime  @db.Date
+  startedOn    DateTime  @db.Date
+  /// When the relationship ended. IAS 24 asks about the reporting period, so a
+  /// relationship that ended mid-year is still disclosable for the part of the
+  /// year it existed.
+  endedOn      DateTime? @db.Date
+  notes        String?
+  createdAt    DateTime  @default(now())
+
+  @@unique([orgId, entityId, partyKey, startedOn])
+  @@index([orgId, entityId, relationship])
+}
+
+/// Compensation of key management personnel — IAS 24.17, which asks for the
+/// total AND each of five categories. A total on its own does not comply.
+model KeyManagementComp {
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String
+  /// The reporting period this covers, as a fiscal year label.
+  period      String
+  /// SHORT_TERM | POST_EMPLOYMENT | OTHER_LONG_TERM | TERMINATION | SHARE_BASED
+  category    String
+  amountMinor BigInt
+  /// How many people the figure covers. Disclosing a total for "key
+  /// management" without saying how many people that is tells a reader very
+  /// little.
+  headcount   Int
+  declaredBy  String
+  declaredOn  DateTime @db.Date
+  createdAt   DateTime @default(now())
+
+  @@unique([orgId, entityId, period, category])
+}
+
+/// The attestation that makes the note complete: who has been assessed, by
+/// whom, and whether there is a controlling party. "There are none" is a
+/// declaration somebody makes, never a default the software assumes.
+model RelatedPartyAttestation {
+  id                      String   @id @default(cuid())
+  orgId                   String
+  entityId                String
+  period                  String
+  /// IAS 24.13: the parent and, where different, the ultimate controlling
+  /// party, disclosed whether or not there were transactions between them.
+  parentName              String?
+  ultimateControllingParty String?
+  /// True where the preparer states there is no controlling party at all,
+  /// which is different from not having been asked.
+  noControllingParty      Boolean  @default(false)
+  attestedBy              String
+  attestedOn              DateTime @db.Date
+  notes                   String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([orgId, entityId, period])
+}
+
+/// What somebody has said about a notification: that they have seen it, or that
+/// they want it back on a stated day.
+///
+/// Keyed on the finding's STABLE IDENTITY — which module said it, which of its
+/// checks, and which particular thing it is about — never on its wording. Every
+/// sentence on that screen is generated, so half of them are rewritten whenever
+/// the figure inside them moves; an acknowledgement keyed on the message would
+/// evaporate the first time a number changed.
+///
+/// The severity, count and amount here are the finding AS IT STOOD when it was
+/// dealt with, and they are what makes an acknowledgement lapse. Acknowledging
+/// three unreconciled bank lines is a statement about three lines; forty-seven
+/// is not the thing that was acknowledged, so the row comes back.
+///
+/// One row per key: this is the current position, overwritten in place.
+/// `NotificationEvent` is the log, and it is the thing that remembers.
+model NotificationAck {
+  id          String    @id @default(cuid())
+  orgId       String
+  entityId    String
+  key         String
+  /// acknowledged | snoozed
+  action      String
+  actorId     String
+  /// Written down beside the id rather than joined at read time: an
+  /// acknowledgement is a statement somebody made on a day, and it should still
+  /// read as English after the account is closed.
+  actorName   String?
+  at          DateTime  @default(now())
+  /// Optional. A reason nobody wrote is better than a reason nobody meant.
+  reason      String?
+  severity    String
+  /// How many things it covered then, where a count means something.
+  itemCount   Int?
+  /// What it was worth then, in minor units.
+  amountMinor BigInt?
+  /// The deadline it carried then. A snooze may never reach it — the database
+  /// keeps that rule itself, in NotificationAck_snooze_before_due_check.
+  dueOn       DateTime? @db.Date
+  /// The day a snooze runs out and the row comes back. Null for an
+  /// acknowledgement, and the database holds the two to that.
+  snoozeUntil DateTime? @db.Date
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([orgId, entityId, key])
+  @@index([orgId, entityId, action])
+}
+
+/// Every act on a notification, appended and never updated.
+///
+/// The ack row above holds only the current position, so acknowledging over a
+/// snooze overwrites it. Without this log, "why did this row stop showing, and
+/// who decided that" would have no answer — which is the question somebody asks
+/// precisely when a notification turned out to matter.
+model NotificationEvent {
+  id          String    @id @default(cuid())
+  orgId       String
+  entityId    String
+  key         String
+  /// acknowledged | snoozed | cleared
+  action      String
+  actorId     String
+  actorName   String?
+  at          DateTime  @default(now())
+  reason      String?
+  severity    String?
+  itemCount   Int?
+  amountMinor BigInt?
+  snoozeUntil DateTime? @db.Date
+
+  @@index([orgId, entityId, key, at])
+}

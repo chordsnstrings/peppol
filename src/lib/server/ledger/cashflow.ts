@@ -149,6 +149,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   // rather than reported as an account nobody thought about.
   "3300": "operating_noncash", // revaluation surplus
 
+  "2450": "financing", // borrowings, current portion — nets against 2500
   "2500": "financing", // long-term loans
   "2600": "financing", // lease liabilities
   "3000": "financing", // share capital

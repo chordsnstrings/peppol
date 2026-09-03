@@ -117,7 +117,11 @@ const NON_MONETARY_SUBTYPES = new Map<string, string>([
  * The UAE chart carries no subtype on some accounts whose treatment is not in
  * doubt, so they are named here rather than left to a guess.
  */
-const MONETARY_CODES = new Set(["1150", "1400", "2050", "2500", "2600"]);
+// 2450 is the current portion of a borrowing and is as monetary as the 2500
+// it was split out of. Leaving it out would retranslate a foreign-currency
+// loan's long-term half and not its short-term half, which is worse than
+// retranslating neither.
+const MONETARY_CODES = new Set(["1150", "1400", "2050", "2060", "2450", "2500", "2600"]);
 
 const NON_MONETARY_CODES = new Map<string, string>([
   ["1300", "a prepayment is a right to goods or services, not to currency — IFRIC 22 fixes it at the rate on the date it was paid"],
