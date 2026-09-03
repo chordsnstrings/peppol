@@ -726,14 +726,65 @@ model Employee {
   housingMinor   BigInt    @default(0)
   transportMinor BigInt    @default(0)
   otherMinor     BigInt    @default(0)
+  /// Annual leave in calendar days a full year of service earns. Federal
+  /// Decree-Law 33/2021 Article 29 gives 30 days after a year of service and
+  /// two working days a month between six months and a year; a contract may
+  /// give more, never less.
+  leaveDaysPerYear Int     @default(30)
   status         String    @default("active")
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   payslips       Payslip[]
+  leave          LeaveRecord[]
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
 }
+
+/// Leave taken, or bought back. Entitlement is not stored: it is a function of
+/// service and the contract, and a stored entitlement is a figure that stops
+/// agreeing with the joining date the moment either changes.
+model LeaveRecord {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  /// ANNUAL | SICK | UNPAID | MATERNITY | PARENTAL | HAJJ | COMPASSIONATE | ENCASHED
+  kind         String   @default("ANNUAL")
+  startsOn     DateTime @db.Date
+  endsOn       DateTime @db.Date
+  /// Days in tenths, so half a day is 5. Leave is taken in halves, not thirds.
+  daysTenth    Int
+  /// Paid at the time, as annual leave is; unpaid leave earns no entitlement.
+  paid         Boolean  @default(true)
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, entityId, employeeId, startsOn])
+}
+
+/// The untaken-leave provision posted at a period end. Kept per period, because
+/// the charge for a month is the movement between two dates and a running
+/// balance cannot be asked what last month's provision was.
+model LeaveProvision {
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String
+  period      String
+  /// The liability at the end of the period.
+  balanceMinor BigInt
+  /// The movement charged to profit for the period.
+  chargeMinor BigInt
+  /// Days of untaken leave behind that liability, in tenths.
+  daysTenth   Int
+  entryId     String?
+  createdAt   DateTime @default(now())
+
+  @@unique([orgId, entityId, period])
+  @@index([orgId, entityId])
+}
+
 
 /// One employee's pay for one month. Append-only once posted.
 model Payslip {

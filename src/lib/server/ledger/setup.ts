@@ -59,6 +59,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "2110", name: "VAT payable to FTA", nameAr: "ضريبة مستحقة للهيئة", type: "LIABILITY", parent: "20", subtype: "VAT_PAYABLE" },
   { code: "2150", name: "Provisions", nameAr: "المخصصات", type: "LIABILITY", parent: "20", subtype: "PROVISION" },
   { code: "2200", name: "Salaries payable", nameAr: "رواتب مستحقة", type: "LIABILITY", parent: "20", subtype: "PAYROLL" },
+  { code: "2260", name: "Untaken leave provision", nameAr: "مخصص الإجازات غير المستخدمة", type: "LIABILITY", parent: "20", subtype: "LEAVE_PROVISION" },
   { code: "2250", name: "End-of-service benefits provision", nameAr: "مخصص مكافأة نهاية الخدمة", type: "LIABILITY", parent: "20", subtype: "EOSB" },
   { code: "2300", name: "Customer deposits and advances", nameAr: "دفعات مقدمة من العملاء", type: "LIABILITY", parent: "20" },
   { code: "2320", name: "Deferred tax liability", nameAr: "التزام ضريبي مؤجل", type: "LIABILITY", parent: "25", subtype: "DEFERRED_TAX_LIABILITY" },
