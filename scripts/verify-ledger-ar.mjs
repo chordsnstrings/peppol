@@ -175,6 +175,24 @@ check('and files no warnings when everything is coded', (r.body?.warnings ?? [])
 r = await call('GET', `/api/ledger/vat?entityId=${ENT}&from=2026-02-28&to=2026-02-01`);
 check('a backwards period is refused', r.status === 422, `HTTP ${r.status}`);
 
+console.log('\nFINANCIAL STATEMENTS');
+r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2026-01-01&to=2026-02-28`);
+const P = r.body?.profitAndLoss, BS = r.body?.balanceSheet;
+check('revenue is presented positive, not as the credit the ledger holds',
+  P?.revenue?.totalMinor === '250000' && P.revenue.lines.some(l => l.balanceMinor.startsWith('-')),
+  `total ${P?.revenue?.totalMinor}`);
+check('operating expenses are separated from cost of sales', P?.expenses?.totalMinor === '400000', `opex ${P?.expenses?.totalMinor}`);
+check('net profit is revenue less costs', P?.netProfitMinor === '-150000', `net ${P?.netProfitMinor}`);
+check('the balance sheet balances', BS?.balanced === true, `difference ${BS?.differenceMinor}`);
+check('this year\'s result is carried into equity as a visible line',
+  BS?.currentYearEarningsMinor === P?.netProfitMinor && BS.equity.lines.some(l => l.code === '3950'),
+  `current year ${BS?.currentYearEarningsMinor}`);
+check('assets equal liabilities plus equity', BS?.totalAssetsMinor === BS?.totalLiabilitiesAndEquityMinor,
+  `${BS?.totalAssetsMinor} vs ${BS?.totalLiabilitiesAndEquityMinor}`);
+
+r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2026-02-28&to=2026-01-01`);
+check('a backwards statement period is refused', r.status === 422, `HTTP ${r.status}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';
