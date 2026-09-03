@@ -336,6 +336,7 @@ model Account {
   createdAt         DateTime         @default(now())
   lines             JournalLine[]
   balances          AccountBalance[]
+  bankLines         BankStatementLine[] @relation("BankLines")
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, type])
@@ -530,4 +531,41 @@ model DocumentSequence {
   updatedAt DateTime @updatedAt
 
   @@unique([orgId, entityId, scope])
+}
+
+/// A line as the bank reported it. Kept separate from the ledger on purpose:
+/// the bank's record and ours are two independent accounts of the same events,
+/// and reconciliation is the act of comparing them. Merging them into one table
+/// would destroy the very difference the control depends on.
+model BankStatementLine {
+  id            String    @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// The ledger account this statement belongs to (a 1010-style bank account).
+  accountId     String
+  account       Account   @relation("BankLines", fields: [accountId], references: [id], onDelete: Restrict)
+  postedOn      DateTime  @db.Date
+  description   String
+  reference     String?
+  /// Signed minor units, debit-positive: money in is positive.
+  amountMinor   BigInt
+  currency      String
+  /// Running balance the bank reported after this line, when the file gives one.
+  balanceMinor  BigInt?
+  /// Stable hash of the bank's own fields — re-importing an overlapping file
+  /// must not duplicate lines, and banks rarely give a usable unique id.
+  fingerprint   String
+  importBatch   String
+  /// The journal line this was matched to, once someone agrees they are the
+  /// same event.
+  matchedLineId String?
+  matchedAt     DateTime?
+  matchedBy     String?
+  status        String    @default("unmatched") // unmatched | matched | ignored
+  createdAt     DateTime  @default(now())
+
+  @@unique([orgId, accountId, fingerprint])
+  @@index([orgId, entityId, accountId, status])
+  @@index([orgId, importBatch])
+  @@index([matchedLineId])
 }

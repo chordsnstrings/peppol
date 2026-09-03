@@ -193,6 +193,62 @@ check('assets equal liabilities plus equity', BS?.totalAssetsMinor === BS?.total
 r = await call('GET', `/api/ledger/statements?entityId=${ENT}&from=2026-02-28&to=2026-01-01`);
 check('a backwards statement period is refused', r.status === 422, `HTTP ${r.status}`);
 
+console.log('\nBANK RECONCILIATION');
+// Two receipts posted, one still in transit, plus a charge nobody booked.
+r = await call('POST', '/api/ledger/journals', { entityId: ENT, entryDate: '2026-02-05', memo: 'Cleared receipt',
+  lines: [{ account: '1010', debit: 500000 }, { account: '4900', credit: 500000 }] });
+const clearedRef = r.body?.entry?.id;
+check('a receipt is posted', r.status === 200, r.body?.entry?.series + '-' + r.body?.entry?.number);
+r = await call('POST', '/api/ledger/journals', { entityId: ENT, entryDate: '2026-02-26', memo: 'Cheque in transit',
+  lines: [{ account: '1010', debit: 120000 }, { account: '4900', credit: 120000 }] });
+check('and a cheque that has not cleared', r.status === 200);
+
+r = await call('POST', '/api/ledger/bank', { entityId: ENT, account: '1010', action: 'import', lines: [
+  { postedOn: '2026-02-05', description: 'Cleared receipt', amountMinor: 500000, balanceMinor: 500000 },
+  { postedOn: '2026-02-18', description: 'Monthly account fee', amountMinor: -7500, balanceMinor: 492500 },
+]});
+check('the statement imports', r.status === 200 && r.body?.imported === 2, `imported ${r.body?.imported}`);
+
+r = await call('POST', '/api/ledger/bank', { entityId: ENT, account: '1010', action: 'import', lines: [
+  { postedOn: '2026-02-05', description: 'Cleared receipt', amountMinor: 500000, balanceMinor: 500000 },
+  { postedOn: '2026-02-18', description: 'Monthly account fee', amountMinor: -7500, balanceMinor: 492500 },
+]});
+check('re-importing the same period adds nothing', r.body?.imported === 0 && r.body?.duplicates === 2, `imported ${r.body?.imported}, dup ${r.body?.duplicates}`);
+
+r = await call('GET', `/api/ledger/bank?entityId=${ENT}&account=1010&asOf=2026-02-28`);
+const sug = (r.body?.suggestions ?? []).find(s => s.amountMinor === '500000');
+check('the cleared receipt is suggested with a reason', sug && sug.confidence >= 80 && sug.why.length > 0,
+  sug ? `${sug.confidence}% — ${sug.why.join('; ')}` : 'no suggestion');
+
+r = await call('POST', '/api/ledger/bank', { entityId: ENT, action: 'match', bankLineId: sug.bankLineId, journalLineId: sug.journalLineId });
+check('the match is recorded', r.status === 200 && r.body?.matched === true, `HTTP ${r.status}`);
+
+r = await call('GET', `/api/ledger/bank?entityId=${ENT}&account=1010&asOf=2026-02-28`);
+let stmt = r.body?.statement;
+const fee = stmt?.unmatchedBank?.find(b => b.description === 'Monthly account fee');
+check('the unbooked fee is still open and named', fee?.amountMinor === '-7500', JSON.stringify(fee ?? null).slice(0, 80));
+check('the cheque in transit is listed on our side', (stmt?.unmatchedLedger ?? []).some(l => l.memo === 'Cheque in transit'),
+  `${stmt?.unmatchedLedger?.length} open on our side`);
+
+r = await call('POST', '/api/ledger/bank', { entityId: ENT, action: 'post', bankLineId: fee.id, contraAccount: '6350' });
+check('the fee is booked from the bank line', r.status === 200 && /^BK-/.test(r.body?.reference ?? ''), r.body?.reference);
+
+r = await call('GET', `/api/ledger/bank?entityId=${ENT}&account=1010&asOf=2026-02-28`);
+stmt = r.body?.statement;
+check('the reconciliation now ties to the bank', stmt?.reconciled === true, `difference ${stmt?.differenceMinor}`);
+// The account also carries the AR and AP settlements posted earlier in this
+// script, so `outstanding` is not just the cheque. What must hold is the
+// identity the whole statement rests on.
+const identity = BigInt(stmt.ledgerBalanceMinor) - BigInt(stmt.outstandingInLedgerMinor) + BigInt(stmt.unrecordedInBankMinor);
+check('the reconciliation identity holds', identity.toString() === stmt.reconciledBalanceMinor && identity.toString() === stmt.statementBalanceMinor,
+  `ledger ${stmt.ledgerBalanceMinor} − outstanding ${stmt.outstandingInLedgerMinor} + unrecorded ${stmt.unrecordedInBankMinor} = ${identity} vs bank ${stmt.statementBalanceMinor}`);
+check('and the cheque in transit is among what explains the gap',
+  (stmt.unmatchedLedger ?? []).some(l => l.memo === 'Cheque in transit' && l.amountMinor === '120000'),
+  `${stmt.unmatchedLedger?.length} items explain it`);
+
+r = await call('POST', '/api/ledger/bank', { entityId: ENT, action: 'post', bankLineId: fee.id, contraAccount: '6350' });
+check('the same bank line cannot be booked twice', r.status === 422, `HTTP ${r.status} ${String(r.body?.error).slice(0,50)}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';
