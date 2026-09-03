@@ -612,3 +612,150 @@ model FixedAsset {
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
 }
+
+/// An item held in stock, with its running quantity and value.
+///
+/// Both are carried on the row rather than summed from movements. Stock
+/// valuation is a running calculation — weighted average cost depends on the
+/// order receipts and issues happened in, so it cannot be re-derived from a set
+/// of rows without replaying them, and replaying them would let a backdated
+/// receipt silently rewrite the cost of goods already sold.
+model InventoryItem {
+  id            String              @id @default(cuid())
+  orgId         String
+  entityId      String
+  sku           String
+  name          String
+  nameAr        String?
+  uom           String              @default("EA")
+  costMethod    String              @default("WEIGHTED_AVERAGE")
+  /// Quantity in thousandths, so 1.5 kg is 1500. Stock is not always whole.
+  quantityMilli BigInt              @default(0)
+  /// What that quantity is carried at, in minor units.
+  valueMinor    BigInt              @default(0)
+  stockAccount  String              @default("1200")
+  cogsAccount   String              @default("5000")
+  varianceAccount String            @default("5300")
+  status        String              @default("active")
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  movements     InventoryMovement[]
+
+  @@unique([orgId, entityId, sku])
+  @@index([orgId, entityId, status])
+}
+
+/// One movement of stock. Append-only: a correction is another movement, never
+/// an edit, for the same reason a posted journal entry is never edited.
+model InventoryMovement {
+  id             String        @id @default(cuid())
+  orgId          String
+  itemId         String
+  item           InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  movedOn        DateTime      @db.Date
+  kind           String // RECEIPT | ISSUE | ADJUSTMENT | WRITE_OFF
+  /// Signed thousandths: a receipt is positive, an issue negative.
+  quantityMilli  BigInt
+  /// Signed minor units, matching the quantity's direction.
+  valueMinor     BigInt
+  /// Weighted average cost per whole unit after this movement, in minor units.
+  unitCostMinor  BigInt
+  /// Running figures after this movement, so a movement can be read on its own.
+  balanceQtyMilli BigInt
+  balanceValueMinor BigInt
+  reference      String?
+  memo           String?
+  entryId        String?
+  createdAt      DateTime      @default(now())
+
+  @@index([orgId, itemId, movedOn])
+  @@index([entryId])
+}
+
+/// An employee, for payroll and end-of-service benefits.
+model Employee {
+  id             String       @id @default(cuid())
+  orgId          String
+  entityId       String
+  code           String
+  name           String
+  nameAr         String?
+  emiratesId     String?
+  /// MOL personal id and routing code, required by the WPS salary information file.
+  molPersonId    String?
+  routingCode    String?
+  iban           String?
+  joinedOn       DateTime     @db.Date
+  leftOn         DateTime?    @db.Date
+  /// Unlimited contracts accrue gratuity differently from limited ones.
+  contractType   String       @default("UNLIMITED")
+  basicMinor     BigInt
+  housingMinor   BigInt       @default(0)
+  transportMinor BigInt       @default(0)
+  otherMinor     BigInt       @default(0)
+  status         String       @default("active")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  payslips       Payslip[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+/// One employee's pay for one month. Append-only once posted.
+model Payslip {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  employeeId    String
+  employee      Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  period        String   // YYYY-MM
+  basicMinor    BigInt
+  allowancesMinor BigInt @default(0)
+  overtimeMinor BigInt   @default(0)
+  deductionsMinor BigInt @default(0)
+  netMinor      BigInt
+  /// Gratuity accrued for this month, charged to the provision.
+  gratuityMinor BigInt   @default(0)
+  status        String   @default("draft") // draft | posted | paid
+  entryId       String?
+  createdAt     DateTime @default(now())
+
+  @@unique([orgId, employeeId, period])
+  @@index([orgId, entityId, period])
+}
+
+/// A budget figure for one account in one period.
+model BudgetLine {
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String
+  /// Names a scenario, so last year's plan and this year's forecast coexist.
+  scenario    String   @default("BUDGET")
+  fiscalYear  String
+  period      String   // YYYY-MM
+  accountCode String
+  amountMinor BigInt
+  note        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([orgId, entityId, scenario, period, accountCode])
+  @@index([orgId, entityId, scenario, fiscalYear])
+}
+
+/// A period-end exchange rate, used to revalue foreign-currency balances.
+model FxRate {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  currency     String
+  /// Rate to the book's functional currency.
+  rate         Decimal  @db.Decimal(20, 10)
+  rateDate     DateTime @db.Date
+  source       String   @default("CBUAE")
+  createdAt    DateTime @default(now())
+
+  @@unique([orgId, entityId, currency, rateDate])
+  @@index([orgId, entityId, currency])
+}

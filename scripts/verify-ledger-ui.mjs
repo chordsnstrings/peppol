@@ -240,6 +240,7 @@ try {
     ["/accounting/bank", "Bank reconciliation"],
     ["/accounting/assets", "Fixed assets"],
     ["/accounting/year-end", "Year end"],
+    ["/accounting/inventory", "Inventory"],
   ]) {
     await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("h1", { timeout: 20000 });

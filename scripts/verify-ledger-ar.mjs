@@ -287,6 +287,39 @@ check('an asset cannot be disposed of twice', r.status === 422, `HTTP ${r.status
 r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
 check('the trial balance ties through purchase, depreciation and disposal', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
 
+console.log('\nINVENTORY');
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'add', sku: 'WIDGET', name: 'Widget', uom: 'EA' });
+check('an item is added', r.status === 200, r.body?.item?.sku);
+
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'receive', sku: 'WIDGET', movedOn: '2026-02-03', quantityMilli: '100000', valueMinor: '500000' });
+check('stock is received at cost', r.status === 200 && r.body?.unitCostMinor === '5000', `unit cost ${r.body?.unitCostMinor}`);
+
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'receive', sku: 'WIDGET', movedOn: '2026-02-05', quantityMilli: '100000', valueMinor: '700000' });
+check('a second receipt averages the cost', r.body?.unitCostMinor === '6000', `unit cost ${r.body?.unitCostMinor} (50 and 70 averaged)`);
+
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'issue', sku: 'WIDGET', movedOn: '2026-02-08', quantityMilli: '50000' });
+check('an issue costs the weighted average', r.body?.valueMinor === '-300000', `cost of sales ${r.body?.valueMinor}`);
+check('and the average is unchanged by issuing', r.body?.unitCostMinor === '6000', `unit cost ${r.body?.unitCostMinor}`);
+
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'issue', sku: 'WIDGET', movedOn: '2026-02-09', quantityMilli: '999000' });
+check('issuing more than is held is refused, and says why', r.status === 422 && /receipt is probably missing/i.test(r.body?.error ?? ''),
+  String(r.body?.error).slice(0, 70));
+
+r = await call('POST', '/api/ledger/inventory', { entityId: ENT, action: 'count', sku: 'WIDGET', movedOn: '2026-02-10', countedMilli: '148000', memo: 'Quarterly count' });
+check('a stock count books the shrinkage to its own account', r.status === 200 && r.body?.valueMinor === '-12000',
+  `variance ${r.body?.valueMinor}`);
+
+r = await call('GET', `/api/ledger/inventory?entityId=${ENT}`);
+check('the valuation ties to account 1200', r.body?.ledger?.agrees === true,
+  `list ${r.body?.totals?.valueMinor} vs ledger ${r.body?.ledger?.valueMinor}`);
+
+r = await call('GET', `/api/ledger/inventory?entityId=${ENT}&sku=WIDGET`);
+check('the movement history explains the valuation', (r.body?.movements ?? []).length === 4,
+  `${r.body?.movements?.length} movements`);
+
+r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
+check('the trial balance ties through every stock movement', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
+
 console.log('\nYEAR END');
 r = await call('GET', `/api/ledger/close?entityId=${ENT}&fiscalYear=2026`);
 check('the close is blocked while the year is still trading', (r.body?.blockers ?? []).length > 0,
