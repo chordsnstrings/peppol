@@ -45,8 +45,13 @@ await rejects('header account is not postable', () => entry({}, [L(header.id, 50
 await rejects('manual journal to a control account is refused', () => entry({ source: 'manual' }, [L(arCtl.id, 500), L(sales.id, -500)]), 'control account');
 await allows('subledger may post to a control account', () => entry({ source: 'invoice' }, [L(arCtl.id, 500), L(sales.id, -500)]));
 await rejects('currency-restricted account refuses another currency', () => entry({}, [L(usdOnly.id, 500), L(sales.id, -500)]), 'only accepts');
-await rejects('multi-currency entry must balance per currency',
+// Cross-currency entries are legitimate; the invariant is the FUNCTIONAL balance.
+await rejects('cross-currency entry that does not balance functionally is refused',
   () => entry({}, [L(cash.id, 10000, 'AED'), L(sales.id, -10000, 'AED'), L(usdOnly.id, 700, 'USD')]), 'does not balance');
+await allows('cross-currency entry that balances functionally is accepted', () => entry({}, [
+  { ...L(usdOnly.id, 0, 'USD'), txnAmountMinor: 10000n, functionalAmountMinor: 36730n },
+  { ...L(sales.id, 0), txnAmountMinor: -36730n, functionalAmountMinor: -36730n },
+]));
 
 const posted = await entry({}, [L(cash.id, 2500), L(sales.id, -2500)]);
 await rejects('posted entry cannot be deleted', () => db.journalEntry.delete({ where: { id: posted.id } }), 'cannot be deleted');
