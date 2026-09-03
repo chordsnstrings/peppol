@@ -86,6 +86,7 @@ export default function ChartOfAccounts() {
           </div>
           <div className="sw-scroll">
             <table className="sw-table">
+              <caption className="sr-only">{TYPE_LABEL[t]} in the chart of accounts</caption>
               <thead>
                 <tr>
                   <th style={{ width: "6rem" }}>Code</th>

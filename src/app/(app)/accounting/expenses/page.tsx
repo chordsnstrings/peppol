@@ -204,8 +204,7 @@ export default function ExpenseClaimsPage() {
                           <button
                             key={a.action}
                             type="button"
-                            className={`sw-btn ${a.primary ? "sw-btn-primary" : ""}`}
-                            style={{ padding: "0.15rem 0.5rem", fontSize: "0.75rem" }}
+                            className={`sw-btn sw-btn-sm ${a.primary ? "sw-btn-primary" : ""}`}
                             disabled={busy === `${c.id}:${a.action}`}
                             data-testid={`claim-${a.action}`}
                             onClick={() => run(c, a)}
@@ -214,7 +213,7 @@ export default function ExpenseClaimsPage() {
                           </button>
                         ))}
                         {c.entryId && (
-                          <Link href="/accounting/journals" className="sw-link" style={{ fontSize: "0.75rem" }}>
+                          <Link href="/accounting/journals" className="sw-link sw-link-btn" style={{ fontSize: "0.75rem" }}>
                             Journal
                           </Link>
                         )}
@@ -244,7 +243,7 @@ function Tile({ label, minor, count, note, testId }: {
   return (
     <div>
       <div className="sw-label">{label}</div>
-      <div className="sw-num mt-1" style={{ fontSize: "1.5rem" }} data-testid={`${testId}-total`}>
+      <div className="mt-1 font-semibold tabular-nums" style={{ fontSize: "1.5rem" }} data-testid={`${testId}-total`}>
         <Figure minor={minor} zero="zero" colour={false} />
       </div>
       <div className="sw-sub" data-testid={`${testId}-count`}>
@@ -340,6 +339,7 @@ function NewClaim({ busy, onCreate }: {
       {lines.length > 0 && (
         <div className="sw-scroll mt-4">
           <table className="sw-table">
+            <caption className="sr-only">Receipts on this claim</caption>
             <thead>
               <tr>
                 <th style={{ width: "7rem" }}>Spent</th>
@@ -363,7 +363,7 @@ function NewClaim({ busy, onCreate }: {
                     {l.vatRecoverable ? `reclaimed · ${l.supplierTrn}` : BigInt(l.vatMinor) > 0n ? "added to the expense" : "none"}
                   </td>
                   <td>
-                    <button type="button" className="sw-btn" style={{ padding: "0.15rem 0.5rem", fontSize: "0.75rem" }}
+                    <button type="button" className="sw-btn sw-btn-sm"
                       onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}>
                       Remove
                     </button>

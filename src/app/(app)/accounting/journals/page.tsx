@@ -70,6 +70,7 @@ export default function JournalRegister() {
         <Panel className="overflow-hidden">
           <div className="sw-scroll">
             <table className="sw-table">
+              <caption className="sr-only">Posted journal entries, newest first</caption>
               <thead>
                 <tr>
                   <th style={{ width: "2.25rem" }}><span className="sr-only">Expand</span></th>
@@ -97,8 +98,7 @@ export default function JournalRegister() {
                             aria-expanded={expanded}
                             aria-label={`${expanded ? "Collapse" : "Expand"} ${reference}`}
                             onClick={() => setOpen(expanded ? null : e.id)}
-                            className="px-1"
-                            style={{ color: "var(--sw-fg-muted)" }}
+                            className="sw-icon-btn"
                           >
                             {expanded ? "▾" : "▸"}
                           </button>
@@ -117,7 +117,7 @@ export default function JournalRegister() {
                           {e.status === "posted" && !e.reversalOfId && (
                             <button
                               type="button"
-                              className="sw-link text-[0.8125rem]"
+                              className="sw-link sw-link-btn text-[0.8125rem]"
                               onClick={() => reverse(e.id, reference)}
                               disabled={busy === e.id}
                             >

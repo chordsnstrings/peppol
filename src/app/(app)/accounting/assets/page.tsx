@@ -133,6 +133,7 @@ export default function AssetsPage() {
           <Panel className="mb-4 p-4">
             <div className="sw-label">Register against the ledger</div>
             <table className="sw-table mt-3" style={{ maxWidth: "44rem" }}>
+              <caption className="sr-only">The fixed asset register against accounts 1500 and 1590</caption>
               <thead>
                 <tr>
                   <th />

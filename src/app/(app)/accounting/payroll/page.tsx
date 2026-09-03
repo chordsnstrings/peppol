@@ -196,6 +196,7 @@ export default function PayrollPage() {
           <Panel className="mb-4 p-4">
             <div className="sw-label">Payslips against the ledger</div>
             <table className="sw-table mt-3" style={{ maxWidth: "48rem" }}>
+              <caption className="sr-only">The payslips for this period against accounts 6000, 2200 and 2250</caption>
               <thead>
                 <tr>
                   <th />

@@ -172,6 +172,7 @@ export default function CorporateTaxPage() {
             </div>
             <div className="sw-scroll">
               <table className="sw-table" data-testid="ct-computation">
+                <caption className="sr-only">Accounting profit adjusted to taxable income</caption>
                 <thead>
                   <tr>
                     <th>Item</th>
@@ -219,7 +220,7 @@ export default function CorporateTaxPage() {
                     </tr>
                   ))}
                   <tr>
-                    <td colSpan={3}><strong>Taxable income</strong></td>
+                    <th scope="row" colSpan={3} style={{ fontWeight: 600 }}>Taxable income</th>
                     <td className="sw-num" data-testid="ct-taxable-income">
                       <strong><Figure minor={data.taxableIncomeMinor} currency={data.currency} zero="zero" /></strong>
                     </td>
@@ -233,6 +234,7 @@ export default function CorporateTaxPage() {
             <Panel className="p-4">
               <div className="sw-label">Tax payable</div>
               <table className="sw-table mt-3">
+                <caption className="sr-only">Corporate tax on the taxable income, band by band</caption>
                 <tbody>
                   <tr>
                     <td>First AED 375,000 at 0%</td>
@@ -247,7 +249,7 @@ export default function CorporateTaxPage() {
                     </td>
                   </tr>
                   <tr>
-                    <td><strong>Corporate tax</strong></td>
+                    <th scope="row" style={{ fontWeight: 600 }}>Corporate tax</th>
                     <td className="sw-num" data-testid="ct-tax-payable">
                       <strong><Figure minor={data.taxPayableMinor} currency={data.currency} zero="zero" /></strong>
                     </td>
@@ -285,6 +287,7 @@ export default function CorporateTaxPage() {
                 <span>Elect Small Business Relief for {year}</span>
               </label>
               <table className="sw-table mt-3">
+                <caption className="sr-only">Revenue tested against the Small Business Relief threshold</caption>
                 <tbody>
                   <tr>
                     <td>Revenue this period</td>
@@ -380,6 +383,7 @@ export default function CorporateTaxPage() {
               {data.interestLimitation.capBasis === "ebitda" ? "EBITDA test" : "AED 12,000,000 de minimis"}.
             </p>
             <table className="sw-table mt-3" style={{ maxWidth: "34rem" }}>
+              <caption className="sr-only">The Article 30 interest deduction limitation</caption>
               <tbody>
                 <tr>
                   <td>Net interest expenditure {data.interestLimitation.supplied ? "(you supplied)" : "(none supplied)"}</td>
@@ -422,6 +426,7 @@ export default function CorporateTaxPage() {
               way. They have to agree, and if they do not, that is visible here rather than at a year-end review.
             </p>
             <table className="sw-table mt-3" style={{ maxWidth: "40rem" }}>
+              <caption className="sr-only">The computed charge against what the ledger already carries</caption>
               <tbody>
                 <tr>
                   <td>Computed corporate tax</td>

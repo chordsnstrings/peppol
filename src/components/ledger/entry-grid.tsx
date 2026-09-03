@@ -328,6 +328,7 @@ export function EntryGrid() {
       <Panel className="overflow-hidden">
         <div className="sw-scroll">
           <table className="sw-table sw-grid">
+            <caption className="sr-only">Journal entry lines — account, description, debit and credit</caption>
             <thead>
               <tr>
                 <th style={{ width: "3rem" }}>#</th>
@@ -376,8 +377,9 @@ export function EntryGrid() {
                     </td>
                     <td>
                       <input
-                        className="sw-cell sw-cell-num"
+                        className={`sw-cell sw-cell-num${parseAmount(r.debit, CURRENCY) === null ? " sw-cell-invalid" : ""}`}
                         inputMode="decimal"
+                        aria-invalid={parseAmount(r.debit, CURRENCY) === null || undefined}
                         aria-label={`Line ${i + 1} debit`}
                         placeholder={dSug}
                         value={r.debit}
@@ -388,13 +390,13 @@ export function EntryGrid() {
                         }}
                         onPaste={(e) => onPaste(e, r.key, "debit")}
                         onBlur={(e) => commitAmount(r.key, "debit", e.target.value)}
-                        style={parseAmount(r.debit, CURRENCY) === null ? { boxShadow: "inset 0 -2px 0 var(--sw-neg)" } : undefined}
                       />
                     </td>
                     <td>
                       <input
-                        className="sw-cell sw-cell-num"
+                        className={`sw-cell sw-cell-num${parseAmount(r.credit, CURRENCY) === null ? " sw-cell-invalid" : ""}`}
                         inputMode="decimal"
+                        aria-invalid={parseAmount(r.credit, CURRENCY) === null || undefined}
                         aria-label={`Line ${i + 1} credit`}
                         placeholder={cSug}
                         value={r.credit}
@@ -405,7 +407,6 @@ export function EntryGrid() {
                         }}
                         onPaste={(e) => onPaste(e, r.key, "credit")}
                         onBlur={(e) => commitAmount(r.key, "credit", e.target.value)}
-                        style={parseAmount(r.credit, CURRENCY) === null ? { boxShadow: "inset 0 -2px 0 var(--sw-neg)" } : undefined}
                       />
                     </td>
                     <td>

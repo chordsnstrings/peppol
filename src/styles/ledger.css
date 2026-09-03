@@ -179,13 +179,34 @@
   height: var(--sw-row-dense);
   vertical-align: middle;
 }
-.sw-table tbody tr:hover td {
+.sw-table tbody tr:hover td,
+.sw-table tbody tr:hover th {
   background: var(--sw-surface-2);
 }
 .sw-table tfoot td {
   border-top: 2px solid var(--sw-line-strong);
   padding: 0.45rem 0.625rem;
   font-weight: 600;
+  background: var(--sw-surface);
+}
+
+/* A row header is a cell of the row it names, not an exception to it. Without
+   these, a <th scope="row"> on a totals line loses the padding, the rule and
+   the ground its <td> siblings get — so the totals rule visibly breaks across
+   the label, which is exactly why totals rows kept being written as <td> and
+   losing their header semantics. Only thead th is sticky; these are not. */
+.sw-table tbody th {
+  border-bottom: 1px solid var(--sw-line);
+  padding: 0 0.625rem;
+  height: var(--sw-row-dense);
+  vertical-align: middle;
+  text-align: start;
+}
+.sw-table tfoot th {
+  border-top: 2px solid var(--sw-line-strong);
+  padding: 0.45rem 0.625rem;
+  font-weight: 600;
+  text-align: start;
   background: var(--sw-surface);
 }
 
@@ -232,6 +253,16 @@
 }
 .sw-input::placeholder { color: var(--sw-fg-faint); }
 
+/* The row-sized control. Type and padding come down so it fits a table cell;
+   the pointer target does not, because SC 2.5.8 is not a function of the font
+   size. Without the floor these end up about 21px tall and fail. */
+.sw-input-sm,
+.sw-select-sm {
+  padding: 0.15rem 0.3rem;
+  font-size: 0.75rem;
+  min-height: var(--sw-touch-min);
+}
+
 /* Cell-level inputs inside the entry grid are chromeless until touched — the
    grid lines already say where the cell is. */
 .sw-cell {
@@ -253,6 +284,12 @@
   text-align: end;
   font-variant-numeric: tabular-nums;
 }
+
+/* An amount cell whose text is not an amount. The rail is the same Falu red
+   the error note draws with — it marks a fault, not a negative quantity — and
+   it is never the only carrier: the cell is aria-invalid, and the blocker
+   under the grid names what failed in words. */
+.sw-cell-invalid { box-shadow: inset 0 -2px 0 var(--sw-neg); }
 
 .sw-grid td { padding: 0; height: var(--sw-row-entry); }
 
@@ -283,6 +320,13 @@
   font-weight: 600;
 }
 .sw-btn-primary:hover { background: var(--sw-accent); filter: brightness(1.08); }
+
+/* The row-sized button — see .sw-input-sm. The floor is the whole point. */
+.sw-btn-sm {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  min-height: var(--sw-touch-min);
+}
 
 /* A blocked action is never silently dead. It stays focusable and announces
    why, so a keyboard user finds out what is wrong instead of finding nothing. */
@@ -336,6 +380,16 @@
   text-underline-offset: 2px;
   text-decoration-thickness: 1px;
 }
+/* A text button that sits alone in a table cell — "Reverse", a drill-down on a
+   code. It reads as prose but it is a pointer target, so it takes the same
+   2.5.8 floor a button does. The inline exception in 2.5.8 covers a link
+   inside a sentence; this is not one. */
+.sw-link-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--sw-touch-min);
+}
+
 .sw-note {
   border-inline-start: 3px solid var(--sw-frank);
   background: var(--sw-surface);

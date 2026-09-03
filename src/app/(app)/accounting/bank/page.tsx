@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 interface Statement {
   accountCode: string; accountName: string; asOf: string; currency: string;
@@ -152,6 +152,7 @@ export default function BankPage() {
         <Panel className="mb-4 p-4">
           <div className="sw-label">Reconciliation — {st.accountCode} {st.accountName} as at {st.asOf}</div>
           <table className="sw-table mt-3" style={{ maxWidth: "40rem" }}>
+            <caption className="sr-only">Our balance reconciled to the bank statement</caption>
             <tbody>
               <Row label="Balance per our ledger" minor={st.ledgerBalanceMinor} currency={st.currency} />
               <Row label="Less: posted but not yet on the statement" minor={`-${st.outstandingInLedgerMinor}`} currency={st.currency} />
@@ -170,7 +171,7 @@ export default function BankPage() {
               ? "The imported file carried no running balance, so there is nothing to reconcile against yet. Import a statement that includes a balance column."
               : st.reconciled
                 ? "Reconciled. Every difference between the two records is explained by the items below."
-                : `Out by ${st.differenceMinor} — something is on one record and not the other, and not accounted for below.`}
+                : `Out by ${fmtMinor(st.differenceMinor, st.currency, { zero: "zero" })} — something is on one record and not the other, and not accounted for below.`}
           </p>
         </Panel>
       )}
@@ -212,6 +213,7 @@ export default function BankPage() {
           </p>
           <div className="sw-scroll">
             <table className="sw-table">
+              <caption className="sr-only">Proposed matches between bank lines and our postings</caption>
               <thead>
                 <tr>
                   <th>Bank line</th>
@@ -244,8 +246,7 @@ export default function BankPage() {
                       <td>
                         <button
                           type="button"
-                          className="sw-btn"
-                          style={{ padding: "0.15rem 0.5rem", fontSize: "0.75rem" }}
+                          className="sw-btn sw-btn-sm"
                           disabled={busy === s.bankLineId}
                           onClick={() => act(s.bankLineId, { action: "match", bankLineId: s.bankLineId, journalLineId: s.journalLineId })}
                         >
@@ -270,6 +271,7 @@ export default function BankPage() {
             ) : (
               <div className="sw-scroll">
                 <table className="sw-table">
+                  <caption className="sr-only">Statement lines with no posting behind them</caption>
                   <thead>
                     <tr>
                       <th style={{ width: "7rem" }}>Date</th>
@@ -296,6 +298,7 @@ export default function BankPage() {
             ) : (
               <div className="sw-scroll">
                 <table className="sw-table">
+                  <caption className="sr-only">Postings the bank has not seen yet</caption>
                   <thead>
                     <tr>
                       <th style={{ width: "7rem" }}>Date</th>
@@ -353,8 +356,7 @@ function BankRow({ line, busy, onPost }: {
           <label className="sr-only" htmlFor={`contra-${line.id}`}>Account for {line.description}</label>
           <select
             id={`contra-${line.id}`}
-            className="sw-select"
-            style={{ fontSize: "0.75rem", padding: "0.15rem 0.3rem" }}
+            className="sw-select sw-select-sm"
             value={contra}
             onChange={(e) => setContra(e.target.value)}
           >
@@ -363,8 +365,7 @@ function BankRow({ line, busy, onPost }: {
           </select>
           <button
             type="button"
-            className="sw-btn"
-            style={{ padding: "0.15rem 0.5rem", fontSize: "0.75rem" }}
+            className="sw-btn sw-btn-sm"
             aria-disabled={!contra || busy || undefined}
             disabled={!contra || busy}
             onClick={() => onPost(contra)}

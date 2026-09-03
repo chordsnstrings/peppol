@@ -322,7 +322,7 @@ export default function BudgetPage() {
             </label>
             <label className="grid gap-1">
               <span className="sw-label">Amount</span>
-              <input className="sw-input sw-num" inputMode="decimal" placeholder="12,000.00" value={form.amount}
+              <input className="sw-input sw-cell-num" inputMode="decimal" placeholder="12,000.00" value={form.amount}
                 onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} data-testid="budget-amount" />
             </label>
             <label className="grid gap-1">
@@ -353,7 +353,7 @@ export default function BudgetPage() {
             </label>
             <label className="grid gap-1">
               <span className="sw-label">Uplift (basis points)</span>
-              <input className="sw-input sw-num" inputMode="numeric" value={copy.uplift}
+              <input className="sw-input sw-cell-num" inputMode="numeric" value={copy.uplift}
                 onChange={(e) => setCopy((c) => ({ ...c, uplift: e.target.value }))} data-testid="copy-uplift" />
             </label>
             <label className="flex items-start gap-2 sm:col-span-2">

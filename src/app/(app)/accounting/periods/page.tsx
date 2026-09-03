@@ -68,6 +68,7 @@ export default function PeriodsPage() {
         <Panel className="overflow-hidden">
           <div className="sw-scroll">
             <table className="sw-table">
+              <caption className="sr-only">Accounting periods and the state each one is in</caption>
               <thead>
                 <tr>
                   <th style={{ width: "9rem" }}>Period</th>
@@ -95,8 +96,7 @@ export default function PeriodsPage() {
                           <button
                             key={n.to}
                             type="button"
-                            className="sw-btn"
-                            style={{ padding: "0.15rem 0.5rem", fontSize: "0.75rem" }}
+                            className="sw-btn sw-btn-sm"
                             disabled={busy === p.id}
                             onClick={() => move(p, n.to, n.warn)}
                           >

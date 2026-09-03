@@ -104,6 +104,7 @@ export default function VatReturnPage() {
               if they ever do not, the return is wrong and should not be filed.
             </p>
             <table className="sw-table mt-3" style={{ maxWidth: "34rem" }}>
+              <caption className="sr-only">The return against the VAT control accounts in the ledger</caption>
               <tbody>
                 <Recon
                   label="Output tax"
@@ -143,6 +144,7 @@ function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; curre
       </div>
       <div className="sw-scroll">
         <table className="sw-table">
+          <caption className="sr-only">{title}</caption>
           <thead>
             <tr>
               <th style={{ width: "3.5rem" }}>Box</th>

@@ -88,6 +88,7 @@ export default function InventoryPage() {
           <Panel className="mb-4 p-4">
             <div className="sw-label">Valuation against the ledger</div>
             <table className="sw-table mt-3" style={{ maxWidth: "38rem" }}>
+              <caption className="sr-only">Stock on hand against account 1200 in the ledger</caption>
               <tbody>
                 <tr>
                   <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>Stock on hand, per the item list</th>
@@ -149,7 +150,7 @@ export default function InventoryPage() {
                         <td className="sw-code">
                           <button
                             type="button"
-                            className="sw-link"
+                            className="sw-link sw-link-btn"
                             onClick={() => setSelected(selected === i.sku ? null : i.sku)}
                             aria-expanded={selected === i.sku}
                           >
@@ -187,6 +188,7 @@ export default function InventoryPage() {
           </div>
           <div className="sw-scroll">
             <table className="sw-table">
+              <caption className="sr-only">Every movement behind {history.data.item.sku}, oldest first</caption>
               <thead>
                 <tr>
                   <th style={{ width: "7rem" }}>Date</th>

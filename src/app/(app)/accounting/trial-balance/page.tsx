@@ -97,13 +97,13 @@ export default function TrialBalancePage() {
               ))}
               <tfoot>
                 <tr>
-                  <td colSpan={2} style={{ textAlign: "end" }}>Totals ({tb.data.currency})</td>
+                  <th scope="row" colSpan={2} style={{ textAlign: "end" }}>Totals ({tb.data.currency})</th>
                   <td className="sw-num" data-testid="tb-debit"><Figure minor={tb.data.totalDebitMinor} currency={tb.data.currency} zero="zero" colour={false} /></td>
                   <td className="sw-num" data-testid="tb-credit"><Figure minor={tb.data.totalCreditMinor} currency={tb.data.currency} zero="zero" colour={false} /></td>
                 </tr>
                 {!tb.data.balanced && (
                   <tr>
-                    <td colSpan={2} style={{ textAlign: "end", color: "var(--sw-neg)" }}>Out of balance</td>
+                    <th scope="row" colSpan={2} style={{ textAlign: "end", color: "var(--sw-neg)" }}>Out of balance</th>
                     <td className="sw-num sw-num-neg" colSpan={2}>
                       <Figure minor={tb.data.differenceMinor} currency={tb.data.currency} zero="zero" />
                     </td>

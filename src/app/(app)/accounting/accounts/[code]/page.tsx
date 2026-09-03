@@ -105,7 +105,7 @@ export default function AccountDetail() {
               </tbody>
               <tfoot>
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "end" }}>Closing balance</td>
+                  <th scope="row" colSpan={6} style={{ textAlign: "end" }}>Closing balance</th>
                   <td className="sw-num" data-testid="gl-closing"><Figure minor={closing} zero="zero" /></td>
                 </tr>
               </tfoot>
