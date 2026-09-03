@@ -369,3 +369,21 @@
   font-weight: 600;
   border-bottom-color: var(--sw-accent);
 }
+
+/* The second level. Quieter than the group tabs above it — a pill rather than
+   an underline — so the two rows read as a hierarchy instead of competing. */
+.sw-subtab {
+  padding: 0.25rem 0.55rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--sw-fg-muted);
+  border-radius: var(--sw-radius-control);
+  white-space: nowrap;
+}
+.sw-subtab:hover { background: var(--sw-surface-2); color: var(--sw-fg); }
+.sw-subtab:focus-visible { outline: 2px solid var(--sw-accent); outline-offset: 1px; }
+.sw-subtab[aria-current="page"] {
+  background: var(--sw-accent-soft);
+  color: var(--sw-fg);
+  font-weight: 600;
+}

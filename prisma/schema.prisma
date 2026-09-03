@@ -759,3 +759,82 @@ model FxRate {
   @@unique([orgId, entityId, currency, rateDate])
   @@index([orgId, entityId, currency])
 }
+
+/// A journal that repeats — an accrual, a prepayment release, a standing charge.
+///
+/// The template is not the entries. Each run posts a real, independent journal
+/// that stands on its own after the template is changed or deleted, because a
+/// posting whose meaning depends on a mutable template is a posting nobody can
+/// audit.
+model RecurringJournal {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  code          String
+  name          String
+  /// MONTHLY | QUARTERLY | ANNUAL
+  frequency     String   @default("MONTHLY")
+  startsOn      DateTime @db.Date
+  endsOn        DateTime? @db.Date
+  /// How many times it has run, and the last period it ran for (YYYY-MM).
+  runCount      Int      @default(0)
+  lastRunPeriod String?
+  /// The template lines, as JSON: [{account, debit|credit, memo}].
+  lines         String
+  /// ACCRUAL | PREPAYMENT | STANDING — shapes how the reversal behaves.
+  kind          String   @default("STANDING")
+  /// An accrual reverses on the first day of the next period; a standing
+  /// charge does not.
+  autoReverse   Boolean  @default(false)
+  status        String   @default("active")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+/// An employee expense claim, from submission through to reimbursement.
+model ExpenseClaim {
+  id           String            @id @default(cuid())
+  orgId        String
+  entityId     String
+  reference    String
+  employeeCode String
+  employeeName String
+  claimedOn    DateTime          @db.Date
+  currency     String            @default("AED")
+  /// draft | submitted | approved | rejected | posted | paid
+  status       String            @default("draft")
+  submittedAt  DateTime?
+  approvedAt   DateTime?
+  approvedBy   String?
+  rejectedReason String?
+  entryId      String?
+  paidEntryId  String?
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  lines        ExpenseClaimLine[]
+
+  @@unique([orgId, entityId, reference])
+  @@index([orgId, entityId, status])
+}
+
+model ExpenseClaimLine {
+  id          String       @id @default(cuid())
+  orgId       String
+  claimId     String
+  claim       ExpenseClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  spentOn     DateTime     @db.Date
+  description String
+  accountCode String
+  netMinor    BigInt
+  vatMinor    BigInt       @default(0)
+  /// Input VAT is only recoverable against a valid tax invoice showing a TRN.
+  supplierTrn String?
+  vatRecoverable Boolean   @default(false)
+  receiptRef  String?
+
+  @@index([claimId])
+}
