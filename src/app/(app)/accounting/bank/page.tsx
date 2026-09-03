@@ -186,7 +186,7 @@ export default function BankPage() {
         <textarea
           className="sw-input mt-2"
           rows={5}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: "0.75rem" }}
+          style={{ fontFamily: "var(--sw-font-mono)", fontSize: "0.75rem" }}
           placeholder={"Date,Description,Reference,Amount,Balance\n01/06/2026,Customer receipt,FT001,2500.00,2500.00"}
           value={paste}
           onChange={(e) => setPaste(e.target.value)}

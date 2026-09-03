@@ -111,7 +111,7 @@ export default function OpeningBalancesPage() {
         <textarea
           className="sw-input mt-2"
           rows={8}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: "0.75rem" }}
+          style={{ fontFamily: "var(--sw-font-mono)", fontSize: "0.75rem" }}
           placeholder={"Code,Account name,Debit,Credit\n1010,Bank,85000.00,\n1100,Trade receivables,42000.00,\n2000,Trade payables,,56000.00\n3000,Share capital,,71000.00"}
           value={text}
           onChange={(e) => { setText(e.target.value); setPreview(null); }}

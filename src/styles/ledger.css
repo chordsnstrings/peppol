@@ -14,8 +14,17 @@
  *
  * Colour discipline is the part that matters for a ledger:
  *   - debit/credit tints are CHROME ONLY (headers, rails). Never on numerals.
- *   - positive/negative are NUMERALS ONLY, and always paired with parentheses,
- *     because roughly 1 in 12 men cannot use the colour at all.
+ *   - --sw-pos and --sw-neg carry two different meanings, and the rule differs
+ *     for each. As a VALUE they belong on numerals only, always paired with
+ *     parentheses, because roughly 1 in 12 men cannot use the colour at all.
+ *     As a STATUS — an error, a refusal, a failed check — --sw-neg may appear
+ *     on prose and chrome, which is what .sw-error and .sw-chip-bad already
+ *     do. The two uses never meet: a figure never carries the status meaning,
+ *     and a message never carries the value one. This distinction was left
+ *     implicit at first and the two halves of the file contradicted each
+ *     other; it is stated here because an unstated rule gets applied by guess.
+ *   - in EITHER use, colour is never the only signal. A negative figure has
+ *     its parentheses; an error has its words.
  *   - one warm accent (Josef Frank rose) held to under 2% of the screen.
  *
  * Contrast is a hard gate, not a preference: Sweden's DOS-lagen points at
@@ -69,6 +78,10 @@
   --sw-num-gutter: 1ch;        /* parentheses hang outside the digit column */
 
   --sw-font: "Inter var", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Hashes, pasted files, XML payloads. NOT money and NOT account codes —
+     figures stay in Inter with tnum so a code column aligns optically with the
+     name beside it. */
+  --sw-font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 
   color: var(--sw-fg);
   background: var(--sw-ground);
@@ -427,6 +440,11 @@
 /* The second level. Quieter than the group tabs above it — a pill rather than
    an underline — so the two rows read as a hierarchy instead of competing. */
 .sw-subtab {
+  /* Was exactly 24.0px, which meets SC 2.5.8 with nothing in hand — any future
+     change to the type scale would have broken it silently. */
+  min-height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
   padding: 0.25rem 0.55rem;
   margin-bottom: 0.35rem;
   font-size: 0.8125rem;
