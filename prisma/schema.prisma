@@ -618,8 +618,21 @@ model FixedAsset {
   disposedOn       DateTime? @db.Date
   proceedsMinor    BigInt?
   notes            String?
+  /// The revaluation surplus held in equity for this asset (IAS 16.39). Kept
+  /// per asset because the split of a later decrease depends on this asset's
+  /// own surplus, not on the entity's total.
+  surplusMinor     BigInt    @default(0)
+  /// Impairment charged to profit for this asset and not yet reversed. A later
+  /// increase reverses that first (IAS 36.117) before anything reaches equity.
+  impairedMinor    BigInt    @default(0)
+  /// The date the current cost basis starts depreciating from. Nil until a
+  /// revaluation restates the cost — after which depreciation is charged on
+  /// the revalued amount over the REMAINING life (IAS 16.31), not on the
+  /// original schedule again.
+  basisFrom        DateTime? @db.Date
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+  revaluations     AssetRevaluation[]
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -1506,4 +1519,43 @@ model InventoryLayer {
 
   @@unique([itemId, seq])
   @@index([orgId, itemId, receivedOn])
+}
+
+
+/// A revaluation or impairment of a fixed asset, kept per event rather than as
+/// a running figure. IAS 16.39-40 splits an increase or decrease between profit
+/// and the revaluation surplus according to what has happened to that asset
+/// before — so the history is the rule's input, not a record of it.
+model AssetRevaluation {
+  id                  String   @id @default(cuid())
+  orgId               String
+  entityId            String
+  assetId             String
+  asset               FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  seq                 Int
+  revaluedOn          DateTime @db.Date
+  /// REVALUATION (upward), IMPAIRMENT (downward), or REVERSAL of an impairment.
+  kind                String
+  /// The carrying amount immediately before this event.
+  carryingBeforeMinor BigInt
+  /// What it was assessed to be worth.
+  fairValueMinor      BigInt
+  /// Signed: positive is an increase in carrying amount.
+  movementMinor       BigInt
+  /// How the movement was split. The two always add to it.
+  toSurplusMinor      BigInt   @default(0)
+  toProfitMinor       BigInt   @default(0)
+  /// The revaluation surplus this asset carries after the event.
+  surplusAfterMinor   BigInt   @default(0)
+  /// Months of useful life left when the event happened. Recorded because the
+  /// IAS 36.117 ceiling is a counterfactual — what the asset would be carried
+  /// at had nothing been impaired — and that path depreciates over the life
+  /// that remained then, which the register no longer holds afterwards.
+  lifeRemainingMonths Int      @default(0)
+  basis               String?
+  entryId             String?
+  createdAt           DateTime @default(now())
+
+  @@unique([assetId, seq])
+  @@index([orgId, entityId, revaluedOn])
 }

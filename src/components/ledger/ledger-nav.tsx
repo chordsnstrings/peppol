@@ -85,7 +85,8 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting/assets", label: "Fixed assets" },
       { href: "/accounting/inventory", label: "Inventory" },
-      { href: "/accounting/revaluation", label: "Revaluation" },
+      { href: "/accounting/revaluation", label: "Currency revaluation" },
+      { href: "/accounting/asset-revaluation", label: "Asset revaluation" },
       { href: "/accounting/leases", label: "Leases" },
       { href: "/accounting/provisions", label: "Provisions" },
     ],

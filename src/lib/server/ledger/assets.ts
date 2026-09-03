@@ -84,6 +84,7 @@ type AssetRow = {
   costMinor: bigint; residualMinor: bigint; accumulatedMinor: bigint;
   usefulLifeMonths: number; ratePercent: unknown;
   acquiredOn: Date; depreciatedTo: string | null; status: string; disposedOn: Date | null;
+  basisFrom: Date | null;
   assetAccount: string; accumAccount: string; expenseAccount: string;
 };
 
@@ -157,20 +158,34 @@ export function accumulatedAt(
   a: {
     method: string; costMinor: bigint; residualMinor: bigint;
     usefulLifeMonths: number; ratePercent?: number | null; acquiredOn: Date;
+    /**
+     * Where the current cost basis starts, once a revaluation has restated it.
+     * Counting from the acquisition after a revaluation would charge the new
+     * amount over the original life again and extend the asset's life by
+     * however long it had already run.
+     */
+    basisFrom?: Date | null;
   },
   asOf: Date,
 ): bigint {
-  if (asOf < a.acquiredOn) return 0n;
+  const from = a.basisFrom ?? a.acquiredOn;
+  if (asOf < from) return 0n;
 
   const months =
-    (asOf.getUTCFullYear() - a.acquiredOn.getUTCFullYear()) * 12 +
-    (asOf.getUTCMonth() - a.acquiredOn.getUTCMonth());
+    (asOf.getUTCFullYear() - from.getUTCFullYear()) * 12 +
+    (asOf.getUTCMonth() - from.getUTCMonth());
   if (months < 0) return 0n;
 
   let accumulated = 0n;
   const depreciable = a.costMinor - a.residualMinor;
   // The month of acquisition is charged, which is what runDepreciation does.
-  for (let i = 0; i <= months && accumulated < depreciable; i++) {
+  //
+  // A revalued asset starts from the month AFTER its basis date instead: the
+  // revaluation happens at a point when that month has already been charged on
+  // the old cost, and charging it again on the new one would take a month out
+  // of the asset's life every time it was valued.
+  const first = a.basisFrom ? 1 : 0;
+  for (let i = first; i <= months && accumulated < depreciable; i++) {
     accumulated += monthlyCharge({ ...a, accumulatedMinor: accumulated });
   }
   return accumulated > depreciable ? depreciable : accumulated;

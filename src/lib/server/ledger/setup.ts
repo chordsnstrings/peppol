@@ -73,6 +73,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "3000", name: "Share capital", nameAr: "رأس المال", type: "EQUITY", parent: "3" },
   { code: "3100", name: "Shareholder current account", nameAr: "الحساب الجاري للشركاء", type: "EQUITY", parent: "3" },
   { code: "3200", name: "Statutory reserve", nameAr: "الاحتياطي القانوني", type: "EQUITY", parent: "3" },
+  { code: "3300", name: "Revaluation surplus", nameAr: "فائض إعادة التقييم", type: "EQUITY", parent: "3", subtype: "REVALUATION_SURPLUS" },
   { code: "3900", name: "Retained earnings", nameAr: "الأرباح المرحّلة", type: "EQUITY", parent: "3", subtype: "RETAINED_EARNINGS" },
   { code: "3950", name: "Current year earnings", nameAr: "أرباح السنة الحالية", type: "EQUITY", parent: "3", subtype: "CURRENT_EARNINGS", isPostable: false },
 
@@ -105,6 +106,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "6450", name: "Repairs and maintenance", nameAr: "الإصلاح والصيانة", type: "EXPENSE", parent: "6" },
   { code: "6500", name: "Insurance", nameAr: "التأمين", type: "EXPENSE", parent: "6" },
   { code: "6600", name: "Depreciation", nameAr: "الإهلاك", type: "EXPENSE", parent: "6", subtype: "DEPRECIATION" },
+  { code: "6650", name: "Impairment losses", nameAr: "خسائر انخفاض القيمة", type: "EXPENSE", parent: "6", subtype: "IMPAIRMENT" },
   { code: "6700", name: "Bad debt expense", nameAr: "مصروف الديون المعدومة", type: "EXPENSE", parent: "6" },
   { code: "6800", name: "Foreign exchange loss", nameAr: "خسائر فروق العملة", type: "EXPENSE", parent: "6", subtype: "FX_LOSS" },
   { code: "6900", name: "Other operating expenses", nameAr: "مصروفات تشغيلية أخرى", type: "EXPENSE", parent: "6" },

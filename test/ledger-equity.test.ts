@@ -185,8 +185,11 @@ d("statement of changes in equity and the notes", () => {
     await openBooks({ orgId: ORG, entityId: ODD });
     await db.account.create({
       data: {
-        orgId: ORG, entityId: ODD, code: "3300", name: "Revaluation reserve",
-        nameAr: "احتياطي إعادة التقييم", type: "EQUITY", isPostable: true,
+        // 3300 is the revaluation surplus and is now in the standard chart,
+        // so this needs a code the chart does not have — the point of the
+        // fixture is an equity account the statement has no column for.
+        orgId: ORG, entityId: ODD, code: "3400", name: "General reserve",
+        nameAr: "احتياطي عام", type: "EQUITY", isPostable: true,
       },
     });
     await P(ODD, "2026-02-01", [
@@ -195,7 +198,7 @@ d("statement of changes in equity and the notes", () => {
     ], { memo: "Share capital issued" });
     await P(ODD, "2026-03-01", [
       { account: "1500", debit: 500_000 },
-      { account: "3300", credit: 500_000 },
+      { account: "3400", credit: 500_000 },
     ], { memo: "Revaluation surplus" });
   }, 120_000);
 
@@ -541,7 +544,7 @@ d("statement of changes in equity and the notes", () => {
   describe("an equity account outside the columns", () => {
     it("names it, and refuses to reconcile without it", async () => {
       const s = await E(ODD);
-      expect(s.warnings.some((w) => w.includes("3300") && w.includes("Revaluation reserve"))).toBe(true);
+      expect(s.warnings.some((w) => w.includes("3400") && w.includes("General reserve"))).toBe(true);
       expect(s.reconciles).toBe(false);
       // Nothing was invented to make it agree: the columns still total the
       // share capital alone, and the difference is exactly the missing account.
@@ -551,7 +554,7 @@ d("statement of changes in equity and the notes", () => {
       expect(s.foots).toBe(true);
       // And it appears in no row at all rather than in a balancing line.
       const everywhere = [s.opening, ...s.movements, s.closing];
-      expect(everywhere.every((r) => !("3300" in r.cells))).toBe(true);
+      expect(everywhere.every((r) => !("3400" in r.cells))).toBe(true);
     });
   });
 
