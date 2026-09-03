@@ -537,10 +537,20 @@ model DocumentSequence {
   orgId     String
   entityId  String
   scope     String
+  /// May carry {YYYY} or {YY}, expanded when a number is issued.
   prefix    String   @default("")
   nextNo    Int      @default(1)
   padding   Int      @default(5)
   updatedAt DateTime @updatedAt
+  /// Whether the counter goes back to 1 when a new financial year opens. Only
+  /// true where the prefix names the year — a check constraint keeps it so,
+  /// because a restart inside a format that does not name the year reissues
+  /// last year's references.
+  restartYearly Boolean @default(false)
+  /// The financial year the counter is currently inside, as that year's start
+  /// date. Compared at allocation time, inside the same statement that takes
+  /// the number, so two postings that open a new year cannot both take 1.
+  cycleStart    DateTime? @db.Date
 
   @@unique([orgId, entityId, scope])
 }
@@ -1924,4 +1934,174 @@ model PriceListAssignment {
 
   @@unique([orgId, entityId, partyKey, priceListId])
   @@index([orgId, entityId, partyKey])
+}
+
+/// A credit limit as it was assessed on a date.
+///
+/// `Counterparty.creditLimitMinor` holds one figure and no history, which
+/// cannot answer the question an auditor actually asks: what was this customer
+/// allowed to owe on the day that order was taken? A limit raised in March
+/// does not retrospectively make February's breach acceptable, and a limit cut
+/// today does not make last quarter's sales a breach. So the assessments are
+/// kept as rows and the limit in force on a date is the latest row on or
+/// before it.
+///
+/// A row with `limitMinor` of nought is a real assessment — cash up front. The
+/// *absence* of any row is the different state: nobody has assessed this
+/// account at all.
+model CreditLimit {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// The counterparty's own code, which is what credit control joins on.
+  partyKey      String
+  /// Minor units of the entity's functional currency — the currency the
+  /// receivables control account is kept in, so a limit and an exposure can be
+  /// compared without a rate.
+  limitMinor    BigInt
+  effectiveFrom DateTime @db.Date
+  /// Why this figure. A limit nobody can defend is a limit nobody enforces.
+  basis         String
+  setBy         String?
+  createdAt     DateTime @default(now())
+
+  @@unique([orgId, entityId, partyKey, effectiveFrom])
+  @@index([orgId, entityId, partyKey, effectiveFrom])
+}
+
+/// One credit hold, placed and later released.
+///
+/// The release is a second set of columns on the same row rather than a delete,
+/// because the history is the point: whoever is asked to release the next hold
+/// needs to see that this customer has been held twice before and why it was
+/// lifted each time. A deleted hold answers none of that.
+model CreditHold {
+  id            String    @id @default(cuid())
+  orgId         String
+  entityId      String
+  partyKey      String
+  placedOn      DateTime  @db.Date
+  placedBy      String?
+  reason        String
+  releasedOn    DateTime? @db.Date
+  releasedBy    String?
+  releaseReason String?
+  createdAt     DateTime  @default(now())
+
+  @@index([orgId, entityId, partyKey, placedOn])
+}
+
+/// A dunning letter that was produced, and where it went.
+///
+/// Without this row the ladder has no memory: every run computes the same stage
+/// from the same ageing and the customer receives the same first reminder every
+/// morning, which teaches them that the letters mean nothing. The row is what
+/// makes "already chased three days ago" and "already had the second letter"
+/// answerable.
+model DunningNotice {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  partyKey     String
+  /// reminder | first | second | final
+  stage        String
+  sentOn       DateTime @db.Date
+  /// Where it went. "We chased them" with no address is not evidence.
+  sentTo       String
+  /// The position the letter was written from, so it can be read back against
+  /// what was owed that day rather than against what is owed now.
+  overdueMinor BigInt
+  oldestDays   Int
+  itemCount    Int
+  /// The text itself. It is what the customer holds, so a dispute is settled by
+  /// reading it rather than by reconstructing what it probably said.
+  letter       String
+  recordedBy   String?
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, entityId, partyKey, sentOn])
+}
+
+
+/// A delivery note: what physically left, and when.
+///
+/// It is a document, not a journal. Dispatching stock moves cost out of
+/// inventory; the revenue is on the invoice, and the two are deliberately not
+/// the same event.
+model DeliveryNote {
+  id           String             @id @default(cuid())
+  orgId        String
+  entityId     String
+  number       String
+  /// The order it fulfils, where there is one. Goods can leave without an
+  /// order — a replacement, a sample — and refusing that would only push the
+  /// movement somewhere the register cannot see it.
+  orderId      String?
+  customerName String
+  deliveredOn  DateTime           @db.Date
+  /// draft | dispatched | delivered | cancelled
+  status       String             @default("draft")
+  carrier      String?
+  trackingRef  String?
+  /// Who signed for the goods, and when. A delivery nobody signed for is
+  /// still a delivery; it is just harder to argue about.
+  signedBy     String?
+  signedOn     DateTime?          @db.Date
+  notes        String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  lines        DeliveryNoteLine[]
+
+  @@unique([orgId, entityId, number])
+  @@index([orgId, entityId, deliveredOn])
+  @@index([orgId, orderId])
+}
+
+model DeliveryNoteLine {
+  id            String       @id @default(cuid())
+  orgId         String
+  noteId        String
+  note          DeliveryNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  lineNo        Int
+  /// The order line this fulfils, where the note fulfils an order.
+  orderLineId   String?
+  sku           String?
+  description   String
+  /// Thousandths, as every inventory quantity is.
+  quantityMilli BigInt
+  /// What the stock movement cost, once dispatched. Nil until then, and nil
+  /// for a line carrying no SKU — a service on a delivery note has no cost of
+  /// its own to move.
+  costMinor     BigInt?
+  movementId    String?
+
+  @@unique([noteId, lineNo])
+  @@index([orgId, noteId])
+  @@index([orgId, orderLineId])
+}
+
+
+/// Why a number series changed format, and from which number. A prefix may be
+/// changed part way through a year; a prefix change nobody recorded may not,
+/// because an auditor tracing a reference then has no way to find out why the
+/// format moved. The counter itself is never in here: it is not editable.
+model DocumentSequenceChange {
+  id                String   @id @default(cuid())
+  orgId             String
+  entityId          String
+  scope             String
+  changedAt         DateTime @default(now())
+  /// The next number the series would issue at the moment of the change, so
+  /// everything from this number on carries the new format.
+  effectiveFromNo   Int
+  fromPrefix        String
+  toPrefix          String
+  fromPadding       Int
+  toPadding         Int
+  fromRestartYearly Boolean  @default(false)
+  toRestartYearly   Boolean  @default(false)
+  note              String?
+  actorId           String?
+
+  @@index([orgId, entityId, scope, changedAt])
 }
