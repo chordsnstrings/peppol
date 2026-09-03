@@ -278,3 +278,242 @@ model IntegrationToken {
 
   @@index([orgId])
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LEDGER CORE — double-entry general ledger.
+
+   The invariants that make this an accounting system rather than a table of
+   rows are enforced by the DATABASE, not by application code (see the raw SQL
+   in the accompanying migration): entries balance to zero per currency, posted
+   entries are immutable (correction is reversal-only), and nothing posts into
+   a closed period. Amounts are signed integer minor units — debit positive,
+   credit negative — so "balanced" is literally SUM() = 0.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/// A set of books for a legal entity. Multi-book from day one (statutory / tax /
+/// management); every entity ships with one PRIMARY book. Shipping the column now
+/// avoids the retrofit that NetSuite charges Professional Services to perform.
+model Book {
+  id                   String         @id @default(cuid())
+  orgId                String
+  entityId             String
+  code                 String         @default("PRIMARY")
+  name                 String
+  kind                 String         @default("PRIMARY") // PRIMARY | TAX | MGMT
+  functionalCurrency   String         @default("AED")
+  presentationCurrency String         @default("AED")
+  isDefault            Boolean        @default(false)
+  createdAt            DateTime       @default(now())
+  entries              JournalEntry[]
+  balances             AccountBalance[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId])
+}
+
+/// Chart of accounts. One chart per legal entity, shared across that entity's books.
+model Account {
+  id                String           @id @default(cuid())
+  orgId             String
+  entityId          String
+  code              String
+  name              String
+  nameAr            String?
+  type              String // ASSET | LIABILITY | EQUITY | INCOME | EXPENSE
+  subtype           String? // BANK | AR | AP | VAT_INPUT | VAT_OUTPUT | RETAINED_EARNINGS | ...
+  parentId          String?
+  parent            Account?         @relation("AccountTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children          Account[]        @relation("AccountTree")
+  /// Header accounts roll up but cannot be posted to.
+  isPostable        Boolean          @default(true)
+  /// Control accounts (AR/AP/VAT/bank) are owned by their subledger — manual journals are refused.
+  isControl         Boolean          @default(false)
+  /// Restrict postings to a single currency (bank accounts).
+  currency          String?
+  /// Dimension code that must be supplied on every posting to this account.
+  requiresDimension String?
+  status            String           @default("active") // active | archived
+  createdAt         DateTime         @default(now())
+  lines             JournalLine[]
+  balances          AccountBalance[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, type])
+  @@index([parentId])
+}
+
+model FiscalYear {
+  id       String             @id @default(cuid())
+  orgId    String
+  entityId String
+  label    String
+  startsOn DateTime           @db.Date
+  endsOn   DateTime           @db.Date
+  status   String             @default("open") // open | closed
+  periods  AccountingPeriod[]
+
+  @@unique([orgId, entityId, label])
+  @@index([orgId, entityId])
+}
+
+/// The fiscal calendar. Without this there is no close, and no way to stop a
+/// tenant back-dating a journal into a filed VAT quarter.
+model AccountingPeriod {
+  id           String         @id @default(cuid())
+  orgId        String
+  entityId     String
+  fiscalYearId String
+  fiscalYear   FiscalYear     @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+  seq          Int
+  label        String
+  startsOn     DateTime       @db.Date
+  endsOn       DateTime       @db.Date
+  /// open → soft_closed (reopenable) → hard_closed → locked (statutory, never reopens)
+  status       String         @default("open")
+  isAdjustment Boolean        @default(false)
+  closedAt     DateTime?
+  entries      JournalEntry[]
+  balances     AccountBalance[]
+
+  @@unique([orgId, entityId, label])
+  @@index([orgId, entityId, startsOn, endsOn])
+}
+
+/// N dimensions, normalised — not two hard-coded columns. Xero's two-dimension
+/// cap is its most-complained-about reporting constraint; this is free now and a
+/// rewrite later.
+model Dimension {
+  id         String           @id @default(cuid())
+  orgId      String
+  code       String // COST_CENTRE | PROJECT | DEPARTMENT | BRANCH | ...
+  name       String
+  isRequired Boolean          @default(false)
+  status     String           @default("active")
+  values     DimensionValue[]
+
+  @@unique([orgId, code])
+}
+
+model DimensionValue {
+  id          String                 @id @default(cuid())
+  orgId       String
+  dimensionId String
+  dimension   Dimension              @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  code        String
+  name        String
+  status      String                 @default("active")
+  tags        JournalLineDimension[]
+
+  @@unique([dimensionId, code])
+  @@index([orgId])
+}
+
+model JournalEntry {
+  id           String           @id @default(cuid())
+  orgId        String
+  entityId     String
+  bookId       String
+  book         Book             @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  periodId     String
+  period       AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  series       String           @default("GJ")
+  number       String
+  entryDate    DateTime         @db.Date
+  postedAt     DateTime?
+  status       String           @default("draft") // draft | posted | reversed
+  memo         String?
+  /// Where the posting came from — manual, or a subledger document.
+  source       String           @default("manual")
+  sourceType   String?
+  sourceId     String?
+  /// Idempotency key for machine posting; a retry must not double-post.
+  externalKey  String?
+  reversalOfId String?
+  reversalOf   JournalEntry?    @relation("EntryReversal", fields: [reversalOfId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversals    JournalEntry[]   @relation("EntryReversal")
+  /// Provenance as a first-class column, not an afterthought log.
+  actorType    String           @default("HUMAN") // HUMAN | RULE | MODEL | AGENT | INTEGRATION
+  actorId      String?
+  createdAt    DateTime         @default(now())
+  lines        JournalLine[]
+
+  @@unique([orgId, entityId, bookId, series, number])
+  @@unique([orgId, externalKey])
+  @@index([orgId, entityId, periodId])
+  @@index([orgId, sourceType, sourceId])
+  @@index([orgId, entityId, entryDate])
+}
+
+/// Signed minor units: debit > 0, credit < 0. Three currency concepts on every
+/// line, with the rate captured at posting time.
+model JournalLine {
+  id                    String                 @id @default(cuid())
+  orgId                 String
+  entryId               String
+  entry                 JournalEntry           @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  lineNo                Int
+  accountId             String
+  account               Account                @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  txnCurrency           String
+  txnAmountMinor        BigInt
+  fxRate                Decimal                @default(1) @db.Decimal(20, 10)
+  functionalCurrency    String
+  functionalAmountMinor BigInt
+  memo                  String?
+  dimensions            JournalLineDimension[]
+
+  @@unique([entryId, lineNo])
+  @@index([orgId, accountId])
+  @@index([entryId])
+}
+
+model JournalLineDimension {
+  id          String         @id @default(cuid())
+  lineId      String
+  line        JournalLine    @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  dimensionId String
+  valueId     String
+  value       DimensionValue @relation(fields: [valueId], references: [id], onDelete: Restrict)
+
+  @@unique([lineId, dimensionId])
+  @@index([valueId])
+}
+
+/// Period-anchored balance cache. A balance is NEVER computed by summing the
+/// whole ledger; it is maintained incrementally at post time and anchored per period.
+model AccountBalance {
+  id           String           @id @default(cuid())
+  orgId        String
+  entityId     String
+  bookId       String
+  book         Book             @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  accountId    String
+  account      Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  periodId     String
+  period       AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  currency     String
+  openingMinor BigInt           @default(0)
+  debitMinor   BigInt           @default(0)
+  creditMinor  BigInt           @default(0)
+  closingMinor BigInt           @default(0)
+  updatedAt    DateTime         @updatedAt
+
+  @@unique([bookId, accountId, periodId, currency])
+  @@index([orgId, entityId, periodId])
+}
+
+/// Gapless document numbering, allocated inside the posting transaction with an
+/// atomic UPDATE … RETURNING. Replaces the client-side read-modify-write that
+/// hands two concurrent users the same invoice number.
+model DocumentSequence {
+  id        String   @id @default(cuid())
+  orgId     String
+  entityId  String
+  scope     String
+  prefix    String   @default("")
+  nextNo    Int      @default(1)
+  padding   Int      @default(5)
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, entityId, scope])
+}
