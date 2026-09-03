@@ -216,6 +216,44 @@ d("fixed assets", () => {
     expect(tb.differenceMinor).toBe(0n);
   });
 
+  it("does not advance the register when a later run posts nothing", async () => {
+    // An asset acquired into a month already depreciated: the run's idempotency
+    // key would find the earlier entry, post() would return it having written
+    // nothing, and the register would still be advanced — a charge with no
+    // journal behind it, and the register silently ahead of the ledger.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-07-01", source: "manual", memo: "Printer",
+      lines: [{ account: "1500", debit: 360_000 }, { account: "1010", credit: 360_000 }],
+    });
+    await A({ code: "FA-EARLY", name: "Printer one", acquiredOn: "2026-07-01", costMinor: 360_000, usefulLifeMonths: 36 });
+    const first = await runDepreciation({ orgId: ORG, entityId: ENT, period: "2026-07" });
+    expect(first.assetsDepreciated).toBeGreaterThanOrEqual(1);
+
+    // A second asset arrives, back-dated into the same month.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-07-15", source: "manual", memo: "Printer two",
+      lines: [{ account: "1500", debit: 720_000 }, { account: "1010", credit: 720_000 }],
+    });
+    await A({ code: "FA-LATE", name: "Printer two", acquiredOn: "2026-07-15", costMinor: 720_000, usefulLifeMonths: 36 });
+    const second = await runDepreciation({ orgId: ORG, entityId: ENT, period: "2026-07" });
+
+    const late = await db.fixedAsset.findFirst({ where: { orgId: ORG, code: "FA-LATE" } });
+    if (second.assetsDepreciated > 0) {
+      // If it charged, a journal must exist for what it charged.
+      const lines = await db.journalLine.findMany({ where: { entryId: second.entryId! } });
+      expect(lines.length).toBeGreaterThan(0);
+      expect(late?.accumulatedMinor).toBeGreaterThan(0n);
+    } else {
+      // If it did not charge, the register must not have moved either.
+      expect(late?.accumulatedMinor).toBe(0n);
+      expect(late?.depreciatedTo).toBeNull();
+    }
+
+    // Either way the register and the ledger have to agree.
+    const reg = await assetRegister({ orgId: ORG, entityId: ENT });
+    expect(reg.ledger.accumulatedAgrees).toBe(true);
+  });
+
   it("refuses a period that is not a month", async () => {
     await expect(runDepreciation({ orgId: ORG, entityId: ENT, period: "Q1" }))
       .rejects.toThrow(/looks like 2026-03/);

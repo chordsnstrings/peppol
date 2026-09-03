@@ -338,7 +338,12 @@ export async function stockValuation(opts: { orgId: string; entityId: string }) 
   });
   const lines = accounts.length
     ? await prisma.journalLine.findMany({
-        where: { orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) }, entry: { status: "posted" } },
+        // Both halves of a reversed pair, or the ledger side of this comparison
+        // is short by the reversal and the valuation appears not to tie.
+        where: {
+          orgId: opts.orgId, accountId: { in: accounts.map((a) => a.id) },
+          entry: { status: { in: ["posted", "reversed"] } },
+        },
         select: { functionalAmountMinor: true },
       })
     : [];

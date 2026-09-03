@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { postInvoice } from "@/lib/server/ledger/ar";
 import { postBill } from "@/lib/server/ledger/ap";
-import { post } from "@/lib/server/ledger/post";
+import { post, reverse } from "@/lib/server/ledger/post";
 import { vatReturn } from "@/lib/server/ledger/vat";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
@@ -143,6 +143,31 @@ d("VAT 201 return", () => {
     const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-07-01", to: "2026-07-31" });
     expect(r.netVatMinor).toBe("-100000");
     expect(r.payable).toBe(false);
+  });
+
+  it("takes a reversed invoice off the return along with its reversal", async () => {
+    // A reversed entry's lines are real postings; the reversing entry offsets
+    // them. Counting only "posted" drops the original and keeps the reversal,
+    // so reversing a sale would leave NEGATIVE output tax on the return — an
+    // understatement that looks like a legitimate credit.
+    const before = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-08-01", to: "2026-08-31" });
+    expect(before.totalOutputVatMinor).toBe("0");
+
+    const e = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-08-10", source: "invoice", memo: "Sale to reverse",
+      lines: [
+        { account: "1010", debit: 105_000 },
+        { account: "4000", credit: 100_000, taxCode: "STANDARD_5" },
+        { account: "2100", credit: 5_000, taxCode: "OUTPUT_VAT" },
+      ],
+    });
+    const withSale = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-08-01", to: "2026-08-31" });
+    expect(withSale.totalOutputVatMinor).toBe("5000");
+
+    await reverse({ orgId: ORG, entryId: e.id, entryDate: "2026-08-12" });
+    const after = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-08-01", to: "2026-08-31" });
+    expect(after.totalOutputVatMinor).toBe("0");
+    expect(after.reconciliation.outputMatches).toBe(true);
   });
 
   it("refuses a period that ends before it starts", async () => {

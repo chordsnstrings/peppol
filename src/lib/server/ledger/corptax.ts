@@ -787,7 +787,7 @@ async function payableMovementFor(orgId: string, entityId: string, from: Date, t
     where: {
       orgId,
       account: { entityId, code: ACC_CT_PAYABLE },
-      entry: { entityId, status: "posted", entryDate: { gte: from, lte: to } },
+      entry: { entityId, status: { in: ["posted", "reversed"] }, entryDate: { gte: from, lte: to } },
     },
     select: { functionalAmountMinor: true },
   });

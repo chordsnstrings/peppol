@@ -91,7 +91,15 @@ export async function vatReturn(opts: {
   const lines = await prisma.journalLine.findMany({
     where: {
       orgId: opts.orgId,
-      entry: { entityId: opts.entityId, status: "posted", entryDate: { gte: from, lte: to } },
+      entry: {
+        entityId: opts.entityId,
+        // A reversed entry's lines are real postings and the reversing entry
+        // offsets them. Counting only "posted" drops the original and keeps
+        // the reversal, which leaves NEGATIVE output tax on the return — an
+        // understatement that reads as a legitimate credit.
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: from, lte: to },
+      },
     },
     include: {
       account: { select: { code: true, type: true } },

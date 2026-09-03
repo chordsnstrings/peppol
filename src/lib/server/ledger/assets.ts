@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError } from "./post";
 
@@ -138,6 +139,18 @@ export function monthlyCharge(a: {
   return charge;
 }
 
+/**
+ * A stable fingerprint of what a run is about to charge, so the idempotency key
+ * describes the charge rather than only the month it falls in.
+ */
+function chargeDigest(charges: { asset: { id: string }; charge: bigint }[]): string {
+  const body = charges
+    .map((c) => `${c.asset.id}:${c.charge}`)
+    .sort()
+    .join("|");
+  return createHash("sha256").update(body).digest("hex").slice(0, 16);
+}
+
 export interface DepreciationResult {
   period: string;
   assetsDepreciated: number;
@@ -224,7 +237,16 @@ export async function runDepreciation(opts: {
     source: "depreciation",
     sourceType: "DEPRECIATION_RUN",
     sourceId: opts.period,
-    externalKey: `depreciation:${opts.entityId}:${opts.period}`,
+    // Keyed on WHAT is being charged, not merely the month.
+    //
+    // With a month-only key, an asset acquired into a month already
+    // depreciated would find the earlier entry, post() would return it having
+    // written nothing, and the register below would still be advanced — a
+    // charge with no journal behind it, leaving the register permanently ahead
+    // of account 1590 with nothing to show why. Keying on the set of assets
+    // and amounts means a genuinely different charge gets its own entry, while
+    // an identical re-run still returns the original.
+    externalKey: `depreciation:${opts.entityId}:${opts.period}:${chargeDigest(charges)}`,
     actorType: opts.actorType ?? "RULE",
     actorId: opts.actorId,
     series: "DP",

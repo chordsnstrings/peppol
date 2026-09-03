@@ -381,7 +381,9 @@ export async function reconcile(opts: {
     where: {
       orgId: opts.orgId,
       accountId: account.id,
-      entry: { status: "posted", entryDate: { lte: asOf } },
+      // Both halves of a reversed pair, or the ledger balance here would be
+      // out by the reversal while the bank statement is not.
+      entry: { status: { in: ["posted", "reversed"] }, entryDate: { lte: asOf } },
     },
     include: { entry: { select: { series: true, number: true, entryDate: true, memo: true } } },
     orderBy: { entry: { entryDate: "asc" } },

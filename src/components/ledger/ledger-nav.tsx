@@ -47,6 +47,7 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting/receivables", label: "Receivables" },
       { href: "/accounting/payables", label: "Payables" },
+      { href: "/accounting/procurement", label: "Purchase orders" },
       { href: "/accounting/bank", label: "Bank" },
       { href: "/accounting/expenses", label: "Expense claims" },
       { href: "/accounting/payroll", label: "Payroll" },
@@ -60,6 +61,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/assets", label: "Fixed assets" },
       { href: "/accounting/inventory", label: "Inventory" },
       { href: "/accounting/revaluation", label: "Revaluation" },
+      { href: "/accounting/leases", label: "Leases" },
     ],
   },
   {
@@ -72,6 +74,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/budget", label: "Budget" },
       { href: "/accounting/dimensions", label: "Cost centres" },
       { href: "/accounting/projects", label: "Projects" },
+      { href: "/accounting/insights", label: "Insights" },
       { href: "/accounting/consolidation", label: "Consolidation" },
       { href: "/accounting/audit", label: "Audit trail" },
     ],

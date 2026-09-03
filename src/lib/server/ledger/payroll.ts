@@ -1316,7 +1316,7 @@ export async function payrollSummary(opts: {
         where: {
           orgId: opts.orgId,
           accountId: { in: accounts.map((a) => a.id) },
-          entry: { status: "posted", entryDate: { gte: start, lte: end } },
+          entry: { status: { in: ["posted", "reversed"] }, entryDate: { gte: start, lte: end } },
         },
         select: { accountId: true, functionalAmountMinor: true },
       })
@@ -1326,7 +1326,7 @@ export async function payrollSummary(opts: {
         where: {
           orgId: opts.orgId,
           accountId: { in: accounts.map((a) => a.id) },
-          entry: { status: "posted" },
+          entry: { status: { in: ["posted", "reversed"] } },
         },
         select: { accountId: true, functionalAmountMinor: true },
       })

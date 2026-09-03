@@ -235,7 +235,7 @@ export async function cashFlowStatement(opts: {
         entry: {
           entityId: opts.entityId,
           bookId: book.id,
-          status: "posted",
+          status: { in: ["posted", "reversed"] },
           entryDate: { gte: from, lte: to },
           lines: {
             some: {
