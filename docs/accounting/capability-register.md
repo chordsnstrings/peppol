@@ -193,9 +193,13 @@ on.
   computation are prepared here; filing happens at the FTA. Nothing in the
   books records that a return was filed, and the period lock is read as a proxy
   for it, which is an inference and is labelled as one.
-- **It does not know which parties are related.** Relatedness is a fact about
-  people. The shareholder current account is presented as the one balance
-  related by construction; everything else needs a person.
+- **It does not detect which parties are related** — it records what somebody
+  declares. Relatedness is a fact about people and control, and a detector
+  would produce a confident, incomplete list whose silence a reader would take
+  as a statement. The IAS 24 note therefore reports its own completeness: how
+  many counterparties nobody has assessed, which of the five compensation
+  categories nobody has answered, and whether anybody has attested to it at
+  all.
 - **It does not know UAE tax depreciation.** Federal Decree-Law 47/2022 starts
   from accounting profit and has no separate capital allowance code, so the
   deferred tax module takes the rate as an input and says so.
