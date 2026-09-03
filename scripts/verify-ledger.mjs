@@ -69,6 +69,43 @@ const got = nums.map((r) => r[0].n);
 (new Set(got).size === 25) ? ok('25 concurrent number allocations are unique') : bad('concurrent numbering collided', `${new Set(got).size}/25 unique`);
 (got.includes('00001') && got.includes('00025')) ? ok('numbering is gapless 00001..00025') : bad('numbering has gaps', got.sort().slice(0, 3).join(','));
 
+
+// ── Guard hardening: the three holes found by reading the guards against what
+//    they are meant to guarantee rather than against what they happened to check.
+
+// 1. Immutability is an allowlist, not a denylist. `memo` was never named in
+//    the old guard, so a posted entry's description could be rewritten with no
+//    trace — the exact thing the guard exists to prevent.
+await rejects('memo of a posted entry cannot be rewritten',
+  () => db.journalEntry.update({ where: { id: posted.id }, data: { memo: 'rewritten history' } }), 'immutable');
+await rejects('provenance of a posted entry cannot be rewritten',
+  () => db.journalEntry.update({ where: { id: posted.id }, data: { actorId: 'someone-else' } }), 'immutable');
+await rejects('source document link of a posted entry cannot be repointed',
+  () => db.journalEntry.update({ where: { id: posted.id }, data: { sourceId: 'other-doc' } }), 'immutable');
+
+// 2. posted → draft was the two-step route around immutability: unpost, edit,
+//    repost. The status machine now refuses every transition but posted →
+//    reversed.
+await rejects('a posted entry cannot be unposted back to draft',
+  () => db.journalEntry.update({ where: { id: posted.id }, data: { status: 'draft' } }), 'never unposted');
+await allows('a posted entry may be marked reversed',
+  () => db.journalEntry.update({ where: { id: posted.id }, data: { status: 'reversed' } }));
+
+// 3. The numbering race is on the FIRST allocation for a scope: with no
+//    DocumentSequence row, every concurrent caller took the same NOT FOUND
+//    branch and raced to INSERT. Test a scope that has never been used.
+const freshScope = 'RACE' + Date.now();
+const raced = await Promise.all(
+  Array.from({ length: 20 }, () => db.$queryRaw`SELECT gl_next_number(${ORG}, ${ENT}, ${freshScope}) AS n`),
+);
+const rn = raced.map((r) => r[0].n);
+(new Set(rn).size === 20)
+  ? ok('20 racers on a brand-new sequence all get distinct numbers')
+  : bad('first-allocation race collided', `${new Set(rn).size}/20 unique`);
+(rn.includes('00001') && rn.includes('00020'))
+  ? ok('a brand-new sequence is gapless 00001..00020')
+  : bad('new sequence has gaps', rn.sort().slice(0, 3).join(','));
+
 await db.$executeRaw`DELETE FROM "JournalLine" WHERE "orgId" = ${ORG}`.catch(() => {});
 await db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`).catch(() => {});
 await db.$disconnect();

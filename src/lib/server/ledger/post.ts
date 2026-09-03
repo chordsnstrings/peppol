@@ -54,6 +54,12 @@ export interface PostInput {
   sourceId?: string;
   /** Idempotency key — a retry with the same key returns the original entry. */
   externalKey?: string;
+  /**
+   * Set when this entry reverses another. It goes in at INSERT rather than
+   * being patched on afterwards, because a posted entry is immutable — the
+   * link is part of what the entry *is*, not a later edit to it.
+   */
+  reversalOfId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
   actorId?: string;
   series?: string;
@@ -115,7 +121,8 @@ function rethrowLedgerErrors(e: unknown): never {
 export async function post(input: PostInput) {
   const {
     orgId, entityId, bookCode = "PRIMARY", entryDate, memo, source = "manual",
-    sourceType, sourceId, externalKey, actorType = "HUMAN", actorId, series = "GJ", lines,
+    sourceType, sourceId, externalKey, reversalOfId, actorType = "HUMAN", actorId,
+    series = "GJ", lines,
   } = input;
 
   if (!lines || lines.length < 2) throw new LedgerError("A journal entry needs at least two lines.");
@@ -233,7 +240,8 @@ export async function post(input: PostInput) {
         orgId, entityId, bookId: book.id, periodId: period.id, series, number,
         entryDate: date, status: "posted", memo: memo ?? null,
         source, sourceType: sourceType ?? null, sourceId: sourceId ?? null,
-        externalKey: externalKey ?? null, actorType, actorId: actorId ?? null,
+        externalKey: externalKey ?? null, reversalOfId: reversalOfId ?? null,
+        actorType, actorId: actorId ?? null,
         lines: {
           create: prepared.map((p) => ({
             lineNo: p.lineNo, orgId: p.orgId, accountId: p.accountId,
@@ -283,6 +291,7 @@ export async function reverse(opts: {
     actorType: "HUMAN",
     actorId: opts.actorId,
     series: original.series,
+    reversalOfId: original.id,
     lines: original.lines.map((l) => {
       const flipped = -l.txnAmountMinor;
       return {
@@ -295,10 +304,8 @@ export async function reverse(opts: {
     }),
   });
 
-  await prisma.$transaction([
-    prisma.journalEntry.update({ where: { id: reversal.id }, data: { reversalOfId: original.id } }),
-    prisma.journalEntry.update({ where: { id: original.id }, data: { status: "reversed" } }),
-  ]);
+  // The only mutation a posted entry ever receives: posted → reversed.
+  await prisma.journalEntry.update({ where: { id: original.id }, data: { status: "reversed" } });
 
   return reversal;
 }
