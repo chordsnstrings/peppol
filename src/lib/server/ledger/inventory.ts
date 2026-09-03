@@ -902,6 +902,15 @@ interface RecordInput {
   };
   /** Signed change to that batch's own quantity. */
   batchDelta?: bigint;
+  /**
+   * Cost added to one open FIFO layer with no quantity moving — landed cost.
+   *
+   * The layer named is the receipt the charge actually applied to, so the cost
+   * lands on the goods it brought in rather than on whatever happens to be open.
+   * Spreading it across every layer would say the freight applied to shipments
+   * it never touched.
+   */
+  addToLayer?: { movementId: string; addMinor: bigint };
 }
 
 async function record(a: RecordInput): Promise<MovementResult> {
@@ -967,6 +976,27 @@ async function record(a: RecordInput): Promise<MovementResult> {
       await tx.inventoryLayer.update({
         where: { id: t.layerId },
         data: { remainingMilli: { decrement: t.quantityMilli } },
+      });
+    }
+    if (a.addToLayer) {
+      const layer = await tx.inventoryLayer.findFirst({
+        where: { orgId: a.item.orgId, itemId: a.item.id, movementId: a.addToLayer.movementId },
+      });
+      if (!layer || layer.remainingMilli <= 0n) {
+        throw new LedgerError(
+          `The receipt that cost is being added to has nothing left of it on the shelf, so there is no ` +
+            `${a.item.sku} for it to be carried on. A charge on goods that have all gone belongs in cost of sales.`,
+        );
+      }
+      // The layer's unit cost is restated from what it now holds: what was left
+      // of it, plus the share of the charge those goods brought in. Flooring can
+      // leave the layer a fils under the item's own figure, which is the
+      // standing arrangement here — the item is the authority on the total and
+      // the issue that empties it takes the whole remainder.
+      const heldMinor = layerValue(layer);
+      await tx.inventoryLayer.update({
+        where: { id: layer.id },
+        data: { unitCostMinor: ((heldMinor + a.addToLayer.addMinor) * MILLI) / layer.remainingMilli },
       });
     }
     if (batchId && a.batchDelta) {
@@ -2362,4 +2392,217 @@ export async function locationList(opts: { orgId: string; entityId: string }) {
     orderBy: [{ isDefault: "desc" }, { code: "asc" }],
   });
   return { locations: rows.map(showLocation) };
+}
+
+/* ============================================ cost added after the goods are in */
+
+/**
+ * What arrived under one goods received note, and how much of it is still here.
+ *
+ * IAS 2.10 puts freight, duty, insurance and handling into the cost of the
+ * goods they brought in, and a charge invoice almost always turns up after the
+ * goods themselves. Landing it needs two facts this module already holds and
+ * nothing else does: which items came in under that note, and — because some of
+ * them will have been sold in the meantime — how much of each is left to carry
+ * the cost.
+ *
+ * "How much is left" is answered first-in-first-out in both cases, and
+ * deliberately so. A FIFO item has a layer per receipt and the layer is the
+ * record, so the answer is read off it. A weighted-average item keeps no layers,
+ * so the answer is worked from the movements: what was on the shelf immediately
+ * before the receipt is consumed by later issues first, and only what is left
+ * over comes out of this receipt. Assuming the opposite — that the newest goods
+ * go first — would report a shipment as long gone while its stock sat on the
+ * shelf, and the charge would be expensed against goods nobody had sold.
+ *
+ * Transfer legs are excluded. A transfer moved the goods between shelves; it did
+ * not sell them, and counting it would report a warehouse move as a sale.
+ */
+export interface ReceiptLot {
+  movementId: string;
+  itemId: string;
+  sku: string;
+  name: string;
+  uom: string;
+  costMethod: string;
+  stockAccount: string;
+  cogsAccount: string;
+  movedOn: string;
+  /** What came in under the note, and what it cost before any charge landed. */
+  quantityMilli: bigint;
+  valueMinor: bigint;
+  /** How much of that receipt is still on the shelf. */
+  remainingMilli: bigint;
+  /** The item as it stands, which is what a unit cost has to be read against. */
+  itemQuantityMilli: bigint;
+  itemValueMinor: bigint;
+}
+
+export async function receiptsUnder(opts: {
+  orgId: string;
+  entityId: string;
+  reference: string;
+}): Promise<ReceiptLot[]> {
+  const ref = opts.reference?.trim();
+  if (!ref) throw new LedgerError("A goods receipt has to be named before anything can be landed onto it.");
+  if (ref.startsWith(TRANSFER_REF)) {
+    throw new LedgerError(
+      `${ref} is a transfer between locations rather than a receipt of goods. Nothing came into the business ` +
+        `under it, so there is nothing for a charge to be carried on.`,
+    );
+  }
+
+  const items = await prisma.inventoryItem.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId } });
+  if (!items.length) return [];
+  const byId = new Map(items.map((i) => [i.id, i]));
+
+  const movements = await prisma.inventoryMovement.findMany({
+    where: { orgId: opts.orgId, itemId: { in: items.map((i) => i.id) }, kind: "RECEIPT", reference: ref },
+    orderBy: [{ movedOn: "asc" }, { createdAt: "asc" }],
+  });
+
+  const out: ReceiptLot[] = [];
+  for (const m of movements) {
+    const item = byId.get(m.itemId);
+    if (!item) continue;
+    out.push({
+      movementId: m.id,
+      itemId: item.id,
+      sku: item.sku,
+      name: item.name,
+      uom: item.uom,
+      costMethod: item.costMethod,
+      stockAccount: item.stockAccount,
+      cogsAccount: item.cogsAccount,
+      movedOn: iso(m.movedOn),
+      quantityMilli: m.quantityMilli,
+      valueMinor: m.valueMinor,
+      remainingMilli: await receiptRemaining(item, m),
+      itemQuantityMilli: item.quantityMilli,
+      itemValueMinor: item.valueMinor,
+    });
+  }
+  return out;
+}
+
+/** How much of one receipt is still on the shelf — see `receiptsUnder`. */
+async function receiptRemaining(item: ItemRow, m: { id: string; quantityMilli: bigint; balanceQtyMilli: bigint }): Promise<bigint> {
+  if (item.costMethod === "FIFO") {
+    const layer = await prisma.inventoryLayer.findFirst({
+      where: { orgId: item.orgId, itemId: item.id, movementId: m.id },
+    });
+    // The layer is the record under FIFO. An item with no layer for its own
+    // receipt is a broken invariant rather than a nil answer, so it falls
+    // through to the movements instead of quietly reporting nothing left.
+    if (layer) return layer.remainingMilli;
+  }
+
+  // Ordered the way the rest of this module orders movements, and then walked
+  // by position rather than compared by timestamp: two movements recorded in
+  // the same millisecond are ordered here by the same rule the history uses,
+  // so the answer cannot depend on how fast the machine happened to be.
+  const all = await prisma.inventoryMovement.findMany({
+    where: { orgId: item.orgId, itemId: item.id },
+    orderBy: [{ movedOn: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    select: { id: true, quantityMilli: true, reference: true },
+  });
+  const at = all.findIndex((x) => x.id === m.id);
+  if (at < 0) return 0n;
+
+  // What was on the shelf before this receipt is consumed first, and only what
+  // the later issues take beyond it comes out of this receipt. Transfer legs
+  // are left out: the goods changed shelf, not owner, and counting the leg that
+  // left would report a forklift ride as a sale.
+  const issued = all
+    .slice(at + 1)
+    .filter((x) => x.quantityMilli < 0n && !(x.reference ?? "").startsWith(TRANSFER_REF))
+    .reduce((a, x) => a - x.quantityMilli, 0n);
+
+  const before = m.balanceQtyMilli - m.quantityMilli;
+  const consumed = issued > before ? issued - before : 0n;
+  const left = m.quantityMilli - consumed;
+  if (left <= 0n) return 0n;
+  return left > item.quantityMilli ? item.quantityMilli : left;
+}
+
+/**
+ * Add cost to stock without adding stock.
+ *
+ * The one movement that changes value and leaves quantity alone. IAS 2.10 makes
+ * import duty, freight, insurance and handling part of what the goods cost, and
+ * they are almost always billed after the goods have been received — so there
+ * has to be a way of saying "these same units now cost more" that is not a
+ * receipt of phantom quantity and not a stock count.
+ *
+ * It does not post. The charge reaches the ledger as one entry raised by whoever
+ * is landing it, because a voucher covering four charge accounts and nine items
+ * is one transaction and splitting it into nine would make it unreadable. The
+ * movement names that entry, so the row still leads to the posting behind it.
+ */
+export async function capitaliseCost(opts: {
+  orgId: string;
+  entityId: string;
+  sku: string;
+  movedOn: string;
+  /** What to add to the cost of the stock, in minor units. Always positive. */
+  valueMinor: number | bigint | string;
+  /** The entry the caller has already posted for this cost. */
+  entryId?: string | null;
+  /** That entry's series and number, for the movement to read on its own. */
+  entryReference?: string | null;
+  /** Under FIFO, the receipt whose layer the cost belongs to. */
+  ontoMovementId?: string | null;
+  /** The voucher line. Doubles as the idempotency key. */
+  reference?: string;
+  memo?: string;
+  actorId?: string;
+}): Promise<MovementResult> {
+  const value = BigInt(opts.valueMinor);
+  if (value <= 0n) {
+    throw new LedgerError(
+      "Capitalising nothing onto stock is not a movement. A charge that reduces what goods cost is a credit " +
+        "note against the supplier, and it belongs on the bill rather than here.",
+    );
+  }
+  if (!opts.movedOn || Number.isNaN(new Date(opts.movedOn).getTime())) {
+    throw new LedgerError("A cost added to stock needs the date it was added.");
+  }
+
+  const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
+  const seen = await priorMovement(item, ["LANDED_COST"], opts.reference, { movedOn: opts.movedOn, valueMinor: value });
+  if (seen) return replay(item, seen);
+
+  if (item.quantityMilli <= 0n) {
+    throw new LedgerError(
+      `${item.sku} holds no stock, so there is nothing left for that cost to be carried on. ` +
+        `A charge on goods that have all been sold is an expense of the period they were sold in.`,
+    );
+  }
+
+  const fifo = item.costMethod === "FIFO";
+  if (fifo && !opts.ontoMovementId) {
+    throw new LedgerError(
+      `${item.sku} is costed first-in-first-out, so a cost added to it has to name the receipt it belongs to. ` +
+        `Spreading it over every open layer would say the charge applied to shipments it never touched.`,
+    );
+  }
+
+  return record({
+    item,
+    kind: "LANDED_COST",
+    movedOn: opts.movedOn,
+    qty: 0n,
+    value,
+    newQty: item.quantityMilli,
+    newValue: item.valueMinor + value,
+    entryId: opts.entryId ?? null,
+    reference: opts.entryReference ?? null,
+    ref: opts.reference,
+    memo: opts.memo,
+    actorId: opts.actorId,
+    // No rate is supplied on purpose. A movement of nil quantity has no
+    // effective unit cost of its own, so the row carries the item's average
+    // after the cost landed, which is the figure a reader of that row wants.
+    addToLayer: fifo && opts.ontoMovementId ? { movementId: opts.ontoMovementId, addMinor: value } : undefined,
+  });
 }

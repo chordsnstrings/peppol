@@ -702,7 +702,9 @@ model InventoryMovement {
   itemId            String
   item              InventoryItem @relation(fields: [itemId], references: [id], onDelete: Restrict)
   movedOn           DateTime      @db.Date
-  kind              String // RECEIPT | ISSUE | ADJUSTMENT | WRITE_OFF
+  /// LANDED_COST carries value with no quantity: freight and duty landing on
+  /// stock already received (IAS 2.10).
+  kind              String // RECEIPT | ISSUE | ADJUSTMENT | WRITE_OFF | LANDED_COST
   /// Signed thousandths: a receipt is positive, an issue negative.
   quantityMilli     BigInt
   /// Signed minor units, matching the quantity's direction.
