@@ -78,6 +78,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/bank", label: "Bank" },
       { href: "/accounting/bank-import", label: "Import a statement" },
       { href: "/accounting/petty-cash", label: "Petty cash" },
+      { href: "/accounting/cheques", label: "Cheques" },
       { href: "/accounting/payroll", label: "Payroll" },
       { href: "/accounting/leave", label: "Leave" },
     ],
