@@ -1,0 +1,342 @@
+/*
+ * Swedish design language for the accounting surfaces.
+ * ---------------------------------------------------
+ * Scoped to `.sw` so it never leaks into the rest of the app. The rules here
+ * come from three ideas that Swedish design actually holds, not from a mood
+ * board:
+ *
+ *   lagom        — exactly enough. No decoration a bookkeeper cannot use.
+ *   funkis       — form follows function. Data surfaces are square; only
+ *                  interactive chrome gets a radius, because a rounded corner
+ *                  on a cell is a lie about where the cell ends.
+ *   ljusinsläpp  — "letting the light in". A warm limewash ground rather than
+ *                  the clinical white that makes long ledger sessions hurt.
+ *
+ * Colour discipline is the part that matters for a ledger:
+ *   - debit/credit tints are CHROME ONLY (headers, rails). Never on numerals.
+ *   - positive/negative are NUMERALS ONLY, and always paired with parentheses,
+ *     because roughly 1 in 12 men cannot use the colour at all.
+ *   - one warm accent (Josef Frank rose) held to under 2% of the screen.
+ */
+
+.sw {
+  /* Ground and ink */
+  --sw-ground: #f4f1e9;        /* limewash wall */
+  --sw-surface: #fcfaf5;       /* paper */
+  --sw-surface-2: #f0ece2;     /* recessed / header bands */
+  --sw-fg: #1c1a24;            /* violet-biased ink, never pure black */
+  --sw-fg-muted: #5d5a66;
+  --sw-fg-faint: #8b8794;
+  --sw-line: #ddd7c9;          /* hairlines */
+  --sw-line-strong: #c2bbaa;
+
+  /* Accents */
+  --sw-accent: #006aa7;        /* Swedish flag blue, NCS 4055-R95B */
+  --sw-accent-ink: #ffffff;
+  --sw-accent-soft: #e2edf5;
+  --sw-frank: #e9a6bc;         /* Josef Frank rose — the one moment of warmth */
+
+  /* Ledger semantics */
+  --sw-debit: #34405a;         /* Gustavian blue-grey — chrome only */
+  --sw-credit: #8a5a1e;        /* burnt ochre — chrome only */
+  --sw-pos: #2f6b4f;           /* numerals only */
+  --sw-neg: #8e2c1e;           /* Falu red — numerals only */
+  --sw-warn: #8a5a1e;
+
+  /* Geometry — funkis: data is square, controls are barely soft */
+  --sw-radius-ledger: 0px;
+  --sw-radius-control: 3px;
+
+  /* Density */
+  --sw-row-dense: 28px;
+  --sw-row-entry: 34px;
+  --sw-fs-figure: 0.8125rem;   /* 13px */
+  --sw-fs-label: 0.6875rem;    /* 11px */
+  --sw-col-amount: 8.75rem;
+  --sw-num-gutter: 1ch;        /* parentheses hang outside the digit column */
+
+  --sw-font: "Inter var", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  color: var(--sw-fg);
+  background: var(--sw-ground);
+  font-family: var(--sw-font);
+  /* Slashed zero + tabular figures: 0 vs O matters in an account code. */
+  font-feature-settings: "tnum" 1, "zero" 1, "cv05" 1;
+}
+
+/* Dark: the same palette rotated, not inverted. Paper goes to stained oak. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sw {
+    --sw-ground: #16151a;
+    --sw-surface: #1e1d24;
+    --sw-surface-2: #26242d;
+    --sw-fg: #ece9e2;
+    --sw-fg-muted: #a29daa;
+    --sw-fg-faint: #757083;
+    --sw-line: #33313c;
+    --sw-line-strong: #474453;
+    --sw-accent: #4da3d8;
+    --sw-accent-ink: #10161c;
+    --sw-accent-soft: #1d2a35;
+    --sw-frank: #d98fa8;
+    --sw-debit: #8fa2c9;
+    --sw-credit: #d3a161;
+    --sw-pos: #6bbf93;
+    --sw-neg: #e08272;
+    --sw-warn: #d3a161;
+  }
+}
+:root[data-theme="dark"] .sw,
+.dark .sw {
+  --sw-ground: #16151a;
+  --sw-surface: #1e1d24;
+  --sw-surface-2: #26242d;
+  --sw-fg: #ece9e2;
+  --sw-fg-muted: #a29daa;
+  --sw-fg-faint: #757083;
+  --sw-line: #33313c;
+  --sw-line-strong: #474453;
+  --sw-accent: #4da3d8;
+  --sw-accent-ink: #10161c;
+  --sw-accent-soft: #1d2a35;
+  --sw-frank: #d98fa8;
+  --sw-debit: #8fa2c9;
+  --sw-credit: #d3a161;
+  --sw-pos: #6bbf93;
+  --sw-neg: #e08272;
+  --sw-warn: #d3a161;
+}
+
+/* ---------------------------------------------------------------- type --- */
+
+.sw-title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.017em;
+  line-height: 1.2;
+}
+.sw-sub {
+  font-size: 0.8125rem;
+  color: var(--sw-fg-muted);
+  line-height: 1.5;
+}
+.sw-label {
+  font-size: var(--sw-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--sw-fg-muted);
+}
+
+/* ------------------------------------------------------------ surfaces --- */
+
+.sw-panel {
+  background: var(--sw-surface);
+  border: 1px solid var(--sw-line);
+  border-radius: var(--sw-radius-ledger);
+}
+
+/* ---------------------------------------------------------------- grid --- */
+
+.sw-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--sw-fs-figure);
+  font-variant-numeric: tabular-nums;
+}
+.sw-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--sw-surface-2);
+  border-bottom: 1px solid var(--sw-line-strong);
+  padding: 0.4rem 0.625rem;
+  text-align: start;
+  font-size: var(--sw-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--sw-fg-muted);
+  white-space: nowrap;
+}
+.sw-table tbody td {
+  border-bottom: 1px solid var(--sw-line);
+  padding: 0 0.625rem;
+  height: var(--sw-row-dense);
+  vertical-align: middle;
+}
+.sw-table tbody tr:hover td {
+  background: var(--sw-surface-2);
+}
+.sw-table tfoot td {
+  border-top: 2px solid var(--sw-line-strong);
+  padding: 0.45rem 0.625rem;
+  font-weight: 600;
+  background: var(--sw-surface);
+}
+
+/* Debit and credit columns are marked by a hairline rail in the header, not by
+   tinting the figures — the figures stay ink so they stay readable. */
+.sw-col-debit { box-shadow: inset 0 -2px 0 var(--sw-debit); }
+.sw-col-credit { box-shadow: inset 0 -2px 0 var(--sw-credit); }
+
+.sw-num {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* Parentheses hang outside the digit column so digits stay aligned. */
+  padding-inline-end: calc(0.625rem + var(--sw-num-gutter)) !important;
+}
+.sw-num-neg { color: var(--sw-neg); }
+.sw-num-pos { color: var(--sw-pos); }
+/* A zero in a statement is an en dash: it reads as "nothing here", not "0.00". */
+.sw-zero { color: var(--sw-fg-faint); }
+.sw-code {
+  font-variant-numeric: tabular-nums slashed-zero;
+  color: var(--sw-fg-muted);
+}
+
+/* -------------------------------------------------------------- inputs --- */
+
+.sw-input,
+.sw-select {
+  width: 100%;
+  background: var(--sw-surface);
+  color: var(--sw-fg);
+  border: 1px solid var(--sw-line-strong);
+  border-radius: var(--sw-radius-control);
+  padding: 0.35rem 0.5rem;
+  font-size: var(--sw-fs-figure);
+  font-family: inherit;
+  line-height: 1.4;
+}
+.sw-input:focus-visible,
+.sw-select:focus-visible {
+  outline: 2px solid var(--sw-accent);
+  outline-offset: -1px;
+  border-color: var(--sw-accent);
+}
+.sw-input::placeholder { color: var(--sw-fg-faint); }
+
+/* Cell-level inputs inside the entry grid are chromeless until touched — the
+   grid lines already say where the cell is. */
+.sw-cell {
+  width: 100%;
+  height: calc(var(--sw-row-entry) - 2px);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-size: var(--sw-fs-figure);
+  padding: 0 0.5rem;
+}
+.sw-cell:focus {
+  outline: 2px solid var(--sw-accent);
+  outline-offset: -2px;
+  background: var(--sw-surface);
+}
+.sw-cell-num {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.sw-grid td { padding: 0; height: var(--sw-row-entry); }
+
+/* ------------------------------------------------------------- buttons --- */
+
+.sw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border-radius: var(--sw-radius-control);
+  border: 1px solid var(--sw-line-strong);
+  background: var(--sw-surface);
+  color: var(--sw-fg);
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.sw-btn:hover { background: var(--sw-surface-2); }
+.sw-btn:focus-visible { outline: 2px solid var(--sw-accent); outline-offset: 2px; }
+.sw-btn-primary {
+  background: var(--sw-accent);
+  border-color: var(--sw-accent);
+  color: var(--sw-accent-ink);
+  font-weight: 600;
+}
+.sw-btn-primary:hover { background: var(--sw-accent); filter: brightness(1.08); }
+
+/* A blocked action is never silently dead. It stays focusable and announces
+   why, so a keyboard user finds out what is wrong instead of finding nothing. */
+.sw-btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------- chips --- */
+
+.sw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  border: 1px solid var(--sw-line-strong);
+  padding: 0.05rem 0.45rem;
+  font-size: var(--sw-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--sw-fg-muted);
+  white-space: nowrap;
+}
+.sw-chip-ok { border-color: var(--sw-pos); color: var(--sw-pos); }
+.sw-chip-warn { border-color: var(--sw-warn); color: var(--sw-warn); }
+.sw-chip-bad { border-color: var(--sw-neg); color: var(--sw-neg); }
+.sw-chip-accent { border-color: var(--sw-accent); color: var(--sw-accent); }
+
+/* ---------------------------------------------------------------- misc --- */
+
+.sw-link {
+  color: var(--sw-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.sw-note {
+  border-inline-start: 3px solid var(--sw-frank);
+  background: var(--sw-surface);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--sw-fg-muted);
+}
+.sw-error {
+  border-inline-start: 3px solid var(--sw-neg);
+  background: var(--sw-surface);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--sw-neg);
+}
+.sw-scroll { overflow-x: auto; }
+
+/* Tabs — a hairline underline, nothing more. */
+.sw-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--sw-line); }
+.sw-tab {
+  padding: 0.45rem 0.7rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--sw-fg-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+.sw-tab:hover { color: var(--sw-fg); }
+.sw-tab[aria-current="page"] {
+  color: var(--sw-fg);
+  font-weight: 600;
+  border-bottom-color: var(--sw-accent);
+}

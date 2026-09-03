@@ -26,9 +26,13 @@ export class LedgerError extends Error {
 export interface PostLine {
   /** Account code within the entity's chart, e.g. "1000". */
   account: string;
-  /** Supply exactly one of debit / credit, in minor units. */
-  debit?: number | bigint;
-  credit?: number | bigint;
+  /**
+   * Supply exactly one of debit / credit, in minor units. A decimal string is
+   * accepted (and is what the HTTP API sends) because minor units past 2^53
+   * cannot survive JSON as a number.
+   */
+  debit?: number | bigint | string;
+  credit?: number | bigint | string;
   /** Transaction currency; defaults to the book's functional currency. */
   currency?: string;
   /** Rate to the functional currency. Required when currency differs. */
@@ -69,7 +73,10 @@ function signed(line: PostLine): bigint {
   if (typeof raw === "number" && !Number.isInteger(raw)) {
     throw new LedgerError(`Amount on account ${line.account} must be in whole minor units, got ${raw}.`);
   }
-  const v = BigInt(raw);
+  if (typeof raw === "string" && !/^-?\d+$/.test(raw.trim())) {
+    throw new LedgerError(`Amount on account ${line.account} must be in whole minor units, got "${raw}".`);
+  }
+  const v = BigInt(typeof raw === "string" ? raw.trim() : raw);
   if (v < 0n) throw new LedgerError(`Use the debit/credit side rather than a negative amount on account ${line.account}.`);
   if (v === 0n) throw new LedgerError(`A zero amount on account ${line.account} carries no information.`);
   return hasD ? v : -v;
