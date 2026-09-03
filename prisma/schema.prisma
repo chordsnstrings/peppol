@@ -931,3 +931,129 @@ model ConsolidationMember {
   @@unique([groupId, entityId])
   @@index([orgId, groupId])
 }
+
+/// A commitment to buy. Not an accounting entry — an order changes nothing in
+/// the books until goods arrive or an invoice does, which is exactly why
+/// three-way matching has something to compare.
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  orgId        String
+  entityId     String
+  number       String
+  supplierName String
+  supplierTrn  String?
+  orderedOn    DateTime            @db.Date
+  expectedOn   DateTime?           @db.Date
+  currency     String              @default("AED")
+  /// draft | open | part_received | received | closed | cancelled
+  status       String              @default("draft")
+  notes        String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  lines        PurchaseOrderLine[]
+  receipts     GoodsReceipt[]
+
+  @@unique([orgId, entityId, number])
+  @@index([orgId, entityId, status])
+}
+
+model PurchaseOrderLine {
+  id            String        @id @default(cuid())
+  orgId         String
+  orderId       String
+  order         PurchaseOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineNo        Int
+  description   String
+  sku           String?
+  /// Thousandths, as inventory quantities are.
+  quantityMilli BigInt
+  unitPriceMinor BigInt
+  accountCode   String?
+  /// Running totals, so a line can answer "what is still outstanding" alone.
+  receivedMilli BigInt        @default(0)
+  invoicedMilli BigInt        @default(0)
+
+  @@unique([orderId, lineNo])
+  @@index([orgId, orderId])
+}
+
+/// Goods physically arriving. Creates the accrual between receipt and invoice.
+model GoodsReceipt {
+  id          String             @id @default(cuid())
+  orgId       String
+  entityId    String
+  orderId     String
+  order       PurchaseOrder      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  number      String
+  receivedOn  DateTime           @db.Date
+  entryId     String?
+  notes       String?
+  createdAt   DateTime           @default(now())
+  lines       GoodsReceiptLine[]
+
+  @@unique([orgId, entityId, number])
+  @@index([orgId, orderId])
+}
+
+model GoodsReceiptLine {
+  id            String       @id @default(cuid())
+  orgId         String
+  receiptId     String
+  receipt       GoodsReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  orderLineId   String
+  quantityMilli BigInt
+  valueMinor    BigInt
+
+  @@index([receiptId])
+}
+
+/// A job or project that costs and revenue are attributed to.
+model Project {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  code         String
+  name         String
+  customerName String?
+  startsOn     DateTime @db.Date
+  endsOn       DateTime? @db.Date
+  /// What was quoted, so actual can be measured against something.
+  budgetMinor  BigInt   @default(0)
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+/// A lease under IFRS 16 — a right-of-use asset and a lease liability.
+model Lease {
+  id              String   @id @default(cuid())
+  orgId           String
+  entityId        String
+  code            String
+  name            String
+  lessor          String?
+  startsOn        DateTime @db.Date
+  endsOn          DateTime @db.Date
+  /// Payment per period, in minor units.
+  paymentMinor    BigInt
+  /// MONTHLY | QUARTERLY | ANNUAL
+  frequency       String   @default("MONTHLY")
+  /// Incremental borrowing rate, annual, in basis points.
+  discountRateBps Int
+  /// Computed at inception and then fixed — remeasurement is a separate event.
+  initialLiabilityMinor BigInt @default(0)
+  initialRouMinor       BigInt @default(0)
+  liabilityMinor  BigInt   @default(0)
+  accumRouDepMinor BigInt  @default(0)
+  /// YYYY-MM of the last period charged.
+  chargedTo       String?
+  status          String   @default("draft")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
