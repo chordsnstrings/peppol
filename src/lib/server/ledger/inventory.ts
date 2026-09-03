@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError } from "./post";
 import { planConsumption, settleTakes, effectiveUnitCost, layerValue, oldestFirst, type LayerTake } from "./inventory-fifo";
+import {
+  apportion, batchPut, batchTake, daysUntil, expiryHorizon, readBatchKind, reorderVerdict,
+  resolveLocation, tieBatches, type BatchKind,
+} from "./inventory-tracking";
 
 /**
  * Inventory, at weighted average cost or first-in-first-out, and never above
@@ -44,6 +48,29 @@ import { planConsumption, settleTakes, effectiveUnitCost, layerValue, oldestFirs
  *  - Every act that moves cost or quantity re-posts the change in that allowance
  *    in the same breath, because an item whose carrying amount is right on the
  *    screen and stale in account 1200 is worse than no report at all.
+ *
+ * Locations, batches and expiry are those same four opinions applied to where
+ * the goods are rather than to what they cost:
+ *
+ *  - A location holds a quantity, never a cost of its own. The item stays the
+ *    authority on value, so a value per location is derived by apportioning the
+ *    item's own — and the shares add back to it exactly rather than nearly.
+ *  - A transfer between locations posts nothing at all. The goods have not left
+ *    the business, nobody has been billed and nothing has been consumed, so no
+ *    cost has moved and an entry would be inventing a transaction out of a
+ *    forklift ride. It is still two movements, because one row cannot say that
+ *    a quantity left A and arrived at B — and if it cannot say that, neither
+ *    location's quantity is right.
+ *  - Where an item is tracked by batch, a receipt into it and an issue out of it
+ *    both name the batch. A guess about which lot went out is how a recall
+ *    becomes impossible to trace, and a receipt with no batch would create
+ *    stock that no later issue could name. A stock count is exempt, because a
+ *    count is evidence about the shelf rather than an instruction: refusing to
+ *    record what is there because the counter could not read a label would be
+ *    worse than the gap, and the batch reconciliation reports the gap.
+ *  - Expired stock still on the shelf is worth nothing. Carrying it at cost
+ *    overstates the balance sheet, so the sweep writes it off through the
+ *    ledger like any other loss instead of merely relabelling it.
  *
  * Quantities are thousandths, so 1.5 kg is 1500. Money is minor units. Neither
  * is ever a float.
@@ -269,6 +296,245 @@ async function replay(item: ItemRow, m: NonNullable<Awaited<ReturnType<typeof pr
 const balanceKey = (item: ItemRow, kind: string, newQty: bigint, newValue: bigint) =>
   `inventory:${kind.toLowerCase()}:${item.id}:${newQty}:${newValue}`;
 
+/* --------------------------------------------- where the goods actually are */
+
+/**
+ * Transfer legs carry their reference under a namespace of the module's own.
+ *
+ * The database allows a movement four kinds and a transfer is not one of them,
+ * so a transfer borrows ISSUE for the leg that leaves and RECEIPT for the leg
+ * that arrives — which is, after all, what happened at each shelf. Without the
+ * prefix a despatch note and a transfer note carrying the same number on the
+ * same day would look to `priorMovement` like retries of one another, and one
+ * of the two would silently never happen.
+ */
+const TRANSFER_REF = "TRF/";
+
+type LocationRow = NonNullable<Awaited<ReturnType<typeof prisma.stockLocation.findFirst>>>;
+type BatchRow = NonNullable<Awaited<ReturnType<typeof prisma.stockBatch.findFirst>>>;
+
+/** A batch or serial named on a receipt. */
+export interface BatchRef {
+  code: string;
+  /** BATCH or SERIAL. A serial is one unit and cannot be split. */
+  kind?: string;
+  /** When the goods go off, where they do. */
+  expiresOn?: string | null;
+}
+
+async function loadLocation(orgId: string, entityId: string, code: string): Promise<LocationRow> {
+  const loc = await prisma.stockLocation.findFirst({ where: { orgId, entityId, code: code.trim() } });
+  if (!loc) throw new LedgerError(`There is no stock location called ${code.trim()}. Add it before moving stock through it.`);
+  return loc;
+}
+
+const entityDefaultLocation = (orgId: string, entityId: string) =>
+  prisma.stockLocation.findFirst({ where: { orgId, entityId, isDefault: true, status: "active" } });
+
+/**
+ * Where a movement lands: what the caller said, then the item's own shelf, then
+ * the entity's default, then nowhere.
+ *
+ * Nowhere is a real answer and is reported as unassigned rather than quietly
+ * attributed to whichever location happens to exist. A business that has never
+ * opened a second warehouse should not have to invent one to record a receipt.
+ */
+async function movementLocation(item: ItemRow, explicit?: string): Promise<LocationRow | null> {
+  if (explicit?.trim()) {
+    const loc = await loadLocation(item.orgId, item.entityId, explicit);
+    if (loc.status !== "active") {
+      throw new LedgerError(`${loc.code} ${loc.name} is closed, so no stock can move through it.`);
+    }
+    return loc;
+  }
+  // A closed location holds nothing by definition, so an item whose own shelf
+  // has since been closed falls through to the entity's default. Recording the
+  // goods into the closed one would be a statement about where they are that is
+  // known to be false.
+  const own = item.defaultLocationId
+    ? await prisma.stockLocation.findFirst({
+        where: { id: item.defaultLocationId, orgId: item.orgId, entityId: item.entityId, status: "active" },
+      })
+    : null;
+  const fallback = own ? null : await entityDefaultLocation(item.orgId, item.entityId);
+  return resolveLocation(null, own?.id, fallback?.id) ? (own ?? fallback) : null;
+}
+
+/** What one location holds of one item, from the movements that named it. */
+async function heldAt(item: ItemRow, locationId: string): Promise<bigint> {
+  const g = await prisma.inventoryMovement.aggregate({
+    where: { orgId: item.orgId, itemId: item.id, locationId },
+    _sum: { quantityMilli: true },
+  });
+  return g._sum.quantityMilli ?? 0n;
+}
+
+/** Has this item ever been recorded anywhere in particular? */
+async function everLocated(item: ItemRow): Promise<boolean> {
+  const n = await prisma.inventoryMovement.count({
+    where: { orgId: item.orgId, itemId: item.id, locationId: { not: null } },
+  });
+  return n > 0;
+}
+
+/**
+ * Refuse to take out of a location more than it holds — the third opinion, one
+ * shelf at a time.
+ *
+ * It only applies once the item has been recorded somewhere in particular. An
+ * item whose stock all predates the first location is not sitting at nil
+ * everywhere; it is sitting somewhere nobody has said, and refusing every issue
+ * of it would punish the business for having opened a warehouse.
+ */
+async function refuseOverdraw(item: ItemRow, location: LocationRow, qty: bigint) {
+  if (!(await everLocated(item))) return;
+  const held = await heldAt(item, location.id);
+  if (qty > held) {
+    throw new LedgerError(
+      `${location.code} holds ${fmtQty(held)} ${item.uom} of ${item.sku}, and ${fmtQty(qty)} was taken out of it. ` +
+        `Stock that is somewhere else has to be transferred before it can leave from here.`,
+    );
+  }
+}
+
+/** An item is tracked by batch once anything has ever been booked into one. */
+async function isBatchTracked(item: ItemRow): Promise<boolean> {
+  const n = await prisma.stockBatch.count({
+    where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id },
+  });
+  return n > 0;
+}
+
+/**
+ * The batch a receipt names — found where it already exists, opened where it
+ * does not.
+ *
+ * The batch is not created here: it is described, and `record` brings it into
+ * existence inside the same transaction as the movement (see the note there).
+ */
+async function intoBatch(
+  item: ItemRow, ref: BatchRef, qty: bigint, on: string, locationId: string | null,
+): Promise<{ batchId?: string; openBatch?: RecordInput["openBatch"]; batchDelta: bigint }> {
+  const code = ref.code?.trim();
+  if (!code) throw new LedgerError("A tracked lot needs a code — that is the whole of what a batch number is for.");
+
+  const expiresOn = ref.expiresOn ? new Date(ref.expiresOn) : null;
+  if (expiresOn && Number.isNaN(expiresOn.getTime())) {
+    throw new LedgerError(`Batch ${code} needs an expiry date that can be read, or none at all.`);
+  }
+  if (expiresOn && expiresOn < new Date(on)) {
+    throw new LedgerError(`Batch ${code} of ${item.sku} would expire on ${iso(expiresOn)}, before it arrived on ${on}.`);
+  }
+
+  const existing = await prisma.stockBatch.findFirst({
+    where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id, code },
+  });
+
+  // Whether a lot is a batch or a serial is a fact about the goods, settled the
+  // first time the code was seen. A caller who does not say inherits it rather
+  // than silently asserting the default and being refused for disagreeing with
+  // a record it never mentioned.
+  const stated = ref.kind?.trim() ? readBatchKind(ref.kind) : null;
+  if (ref.kind?.trim() && !stated) {
+    throw new LedgerError(`"${ref.kind}" is not a kind of lot. A tracked lot is a BATCH or a SERIAL.`);
+  }
+  const kind = stated ?? ((existing?.kind as BatchKind) || "BATCH");
+
+  if (existing) {
+    if (existing.kind !== kind) {
+      throw new LedgerError(
+        `${code} is already a ${existing.kind === "SERIAL" ? "serial number" : "batch"} of ${item.sku}. ` +
+          `One code cannot be both.`,
+      );
+    }
+    // An expiry date is a fact about the goods, not an opinion the receiving
+    // clerk holds. Two receipts into one batch cannot disagree about when it
+    // goes off, because only one of them can be right.
+    if (expiresOn && existing.expiresOn && expiresOn.getTime() !== existing.expiresOn.getTime()) {
+      throw new LedgerError(
+        `Batch ${code} of ${item.sku} already expires on ${iso(existing.expiresOn)}, not ${iso(expiresOn)}. ` +
+          `Receive the later goods as their own batch.`,
+      );
+    }
+    const room = batchPut({ kind, heldMilli: existing.quantityMilli, addingMilli: qty });
+    if (!room.ok) throw serialRefusal(item, code, room.reason, qty);
+    return { batchId: existing.id, batchDelta: qty };
+  }
+
+  const room = batchPut({ kind, heldMilli: 0n, addingMilli: qty });
+  if (!room.ok) throw serialRefusal(item, code, room.reason, qty);
+  return {
+    openBatch: { code, kind, receivedOn: on, expiresOn, locationId },
+    batchDelta: qty,
+  };
+}
+
+function serialRefusal(item: ItemRow, code: string, reason: "serial-split" | "serial-reused", qty: bigint) {
+  return reason === "serial-reused"
+    ? new LedgerError(
+        `Serial ${code} of ${item.sku} is already on the shelf. A serial number identifies one thing, ` +
+          `so the same number cannot arrive twice.`,
+      )
+    : new LedgerError(
+        `Serial ${code} of ${item.sku} is one ${item.uom}, and ${fmtQty(qty)} was recorded against it. ` +
+          `A serial number cannot be split — number the units separately.`,
+      );
+}
+
+/**
+ * The batch a movement takes out of.
+ *
+ * Where the item is tracked by batch, an unnamed batch is refused rather than
+ * guessed at. Which lot left is the only thing a recall has to go on, and the
+ * system knowing "some of them" is the same as it knowing nothing.
+ */
+async function outOfBatch(
+  item: ItemRow, code: string | undefined, qty: bigint, act: string,
+  /**
+   * Quarantined goods still have to be moved — usually into a quarantine bay,
+   * which is the whole point of having one. Refusing to move them leaves them
+   * on the shelf beside the good stock, which is worse than letting them go.
+   */
+  quarantineOk = false,
+): Promise<{ batchId: string | null; batchDelta: bigint; batch: BatchRow | null }> {
+  const named = code?.trim();
+  if (!named) {
+    if (!(await isBatchTracked(item))) return { batchId: null, batchDelta: 0n, batch: null };
+    throw new LedgerError(
+      `${item.sku} is tracked by batch, so ${act} has to say which batch it came out of. ` +
+        `Guessing which lot went out is how a recall becomes impossible to trace.`,
+    );
+  }
+
+  const batch = await prisma.stockBatch.findFirst({
+    where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id, code: named },
+  });
+  if (!batch) throw new LedgerError(`There is no batch ${named} of ${item.sku}.`);
+  if (batch.status === "quarantined" && !quarantineOk) {
+    throw new LedgerError(`Batch ${named} of ${item.sku} is quarantined. Release it or write it off — it cannot be sold from quarantine.`);
+  }
+  if (batch.status === "expired") {
+    throw new LedgerError(`Batch ${named} of ${item.sku} has been written off as expired, so there is nothing in it to take.`);
+  }
+
+  const verdict = batchTake({ kind: batch.kind as BatchKind, heldMilli: batch.quantityMilli, wantedMilli: qty });
+  if (!verdict.ok) {
+    if (verdict.reason === "serial-split") {
+      throw new LedgerError(
+        `Serial ${named} of ${item.sku} is one ${item.uom} and goes whole or not at all; ${fmtQty(qty)} was asked for. ` +
+          `A serial number that identifies half a thing identifies nothing.`,
+      );
+    }
+    throw new LedgerError(
+      `Batch ${named} of ${item.sku} holds ${fmtQty(verdict.heldMilli)} ${item.uom}, and ${fmtQty(qty)} was taken from it. ` +
+        `Taking more than a batch holds means the next batch is going out, not that this one owes goods.`,
+    );
+  }
+  return { batchId: batch.id, batchDelta: -qty, batch };
+}
+
+const iso = (d: Date) => d.toISOString().slice(0, 10);
+
 /**
  * Change how an item is costed.
  *
@@ -330,6 +596,10 @@ export async function receive(opts: {
   /** The goods received note or supplier reference. Doubles as the idempotency key. */
   reference?: string;
   memo?: string;
+  /** Which location took the goods in. Left out, the item's shelf, then the entity's default. */
+  location?: string;
+  /** The batch or serial that arrived. Required where the item is already tracked by batch. */
+  batch?: BatchRef;
   /** The bill already debited inventory; record the movement without posting. */
   alreadyPosted?: boolean;
   actorId?: string;
@@ -343,6 +613,15 @@ export async function receive(opts: {
   const seen = await priorMovement(item, ["RECEIPT"], opts.reference,
     { movedOn: opts.movedOn, quantityMilli: qty, valueMinor: value });
   if (seen) return replay(item, seen);
+
+  const location = await movementLocation(item, opts.location);
+  if (!opts.batch && (await isBatchTracked(item))) {
+    throw new LedgerError(
+      `${item.sku} is tracked by batch, so a receipt has to say which batch arrived. ` +
+        `Stock booked into no batch is stock that no later issue could name.`,
+    );
+  }
+  const lot = opts.batch ? await intoBatch(item, opts.batch, qty, opts.movedOn, location?.id ?? null) : null;
 
   const newQty = item.quantityMilli + qty;
   const newValue = item.valueMinor + value;
@@ -369,7 +648,8 @@ export async function receive(opts: {
   return record({
     item, kind: "RECEIPT", movedOn: opts.movedOn, qty, value,
     newQty, newValue, entryId, reference, ref: opts.reference, memo: opts.memo,
-    actorId: opts.actorId,
+    actorId: opts.actorId, locationId: location?.id ?? null,
+    batchId: lot?.batchId, openBatch: lot?.openBatch, batchDelta: lot?.batchDelta,
     // Under FIFO the receipt's own rate is the movement's rate; a running
     // average would describe stock this receipt is not part of.
     rate: fifo ? effectiveUnitCost(value, qty) : undefined,
@@ -399,6 +679,10 @@ export async function issue(opts: {
   /** The picking list or despatch note. Doubles as the idempotency key. */
   reference?: string;
   memo?: string;
+  /** Which location the goods left. Left out, the item's shelf, then the entity's default. */
+  location?: string;
+  /** Which batch or serial left. Required where the item is tracked by batch. */
+  batch?: string;
   actorId?: string;
 }): Promise<MovementResult> {
   const qty = BigInt(opts.quantityMilli);
@@ -416,6 +700,10 @@ export async function issue(opts: {
         `A receipt is probably missing — issuing stock the system has no cost for would mean inventing one.`,
     );
   }
+
+  const location = await movementLocation(item, opts.location);
+  if (location) await refuseOverdraw(item, location, qty);
+  const lot = await outOfBatch(item, opts.batch, qty, "an issue");
 
   const consumed = await consume(item, qty);
   const value = consumed.costMinor;
@@ -446,6 +734,7 @@ export async function issue(opts: {
     item, kind: "ISSUE", movedOn: opts.movedOn, qty: -qty, value: -value,
     newQty, newValue, entryId, reference, ref: opts.reference, memo: opts.memo,
     actorId: opts.actorId, rate: consumed.rate, takes: consumed.takes,
+    locationId: location?.id ?? null, batchId: lot.batchId, batchDelta: lot.batchDelta,
   });
 }
 
@@ -466,6 +755,14 @@ export async function adjust(opts: {
   /** The count sheet this came off. Doubles as the idempotency key. */
   reference?: string;
   reason?: string;
+  /** Which location was counted. Left out, the item's shelf, then the entity's default. */
+  location?: string;
+  /**
+   * Which batch the difference was found in, where the counter could tell. A
+   * count is evidence rather than an instruction, so this is never required —
+   * see the header, and the batch reconciliation that reports the gap.
+   */
+  batch?: string;
   actorId?: string;
 }): Promise<MovementResult> {
   const counted = BigInt(opts.countedMilli);
@@ -483,6 +780,14 @@ export async function adjust(opts: {
   const delta = counted - item.quantityMilli;
   const kind = delta < 0n ? "WRITE_OFF" : "ADJUSTMENT";
   if (delta === 0n) throw new LedgerError(`The count agrees with the system: ${fmtQty(counted)} ${item.uom}. Nothing to adjust.`);
+
+  const location = await movementLocation(item, opts.location);
+  const named = opts.batch?.trim();
+  const lot = !named
+    ? null
+    : delta < 0n
+      ? await outOfBatch(item, named, -delta, "a count")
+      : await intoBatch(item, { code: named }, delta, opts.movedOn, location?.id ?? null);
 
   const rate = unitCost(item.valueMinor, item.quantityMilli);
   // A surplus is valued at the current average — it has no receipt behind it, so
@@ -525,6 +830,9 @@ export async function adjust(opts: {
     ref: opts.reference, memo: opts.reason, actorId: opts.actorId,
     rate: fifo ? (shortfall ? shortfall.rate : rate) : undefined,
     takes: shortfall?.takes,
+    locationId: location?.id ?? null,
+    batchId: lot?.batchId, openBatch: lot && "openBatch" in lot ? lot.openBatch : undefined,
+    batchDelta: lot?.batchDelta,
     // A counted surplus takes its place as the newest layer: the system has no
     // evidence it arrived earlier, and dating it earlier would put a cost in
     // front of receipts that really were earlier.
@@ -584,6 +892,16 @@ interface RecordInput {
   rate?: bigint;
   openLayer?: { receivedOn: string; quantityMilli: bigint; unitCostMinor: bigint };
   takes?: LayerTake[];
+  /** Where the goods moved, and which tracked lot they were. */
+  locationId?: string | null;
+  batchId?: string | null;
+  /** A batch this movement brings into existence, opened in the same act. */
+  openBatch?: {
+    code: string; kind: BatchKind; receivedOn: string;
+    expiresOn: Date | null; locationId: string | null;
+  };
+  /** Signed change to that batch's own quantity. */
+  batchDelta?: bigint;
 }
 
 async function record(a: RecordInput): Promise<MovementResult> {
@@ -592,17 +910,38 @@ async function record(a: RecordInput): Promise<MovementResult> {
   // caller supplies the effective unit cost of the movement itself.
   const rate = a.rate ?? unitCost(a.newValue, a.newQty);
 
-  // The item, its movement and its layers commit together. An item updated
-  // without a movement is stock with no history; a movement without the update is
-  // history that does not add up; and a consumed layer that outlived a
-  // rolled-back issue would hand the next sale someone else's cost.
+  // The item, its movement, its layers and its batches commit together. An item
+  // updated without a movement is stock with no history; a movement without the
+  // update is history that does not add up; a consumed layer that outlived a
+  // rolled-back issue would hand the next sale someone else's cost; and a batch
+  // that outlived one would send a recall to a shelf that was never emptied.
   const movement = await prisma.$transaction(async (tx) => {
+    // The batch is opened before the movement so the movement can name it. A
+    // batch created outside this transaction and left behind by a failed
+    // movement would make the item batch-tracked on the strength of a receipt
+    // that never happened, and every later issue would be refused for naming no
+    // batch of a register that holds nothing.
+    let batchId = a.batchId ?? null;
+    if (a.openBatch) {
+      const opened = await tx.stockBatch.create({
+        data: {
+          orgId: a.item.orgId, entityId: a.item.entityId, itemId: a.item.id,
+          code: a.openBatch.code, kind: a.openBatch.kind,
+          receivedOn: new Date(a.openBatch.receivedOn),
+          expiresOn: a.openBatch.expiresOn,
+          locationId: a.openBatch.locationId,
+          quantityMilli: 0n,
+        },
+      });
+      batchId = opened.id;
+    }
     const created = await tx.inventoryMovement.create({
       data: {
         orgId: a.item.orgId, itemId: a.item.id, movedOn: new Date(a.movedOn),
         kind: a.kind, quantityMilli: a.qty, valueMinor: a.value,
         unitCostMinor: rate, balanceQtyMilli: a.newQty, balanceValueMinor: a.newValue,
         reference: a.ref?.trim() || null, memo: a.memo ?? null, entryId: a.entryId,
+        locationId: a.locationId ?? null, batchId,
       },
     });
     await tx.inventoryItem.update({
@@ -629,6 +968,19 @@ async function record(a: RecordInput): Promise<MovementResult> {
         where: { id: t.layerId },
         data: { remainingMilli: { decrement: t.quantityMilli } },
       });
+    }
+    if (batchId && a.batchDelta) {
+      const moved = await tx.stockBatch.update({
+        where: { id: batchId },
+        data: { quantityMilli: { increment: a.batchDelta } },
+      });
+      // A batch with nothing left is not stock any more, and a register that
+      // still lists it sends a picker to an empty shelf. It comes back if a
+      // later count puts something into it.
+      const settled = moved.quantityMilli === 0n ? "consumed" : "active";
+      if ((moved.status === "active" || moved.status === "consumed") && moved.status !== settled) {
+        await tx.stockBatch.update({ where: { id: batchId }, data: { status: settled } });
+      }
     }
     return created;
   });
@@ -963,6 +1315,18 @@ export async function itemHistory(opts: { orgId: string; entityId: string; sku: 
     orderBy: [{ movedOn: "asc" }, { createdAt: "asc" }],
     take: opts.limit ?? 200,
   });
+  // Where the goods went, and which lot they were. A transfer reads as the pair
+  // it is — a leg out of one location and a leg into another, both at nil value
+  // with the running balance unmoved — which is the honest picture of an event
+  // that changed nothing but the address.
+  const [places, lots] = await Promise.all([
+    prisma.stockLocation.findMany({
+      where: { orgId: opts.orgId, entityId: opts.entityId }, select: { id: true, code: true },
+    }),
+    prisma.stockBatch.findMany({ where: { orgId: opts.orgId, itemId: item.id }, select: { id: true, code: true } }),
+  ]);
+  const placeCode = new Map(places.map((p) => [p.id, p.code]));
+  const lotCode = new Map(lots.map((l) => [l.id, l.code]));
   // Under FIFO the layers are the record of what the stock cost, so they come
   // back with the history. Hiding them would leave nobody able to check the cost
   // of a sale, which is the one thing the method is chosen for.
@@ -1036,6 +1400,966 @@ export async function itemHistory(opts: { orgId: string; entityId: string; sku: 
       reference: m.reference,
       memo: m.memo,
       entryId: m.entryId,
+      location: m.locationId ? placeCode.get(m.locationId) ?? null : null,
+      batch: m.batchId ? lotCode.get(m.batchId) ?? null : null,
     })),
   };
+}
+
+/* ================================================================ locations */
+
+const showLocation = (l: LocationRow) => ({
+  code: l.code, name: l.name, nameAr: l.nameAr, address: l.address,
+  isDefault: l.isDefault, status: l.status,
+});
+
+/**
+ * Open a stock location.
+ *
+ * The database allows one default or none, so making this one the default steps
+ * the old one down in the same act. Two defaults would make "where did it go"
+ * ambiguous in exactly the case a default exists to answer.
+ */
+export async function addLocation(opts: {
+  orgId: string;
+  entityId: string;
+  code: string;
+  name: string;
+  nameAr?: string;
+  address?: string;
+  isDefault?: boolean;
+}) {
+  const code = opts.code?.trim().toUpperCase();
+  if (!code) throw new LedgerError("A location needs a code — that is what a movement names.");
+  if (!opts.name?.trim()) throw new LedgerError("A location needs a name.");
+
+  const clash = await prisma.stockLocation.findFirst({ where: { orgId: opts.orgId, entityId: opts.entityId, code } });
+  if (clash) throw new LedgerError(`There is already a stock location called ${code}.`);
+
+  return prisma.$transaction(async (tx) => {
+    if (opts.isDefault) {
+      await tx.stockLocation.updateMany({
+        where: { orgId: opts.orgId, entityId: opts.entityId, isDefault: true },
+        data: { isDefault: false },
+      });
+    }
+    const created = await tx.stockLocation.create({
+      data: {
+        orgId: opts.orgId, entityId: opts.entityId, code,
+        name: opts.name.trim(), nameAr: opts.nameAr ?? null, address: opts.address ?? null,
+        isDefault: opts.isDefault ?? false,
+      },
+    });
+    return showLocation(created);
+  });
+}
+
+/** Rename a location, move it, or hand it the default. */
+export async function updateLocation(opts: {
+  orgId: string;
+  entityId: string;
+  code: string;
+  name?: string;
+  nameAr?: string | null;
+  address?: string | null;
+  isDefault?: boolean;
+}) {
+  const loc = await loadLocation(opts.orgId, opts.entityId, opts.code);
+  if (opts.name !== undefined && !opts.name.trim()) throw new LedgerError("A location needs a name.");
+  if (opts.isDefault && loc.status !== "active") {
+    throw new LedgerError(
+      `${loc.code} ${loc.name} is closed, so it cannot be where stock lands when nobody says. ` +
+        `A closed location holds nothing.`,
+    );
+  }
+
+  return prisma.$transaction(async (tx) => {
+    if (opts.isDefault) {
+      await tx.stockLocation.updateMany({
+        where: { orgId: opts.orgId, entityId: opts.entityId, isDefault: true, id: { not: loc.id } },
+        data: { isDefault: false },
+      });
+    }
+    const updated = await tx.stockLocation.update({
+      where: { id: loc.id },
+      data: {
+        ...(opts.name !== undefined ? { name: opts.name.trim() } : {}),
+        ...(opts.nameAr !== undefined ? { nameAr: opts.nameAr } : {}),
+        ...(opts.address !== undefined ? { address: opts.address } : {}),
+        ...(opts.isDefault !== undefined ? { isDefault: opts.isDefault } : {}),
+      },
+    });
+    return showLocation(updated);
+  });
+}
+
+/**
+ * Close a location.
+ *
+ * Refused while it holds stock, and the refusal names what is on the shelf. A
+ * closed location that still holds goods is stock the business owns and can no
+ * longer find: the quantity stays in account 1200 and nothing on any screen
+ * says where to go and get it.
+ */
+export async function closeLocation(opts: { orgId: string; entityId: string; code: string }) {
+  const loc = await loadLocation(opts.orgId, opts.entityId, opts.code);
+  if (loc.status === "closed") throw new LedgerError(`${loc.code} ${loc.name} is already closed.`);
+
+  const held = await prisma.inventoryMovement.groupBy({
+    by: ["itemId"],
+    where: { orgId: opts.orgId, locationId: loc.id },
+    _sum: { quantityMilli: true },
+  });
+  const standing = held.filter((h) => (h._sum.quantityMilli ?? 0n) !== 0n);
+  if (standing.length) {
+    const items = await prisma.inventoryItem.findMany({
+      where: { id: { in: standing.map((s) => s.itemId) } },
+      select: { id: true, sku: true, uom: true },
+    });
+    const by = new Map(items.map((i) => [i.id, i]));
+    const named = standing
+      .map((s) => {
+        const i = by.get(s.itemId);
+        return { sku: i?.sku ?? "", text: `${fmtQty(s._sum.quantityMilli ?? 0n)} ${i?.uom ?? "EA"} of ${i?.sku ?? "an unknown item"}` };
+      })
+      .sort((a, b) => a.sku.localeCompare(b.sku));
+    const shown = named.slice(0, 3).map((n) => n.text).join(", ");
+    throw new LedgerError(
+      `${loc.code} ${loc.name} still holds ${shown}${named.length > 3 ? `, and ${named.length - 3} more` : ""}. ` +
+        `Transfer it somewhere else or write it off before closing the location — stock in a location nobody can ` +
+        `reach is still on the balance sheet.`,
+    );
+  }
+  if (loc.isDefault) {
+    throw new LedgerError(
+      `${loc.code} ${loc.name} is where stock lands when nobody says. Make another location the default first, ` +
+        `or every later receipt would land nowhere.`,
+    );
+  }
+
+  const closed = await prisma.stockLocation.update({ where: { id: loc.id }, data: { status: "closed" } });
+  return showLocation(closed);
+}
+
+const asOfDate = (v: Date | string | null | undefined): Date | null => {
+  if (v === undefined || v === null || v === "") return null;
+  const d = typeof v === "string" ? new Date(v) : v;
+  if (Number.isNaN(d.getTime())) throw new LedgerError("That report needs a date it can read.");
+  return d;
+};
+
+/**
+ * What each item's position was at a date, from the running balances the
+ * movements carry. The figures on the item itself are today's and no other.
+ */
+async function positionsAt(orgId: string, ids: string[], asOf: Date) {
+  const at = new Map<string, { qty: bigint; cost: bigint }>();
+  if (!ids.length) return at;
+  const history = await prisma.inventoryMovement.findMany({
+    where: { orgId, itemId: { in: ids }, movedOn: { lte: asOf } },
+    orderBy: [{ movedOn: "asc" }, { createdAt: "asc" }],
+    select: { itemId: true, balanceQtyMilli: true, balanceValueMinor: true },
+  });
+  for (const m of history) at.set(m.itemId, { qty: m.balanceQtyMilli, cost: m.balanceValueMinor });
+  return at;
+}
+
+/**
+ * Stock by location, and the tie back to the item it came off.
+ *
+ * A location holds a quantity, never a cost of its own — the item is the
+ * authority on value — so the value column is the item's own cost apportioned
+ * across the places the goods are sitting, and the shares add back to it
+ * exactly. Stock recorded before anybody opened a location is reported as
+ * unassigned rather than dropped, because dropping it is precisely what would
+ * make the total stop tying.
+ */
+export interface LocationLine {
+  sku: string; name: string; uom: string;
+  quantityMilli: string; quantity: string; valueMinor: string;
+}
+
+export interface LocationStock {
+  /** Nil on the one row that is not a location: stock nobody placed. */
+  code: string | null;
+  name: string;
+  isDefault: boolean;
+  status: string;
+  assigned: boolean;
+  lines: LocationLine[];
+  itemCount: number;
+  valueMinor: string;
+}
+
+export interface LocationTie {
+  sku: string; name: string; uom: string;
+  quantityMilli: string; quantity: string;
+  locatedMilli: string; unassignedMilli: string; costMinor: string;
+  differenceMilli: string; agrees: boolean;
+}
+
+export async function stockByLocation(opts: { orgId: string; entityId: string; asOf?: Date | string }) {
+  const asOf = asOfDate(opts.asOf);
+
+  const [items, locations] = await Promise.all([
+    prisma.inventoryItem.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId }, orderBy: { sku: "asc" } }),
+    prisma.stockLocation.findMany({
+      where: { orgId: opts.orgId, entityId: opts.entityId },
+      orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+    }),
+  ]);
+  const ids = items.map((i) => i.id);
+
+  const grouped = ids.length
+    ? await prisma.inventoryMovement.groupBy({
+        by: ["itemId", "locationId"],
+        where: { orgId: opts.orgId, itemId: { in: ids }, ...(asOf ? { movedOn: { lte: asOf } } : {}) },
+        _sum: { quantityMilli: true },
+      })
+    : [];
+
+  const UNASSIGNED = "";
+  const byItem = new Map<string, Map<string, bigint>>();
+  for (const g of grouped) {
+    const row = byItem.get(g.itemId) ?? new Map<string, bigint>();
+    const key = g.locationId ?? UNASSIGNED;
+    row.set(key, (row.get(key) ?? 0n) + (g._sum.quantityMilli ?? 0n));
+    byItem.set(g.itemId, row);
+  }
+
+  const past = asOf ? await positionsAt(opts.orgId, ids, asOf) : null;
+  const buckets = [...locations.map((l) => l.id), UNASSIGNED];
+  const lines = new Map<string, { sku: string; name: string; uom: string; quantityMilli: bigint; valueMinor: bigint }[]>();
+  const itemRows: LocationTie[] = [];
+  let tied = true;
+
+  for (const item of items) {
+    const at = past ? past.get(item.id) ?? { qty: 0n, cost: 0n } : { qty: item.quantityMilli, cost: item.valueMinor };
+    const held = byItem.get(item.id) ?? new Map<string, bigint>();
+    const quantities = buckets.map((b) => held.get(b) ?? 0n);
+    const values = apportion(at.cost, quantities);
+
+    buckets.forEach((bucket, n) => {
+      if (quantities[n] === 0n) return;
+      const row = lines.get(bucket) ?? [];
+      row.push({ sku: item.sku, name: item.name, uom: item.uom, quantityMilli: quantities[n], valueMinor: values[n] });
+      lines.set(bucket, row);
+    });
+
+    const placed = quantities.reduce((a, q) => a + q, 0n);
+    const unassigned = held.get(UNASSIGNED) ?? 0n;
+    if (placed !== at.qty) tied = false;
+    itemRows.push({
+      sku: item.sku, name: item.name, uom: item.uom,
+      quantityMilli: at.qty.toString(), quantity: fmtQty(at.qty),
+      locatedMilli: (placed - unassigned).toString(),
+      unassignedMilli: unassigned.toString(),
+      costMinor: at.cost.toString(),
+      // Two records built by different routes — the item's own quantity and the
+      // sum of where its goods actually are — compared rather than reconciled.
+      differenceMilli: (at.qty - placed).toString(),
+      agrees: at.qty === placed,
+    });
+  }
+
+  const shown = (bucket: string) => {
+    const rows = (lines.get(bucket) ?? []).sort((a, b) => a.sku.localeCompare(b.sku));
+    return {
+      lines: rows.map((r) => ({
+        sku: r.sku, name: r.name, uom: r.uom,
+        quantityMilli: r.quantityMilli.toString(), quantity: fmtQty(r.quantityMilli),
+        valueMinor: r.valueMinor.toString(),
+      })),
+      valueMinor: rows.reduce((a, r) => a + r.valueMinor, 0n),
+    };
+  };
+
+  const rows: LocationStock[] = [
+    ...locations.map((l) => {
+      const s = shown(l.id);
+      return {
+        code: l.code, name: l.name, isDefault: l.isDefault, status: l.status, assigned: true,
+        lines: s.lines, itemCount: s.lines.length, valueMinor: s.valueMinor.toString(),
+      };
+    }),
+    (() => {
+      const s = shown(UNASSIGNED);
+      return {
+        // Not a location, and deliberately not disguised as one: this is stock
+        // that moved before anybody said where it was.
+        code: null, name: "Not assigned to a location", isDefault: false, status: "active", assigned: false,
+        lines: s.lines, itemCount: s.lines.length, valueMinor: s.valueMinor.toString(),
+      };
+    })(),
+  ];
+
+  const totalValue = rows.reduce((a, r) => a + BigInt(r.valueMinor), 0n);
+  const registerValue = items.reduce(
+    (a, i) => a + (past ? (past.get(i.id)?.cost ?? 0n) : i.valueMinor),
+    0n,
+  );
+
+  return {
+    asOf: asOf ? iso(asOf) : null,
+    locations: rows,
+    items: itemRows,
+    totals: {
+      valueMinor: totalValue.toString(),
+      registerCostMinor: registerValue.toString(),
+      differenceMinor: (registerValue - totalValue).toString(),
+      agrees: tied && registerValue === totalValue,
+    },
+  };
+}
+
+/* ================================================================ transfers */
+
+/**
+ * Move stock from one location to another.
+ *
+ * This is the one movement with no ledger effect at all. The goods have not
+ * left the business, nobody has been billed and nothing has been consumed, so
+ * no cost has moved: the trial balance and account 1200 are exactly what they
+ * were before. An entry here would be inventing a transaction out of a forklift
+ * ride, and it would show up as cost of sales the business never bore.
+ *
+ * It is still two movements rather than one, because a single row cannot say
+ * both that a quantity left A and that it arrived at B — and if it cannot say
+ * that, neither location's quantity is right. Both legs carry the item's
+ * balances unchanged and the item itself is not touched, which is what keeps
+ * the first opinion intact: the item stays the authority on quantity and value,
+ * and the legs only say where that quantity is.
+ */
+export async function transferStock(opts: {
+  orgId: string;
+  entityId: string;
+  sku: string;
+  /** The location code the goods leave. */
+  from: string;
+  /** The location code they arrive at. */
+  to: string;
+  quantityMilli: number | bigint | string;
+  on: string;
+  /** Which batch or serial moved. Required where the item is tracked by batch. */
+  batch?: string;
+  /** The transfer note. Doubles as the idempotency key. */
+  reference?: string;
+  memo?: string;
+  actorId?: string;
+}) {
+  const qty = BigInt(opts.quantityMilli);
+  if (qty <= 0n) throw new LedgerError("A transfer has to be a positive quantity.");
+  if (!opts.on || Number.isNaN(new Date(opts.on).getTime())) throw new LedgerError("A transfer needs the date it happened.");
+
+  const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
+  const from = await loadLocation(opts.orgId, opts.entityId, opts.from);
+  const to = await loadLocation(opts.orgId, opts.entityId, opts.to);
+  if (from.id === to.id) {
+    throw new LedgerError(`${from.code} is both ends of that transfer. Stock that has not moved is not a transfer.`);
+  }
+  for (const loc of [from, to]) {
+    if (loc.status !== "active") throw new LedgerError(`${loc.code} ${loc.name} is closed, so no stock can move through it.`);
+  }
+
+  const ref = opts.reference?.trim() ? TRANSFER_REF + opts.reference.trim() : null;
+  const seen = ref
+    ? await prisma.inventoryMovement.findFirst({
+        where: {
+          orgId: opts.orgId, itemId: item.id, kind: "ISSUE", reference: ref,
+          movedOn: new Date(opts.on), quantityMilli: -qty, locationId: from.id,
+        },
+      })
+    : null;
+
+  if (!seen) {
+    const held = await heldAt(item, from.id);
+    if (qty > held) {
+      throw new LedgerError(
+        `${from.code} ${from.name} holds ${fmtQty(held)} ${item.uom} of ${item.sku}, and ${fmtQty(qty)} was moved out of it. ` +
+          `Stock recorded before any location existed is unassigned, not sitting here — receive or count it in first.`,
+      );
+    }
+
+    // The same reasoning as an issue: a batch that is recorded in the wrong
+    // place is a recall sent to the wrong shelf, which is no better than a
+    // recall with no shelf at all.
+    const lot = await outOfBatch(item, opts.batch, qty, "a transfer", true);
+
+    const rate = unitCost(item.valueMinor, item.quantityMilli);
+    const note = opts.memo?.trim();
+    await prisma.$transaction(async (tx) => {
+      const common = {
+        orgId: opts.orgId, itemId: item.id, movedOn: new Date(opts.on),
+        valueMinor: 0n, unitCostMinor: rate,
+        balanceQtyMilli: item.quantityMilli, balanceValueMinor: item.valueMinor,
+        reference: ref, entryId: null, batchId: lot.batchId,
+      };
+      await tx.inventoryMovement.create({
+        data: {
+          ...common, kind: "ISSUE", quantityMilli: -qty, locationId: from.id,
+          memo: note ?? `Transferred to ${to.code} — ${item.sku}`,
+        },
+      });
+      await tx.inventoryMovement.create({
+        data: {
+          ...common, kind: "RECEIPT", quantityMilli: qty, locationId: to.id,
+          memo: note ?? `Transferred from ${from.code} — ${item.sku}`,
+        },
+      });
+      // The batch itself does not change size — it changes address.
+      if (lot.batchId) await tx.stockBatch.update({ where: { id: lot.batchId }, data: { locationId: to.id } });
+    });
+  }
+
+  return {
+    sku: item.sku,
+    from: from.code,
+    to: to.code,
+    on: opts.on,
+    quantityMilli: qty.toString(),
+    quantity: fmtQty(qty),
+    batch: opts.batch?.trim() || null,
+    fromHoldsMilli: (await heldAt(item, from.id)).toString(),
+    toHoldsMilli: (await heldAt(item, to.id)).toString(),
+    /** Unchanged, and that is the point: nothing left the business. */
+    balanceQtyMilli: item.quantityMilli.toString(),
+    balanceValueMinor: item.valueMinor.toString(),
+    /** A transfer never posts. Nil here is the assertion, not an omission. */
+    entryId: null,
+    posted: false,
+    ...(seen ? { replayed: true as const } : {}),
+  };
+}
+
+/* ================================================== batches, serials, expiry */
+
+/** What a batch is worth: the item's cost, apportioned over its batches. */
+async function batchValues(items: { id: string; valueMinor: bigint }[], batches: { id: string; itemId: string; quantityMilli: bigint }[]) {
+  const value = new Map<string, bigint>();
+  for (const item of items) {
+    const mine = batches.filter((b) => b.itemId === item.id);
+    const shares = apportion(item.valueMinor, mine.map((b) => b.quantityMilli));
+    mine.forEach((b, n) => value.set(b.id, shares[n]));
+  }
+  return value;
+}
+
+/**
+ * The batch register, and the tie back to the item.
+ *
+ * Where an item is tracked by batch, the sum of its batches is its own
+ * quantity. That is the invariant which makes the register worth having: a
+ * register that has never been tied to the item it describes is a list of
+ * labels, and a recall run off it reaches the wrong shelves. It is reported
+ * rather than enforced, because a stock count may legitimately move the item
+ * without saying which batch — see the header.
+ */
+export async function batchRegister(opts: { orgId: string; entityId: string; sku?: string }) {
+  const items = await prisma.inventoryItem.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId, ...(opts.sku ? { sku: opts.sku } : {}) },
+    orderBy: { sku: "asc" },
+  });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const batches = items.length
+    ? await prisma.stockBatch.findMany({
+        where: { orgId: opts.orgId, entityId: opts.entityId, itemId: { in: items.map((i) => i.id) } },
+        orderBy: [{ expiresOn: "asc" }, { receivedOn: "asc" }, { code: "asc" }],
+      })
+    : [];
+
+  const locations = await prisma.stockLocation.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId },
+    select: { id: true, code: true },
+  });
+  const locationCode = new Map(locations.map((l) => [l.id, l.code]));
+  const value = await batchValues(items, batches);
+  const today = new Date();
+
+  const rows = batches.map((b) => {
+    const item = byId.get(b.itemId)!;
+    return {
+      sku: item.sku, name: item.name, uom: item.uom,
+      code: b.code, kind: b.kind, status: b.status,
+      location: b.locationId ? locationCode.get(b.locationId) ?? null : null,
+      receivedOn: iso(b.receivedOn),
+      expiresOn: b.expiresOn ? iso(b.expiresOn) : null,
+      // Nil where the goods do not go off, which is a different fact from an
+      // expiry that has not been reached yet.
+      daysToExpiry: b.expiresOn ? daysUntil(b.expiresOn, today) : null,
+      expired: b.expiresOn ? b.expiresOn < today && b.quantityMilli > 0n : false,
+      quantityMilli: b.quantityMilli.toString(),
+      quantity: fmtQty(b.quantityMilli),
+      valueMinor: (value.get(b.id) ?? 0n).toString(),
+    };
+  });
+
+  const tracked = items.filter((i) => batches.some((b) => b.itemId === i.id));
+  const reconciliation = tracked.map((i) => {
+    const held = batches.filter((b) => b.itemId === i.id).reduce((a, b) => a + b.quantityMilli, 0n);
+    const tie = tieBatches(i.quantityMilli, held);
+    return {
+      sku: i.sku, name: i.name, uom: i.uom,
+      itemMilli: tie.itemMilli.toString(), itemQuantity: fmtQty(tie.itemMilli),
+      batchMilli: tie.batchMilli.toString(), batchQuantity: fmtQty(tie.batchMilli),
+      batchCount: batches.filter((b) => b.itemId === i.id).length,
+      differenceMilli: tie.differenceMilli.toString(),
+      difference: fmtQty(tie.differenceMilli),
+      agrees: tie.agrees,
+    };
+  });
+
+  return {
+    batches: rows,
+    reconciliation: {
+      items: reconciliation,
+      tracked: reconciliation.length,
+      differenceMilli: reconciliation.reduce((a, r) => a + BigInt(r.differenceMilli), 0n).toString(),
+      agrees: reconciliation.every((r) => r.agrees),
+    },
+  };
+}
+
+/**
+ * What is about to go off, and what already has.
+ *
+ * The two are reported apart because they call for different acts: stock
+ * expiring is a selling problem, and stock expired is an accounting one.
+ */
+export async function expiringStock(opts: {
+  orgId: string;
+  entityId: string;
+  /** How many days ahead to look. Nought is a real answer: only what has gone off. */
+  within?: number;
+  asOf?: Date | string;
+}) {
+  const within = opts.within ?? 30;
+  if (!Number.isInteger(within) || within < 0) {
+    throw new LedgerError("An expiry window is a whole number of days, and cannot look backwards.");
+  }
+  const asOf = asOfDate(opts.asOf) ?? new Date();
+  const horizon = expiryHorizon(asOf, within);
+
+  const items = await prisma.inventoryItem.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId } });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const all = items.length
+    ? await prisma.stockBatch.findMany({
+        where: {
+          orgId: opts.orgId, entityId: opts.entityId, itemId: { in: items.map((i) => i.id) },
+          expiresOn: { not: null, lte: horizon },
+          quantityMilli: { gt: 0n },
+          status: { in: ["active", "quarantined"] },
+        },
+        orderBy: [{ expiresOn: "asc" }, { code: "asc" }],
+      })
+    : [];
+
+  // Value is apportioned over ALL of an item's batches, not only the expiring
+  // ones, or a batch would be worth more simply because its neighbours are
+  // still fresh.
+  const siblings = items.length
+    ? await prisma.stockBatch.findMany({
+        where: { orgId: opts.orgId, entityId: opts.entityId, itemId: { in: items.map((i) => i.id) } },
+      })
+    : [];
+  const value = await batchValues(items, siblings);
+
+  const row = (b: (typeof all)[number]) => {
+    const item = byId.get(b.itemId)!;
+    return {
+      sku: item.sku, name: item.name, uom: item.uom,
+      code: b.code, kind: b.kind, status: b.status,
+      expiresOn: b.expiresOn ? iso(b.expiresOn) : null,
+      daysToExpiry: b.expiresOn ? daysUntil(b.expiresOn, asOf) : null,
+      quantityMilli: b.quantityMilli.toString(),
+      quantity: fmtQty(b.quantityMilli),
+      valueMinor: (value.get(b.id) ?? 0n).toString(),
+    };
+  };
+
+  const gone = all.filter((b) => b.expiresOn! < asOf).map(row);
+  const going = all.filter((b) => b.expiresOn! >= asOf).map(row);
+  const sum = (rows: { valueMinor: string }[]) => rows.reduce((a, r) => a + BigInt(r.valueMinor), 0n).toString();
+
+  return {
+    asOf: iso(asOf),
+    withinDays: within,
+    horizon: iso(horizon),
+    expired: gone,
+    expiring: going,
+    totals: {
+      expiredValueMinor: sum(gone),
+      expiringValueMinor: sum(going),
+      expiredCount: gone.length,
+      expiringCount: going.length,
+    },
+  };
+}
+
+/**
+ * Sweep what has gone off.
+ *
+ * Quarantining takes the stock off sale without saying anything about what it
+ * is worth: the goods are still there and somebody has to decide. Writing off
+ * says the decision is made — expired stock still on hand is worth nothing, and
+ * carrying it at cost overstates the balance sheet — so it goes through the
+ * ledger like any other loss:
+ *
+ *   Dr  5300  Stock variance    what the expired goods cost
+ *     Cr  1200  Inventory
+ *
+ * Not through cost of sales, for the same reason shrinkage is not: a business
+ * that cannot see what it threw away cannot stop throwing it away.
+ *
+ * Each batch is swept under its own reference, so a half-finished sweep can be
+ * run again and picks up only what it did not reach.
+ */
+export interface SweptBatch {
+  sku: string;
+  code: string;
+  kind: string;
+  expiresOn: string | null;
+  quantityMilli: string;
+  quantity: string;
+  status: string;
+  /** Nil where nothing was posted, which is always so for a quarantine. */
+  entryId: string | null;
+  reference: string | null;
+  valueMinor: string;
+  replayed: boolean;
+}
+
+export async function sweepExpired(opts: {
+  orgId: string;
+  entityId: string;
+  /** The date the sweep is made. Anything that expired before it is caught. */
+  on: string;
+  action?: "quarantine" | "write_off";
+  reason?: string;
+  actorId?: string;
+}) {
+  if (!opts.on || Number.isNaN(new Date(opts.on).getTime())) throw new LedgerError("A sweep needs the date it was made.");
+  const on = new Date(opts.on);
+  const action = opts.action ?? "quarantine";
+  if (action !== "quarantine" && action !== "write_off") {
+    throw new LedgerError(`"${action}" is not something to do with expired stock. Quarantine it, or write it off.`);
+  }
+
+  const items = await prisma.inventoryItem.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId } });
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const expired = items.length
+    ? await prisma.stockBatch.findMany({
+        where: {
+          orgId: opts.orgId, entityId: opts.entityId, itemId: { in: items.map((i) => i.id) },
+          expiresOn: { not: null, lt: on },
+          quantityMilli: { gt: 0n },
+          status: { in: action === "quarantine" ? ["active"] : ["active", "quarantined"] },
+        },
+        orderBy: [{ expiresOn: "asc" }, { code: "asc" }],
+      })
+    : [];
+
+  const swept: SweptBatch[] = [];
+  let writtenOff = 0n;
+
+  for (const batch of expired) {
+    const item = byId.get(batch.itemId)!;
+    if (action === "quarantine") {
+      await prisma.stockBatch.update({ where: { id: batch.id }, data: { status: "quarantined" } });
+      swept.push({
+        sku: item.sku, code: batch.code, kind: batch.kind,
+        expiresOn: batch.expiresOn ? iso(batch.expiresOn) : null,
+        quantityMilli: batch.quantityMilli.toString(), quantity: fmtQty(batch.quantityMilli),
+        status: "quarantined",
+        // Quarantine says nothing about value, so it posts nothing.
+        entryId: null, reference: null, valueMinor: "0", replayed: false,
+      });
+      continue;
+    }
+
+    const result = await writeOffBatch({
+      orgId: opts.orgId, entityId: opts.entityId, sku: item.sku, batchId: batch.id,
+      on: opts.on, reason: opts.reason, actorId: opts.actorId,
+    });
+    writtenOff += -BigInt(result.valueMinor);
+    swept.push({
+      sku: item.sku, code: batch.code, kind: batch.kind,
+      expiresOn: batch.expiresOn ? iso(batch.expiresOn) : null,
+      quantityMilli: batch.quantityMilli.toString(), quantity: fmtQty(batch.quantityMilli),
+      status: "expired",
+      entryId: result.entryId, reference: result.reference,
+      valueMinor: (-BigInt(result.valueMinor)).toString(),
+      replayed: result.replayed === true,
+    });
+  }
+
+  return {
+    on: opts.on,
+    action,
+    swept,
+    totals: {
+      batches: swept.length,
+      valueMinor: writtenOff.toString(),
+    },
+  };
+}
+
+/**
+ * Write one batch off in full.
+ *
+ * Kept apart from `adjust` because a count and a write-off are different
+ * statements: a count says what is on the shelf, and this says what is on the
+ * shelf is worthless. It goes through the same `record` as everything else, so
+ * the item, the movement, the FIFO layers, the batch and the net realisable
+ * value allowance all move together.
+ */
+async function writeOffBatch(opts: {
+  orgId: string;
+  entityId: string;
+  sku: string;
+  batchId: string;
+  on: string;
+  reason?: string;
+  actorId?: string;
+}): Promise<MovementResult> {
+  const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
+  const batch = await prisma.stockBatch.findFirst({ where: { id: opts.batchId, orgId: opts.orgId } });
+  if (!batch) throw new LedgerError("That batch does not exist.");
+  const qty = batch.quantityMilli;
+  if (qty <= 0n) throw new LedgerError(`Batch ${batch.code} of ${item.sku} holds nothing, so there is nothing to write off.`);
+
+  // The batch's own reference, so a sweep run twice writes each batch off once.
+  const reference = `EXP/${batch.code}`;
+  const seen = await priorMovement(item, ["WRITE_OFF"], reference, { movedOn: opts.on, quantityMilli: -qty });
+  if (seen) return replay(item, seen);
+
+  if (qty > item.quantityMilli) {
+    throw new LedgerError(
+      `Batch ${batch.code} says it holds ${fmtQty(qty)} ${item.uom} of ${item.sku} but the item only holds ` +
+        `${fmtQty(item.quantityMilli)}. The batch register and the item disagree; settle that before writing anything off, ` +
+        `because writing off stock the system has no cost for would mean inventing one.`,
+    );
+  }
+
+  const consumed = await consume(item, qty);
+  const value = consumed.costMinor;
+  const newQty = item.quantityMilli - qty;
+  const newValue = newQty === 0n ? 0n : item.valueMinor - value;
+
+  let entryId: string | null = null;
+  let reported: string | null = null;
+  if (value > 0n) {
+    const entry = await post({
+      orgId: opts.orgId, entityId: opts.entityId, entryDate: opts.on,
+      memo: opts.reason ?? `Expired stock written off — ${item.sku} batch ${batch.code}`,
+      source: "inventory", sourceType: "EXPIRY", sourceId: item.id,
+      externalKey: balanceKey(item, "WRITE_OFF", newQty, newValue),
+      actorType: "HUMAN", actorId: opts.actorId, series: "IA",
+      lines: [
+        { account: item.varianceAccount, debit: value, memo: `${item.sku} batch ${batch.code} expired` },
+        { account: item.stockAccount, credit: value, memo: `${item.sku} batch ${batch.code} written off` },
+      ],
+    });
+    entryId = entry.id;
+    reported = `${entry.series}-${entry.number}`;
+  }
+
+  const out = await record({
+    item, kind: "WRITE_OFF", movedOn: opts.on, qty: -qty, value: -value,
+    newQty, newValue, entryId, reference: reported, ref: reference,
+    memo: opts.reason ?? `Expired — batch ${batch.code}`,
+    actorId: opts.actorId, rate: consumed.rate, takes: consumed.takes,
+    locationId: batch.locationId, batchId: batch.id, batchDelta: -qty,
+  });
+
+  // `record` settles an emptied batch to "consumed", which is the right word
+  // for stock that was sold and the wrong one for stock that went off. The
+  // register has to be able to tell those apart afterwards.
+  await prisma.stockBatch.update({ where: { id: batch.id }, data: { status: "expired" } });
+  return out;
+}
+
+/* ========================================================== reorder levels */
+
+/**
+ * What is on order, per SKU.
+ *
+ * procurement.ts already owns what "still on order" means — which statuses are
+ * live, and how much of a line has arrived — so it is asked rather than
+ * re-derived here. Two modules deriving the same figure from the same tables is
+ * how the two figures start to disagree. The import is deferred because
+ * procurement.ts imports `receive` from this module, and a static import back
+ * would be a cycle.
+ */
+export interface OnOrderLine {
+  number: string;
+  supplierName: string;
+  expectedOn: string | null;
+  outstandingMilli: string;
+}
+
+async function onOrderBySku(orgId: string, entityId: string) {
+  const { orderList, orderDetail } = await import("./procurement");
+  const live = (await orderList({ orgId, entityId })).orders.filter(
+    (o) => o.status === "open" || o.status === "part_received",
+  );
+
+  const out = new Map<string, { milli: bigint; orders: OnOrderLine[] }>();
+  for (const order of live) {
+    const detail = await orderDetail({ orgId, orderId: order.id });
+    for (const line of detail.lines) {
+      const outstanding = BigInt(line.outstandingMilli);
+      if (!line.sku || outstanding <= 0n) continue;
+      const row = out.get(line.sku) ?? { milli: 0n, orders: [] };
+      row.milli += outstanding;
+      row.orders.push({
+        number: order.number, supplierName: order.supplierName,
+        expectedOn: order.expectedOn, outstandingMilli: outstanding.toString(),
+      });
+      out.set(line.sku, row);
+    }
+  }
+  return out;
+}
+
+/**
+ * Items at or under their reorder level, with what is already on order.
+ *
+ * Nil and nought are different facts and stay different all the way to the
+ * screen: nil is "nobody has decided what low means for this item", nought is
+ * "tell me the moment it runs out". An unmonitored item is not a healthy one,
+ * so it is reported separately rather than left out.
+ *
+ * An order in flight never suppresses the finding — goods on a lorry are not
+ * goods on a shelf — it only says somebody has already acted on it.
+ */
+export interface ReorderRow {
+  sku: string; name: string; uom: string;
+  quantityMilli: string; quantity: string;
+  reorderLevelMilli: string; reorderLevel: string;
+  onOrderMilli: string; onOrder: string;
+  shortfallMilli: string; shortfall: string;
+  /** At the level exactly, which is still below it — the level is where reordering starts. */
+  atLevel: boolean;
+  /** What is on order brings it back above the level. It is still below it today. */
+  covered: boolean;
+  orders: OnOrderLine[];
+}
+
+export interface UnmonitoredItem {
+  sku: string; name: string; uom: string;
+  quantityMilli: string; quantity: string;
+}
+
+export async function belowReorderLevel(opts: { orgId: string; entityId: string }) {
+  const items = await prisma.inventoryItem.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId, status: "active" },
+    orderBy: { sku: "asc" },
+  });
+  const onOrder = await onOrderBySku(opts.orgId, opts.entityId);
+
+  const below: ReorderRow[] = [];
+  const unmonitored: UnmonitoredItem[] = [];
+  let monitored = 0;
+  let covered = 0;
+
+  for (const item of items) {
+    const ordered = onOrder.get(item.sku) ?? { milli: 0n, orders: [] };
+    const verdict = reorderVerdict({
+      quantityMilli: item.quantityMilli,
+      reorderLevelMilli: item.reorderLevelMilli,
+      onOrderMilli: ordered.milli,
+    });
+    if (!verdict.monitored) {
+      unmonitored.push({
+        sku: item.sku, name: item.name, uom: item.uom,
+        quantityMilli: item.quantityMilli.toString(), quantity: fmtQty(item.quantityMilli),
+      });
+      continue;
+    }
+    monitored += 1;
+    if (!verdict.below) continue;
+    if (verdict.covered) covered += 1;
+    below.push({
+      sku: item.sku, name: item.name, uom: item.uom,
+      quantityMilli: item.quantityMilli.toString(), quantity: fmtQty(item.quantityMilli),
+      reorderLevelMilli: item.reorderLevelMilli!.toString(),
+      reorderLevel: fmtQty(item.reorderLevelMilli!),
+      onOrderMilli: ordered.milli.toString(), onOrder: fmtQty(ordered.milli),
+      shortfallMilli: verdict.shortfallMilli.toString(), shortfall: fmtQty(verdict.shortfallMilli),
+      /** At the level exactly, which is still below it — the level is where reordering starts. */
+      atLevel: verdict.shortfallMilli === 0n,
+      covered: verdict.covered,
+      orders: ordered.orders,
+    });
+  }
+
+  return {
+    items: below,
+    /** Items with a level set that are above it. */
+    monitored,
+    /** Nobody has set a level for these. Nil is not "fine"; it is "nobody has said". */
+    unmonitored,
+    totals: { below: below.length, covered, unmonitored: unmonitored.length },
+  };
+}
+
+/**
+ * Set, change or clear an item's reorder level.
+ *
+ * Clearing it is said out loud rather than inferred from an empty field, for
+ * the same reason a net realisable value of nothing is: no level and a level of
+ * nothing are different statements about the same item.
+ */
+export async function setReorderLevel(opts: {
+  orgId: string;
+  entityId: string;
+  sku: string;
+  /** Thousandths. Nil clears the level; nought is a level of nothing. */
+  reorderLevelMilli: number | bigint | string | null;
+}) {
+  const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
+  const level = opts.reorderLevelMilli === null || opts.reorderLevelMilli === undefined || opts.reorderLevelMilli === ""
+    ? null
+    : BigInt(opts.reorderLevelMilli);
+  if (level !== null && level < 0n) {
+    throw new LedgerError("A reorder level cannot be negative. The floor is nothing, which means tell me the moment it runs out.");
+  }
+
+  const updated = await prisma.inventoryItem.update({ where: { id: item.id }, data: { reorderLevelMilli: level } });
+  return {
+    sku: updated.sku,
+    reorderLevelMilli: updated.reorderLevelMilli === null ? null : updated.reorderLevelMilli.toString(),
+    reorderLevel: updated.reorderLevelMilli === null ? null : fmtQty(updated.reorderLevelMilli),
+    quantityMilli: updated.quantityMilli.toString(),
+    monitored: updated.reorderLevelMilli !== null,
+  };
+}
+
+/** Where this item is normally kept, so a movement need not say every time. */
+export async function setDefaultLocation(opts: {
+  orgId: string;
+  entityId: string;
+  sku: string;
+  /** The location code, or nil to fall back on the entity's default. */
+  location: string | null;
+}) {
+  const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
+  const loc = opts.location?.trim() ? await loadLocation(opts.orgId, opts.entityId, opts.location) : null;
+  if (loc && loc.status !== "active") {
+    throw new LedgerError(`${loc.code} ${loc.name} is closed, so it cannot be where ${item.sku} lives.`);
+  }
+  const updated = await prisma.inventoryItem.update({
+    where: { id: item.id },
+    data: { defaultLocationId: loc?.id ?? null },
+  });
+  return { sku: updated.sku, location: loc?.code ?? null };
+}
+
+/** Every location on the books, with whether it is the default. */
+export async function locationList(opts: { orgId: string; entityId: string }) {
+  const rows = await prisma.stockLocation.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId },
+    orderBy: [{ isDefault: "desc" }, { code: "asc" }],
+  });
+  return { locations: rows.map(showLocation) };
 }

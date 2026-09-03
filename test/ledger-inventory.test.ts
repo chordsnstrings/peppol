@@ -3,8 +3,15 @@ import { PrismaClient } from "@prisma/client";
 import {
   addItem, receive, issue, adjust, assessNrv, setCostMethod, stockValuation, itemHistory,
   unitCost, issueValue, carryingAmount, writeDownHeld,
+  addLocation, updateLocation, closeLocation, stockByLocation, transferStock,
+  batchRegister, expiringStock, sweepExpired, belowReorderLevel, setReorderLevel,
+  setDefaultLocation, locationList,
 } from "@/lib/server/ledger/inventory";
 import { planConsumption, effectiveUnitCost, settleTakes } from "@/lib/server/ledger/inventory-fifo";
+import {
+  apportion, batchPut, batchTake, reorderVerdict, resolveLocation, tieBatches,
+} from "@/lib/server/ledger/inventory-tracking";
+import { createOrder, issueOrder } from "@/lib/server/ledger/procurement";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 
@@ -17,10 +24,16 @@ const ENT = "t-ent-inv";
 async function wipe(org = ORG) {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    db.$executeRawUnsafe(`DELETE FROM "GoodsReceiptLine" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "GoodsReceipt" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "PurchaseOrderLine" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "PurchaseOrder" WHERE "orgId" = '${org}'`),
     db.$executeRawUnsafe(`DELETE FROM "InventoryMovement" WHERE "orgId" = '${org}'`),
-    // Replica mode disables the foreign keys, so the layers do not cascade away
-    // with the items and have to be cleared in their own right.
+    // Replica mode disables the foreign keys, so the layers and batches do not
+    // cascade away with the items and have to be cleared in their own right.
     db.$executeRawUnsafe(`DELETE FROM "InventoryLayer" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "StockBatch" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "StockLocation" WHERE "orgId" = '${org}'`),
     db.$executeRawUnsafe(`DELETE FROM "InventoryItem" WHERE "orgId" = '${org}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${org}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${org}'`),
@@ -609,7 +622,8 @@ d("a retried movement", () => {
     await openBooks({ orgId: ORG_R, entityId: ENT_R });
     await addItem({ orgId: ORG_R, entityId: ENT_R, item: { sku: "RETRY", name: "Retried widget" } });
   });
-  afterAll(async () => { await wipe(ORG_R); await db.$disconnect(); });
+  // The connection is closed once, after the last block in the file.
+  afterAll(async () => { await wipe(ORG_R); });
 
   it("receives once when the goods received note is sent twice", async () => {
     const body = {
@@ -688,5 +702,473 @@ d("a retried movement", () => {
     const v = await stockValuation({ orgId: ORG_R, entityId: ENT_R });
     expect(v.ledger.agrees).toBe(true);
     expect(v.ledger.differenceMinor).toBe("0");
+  });
+});
+
+/* ------------------------------- locations, batches and levels, on paper --- */
+
+describe("where the goods are, on paper", () => {
+  it("puts what the caller said ahead of any default", () => {
+    expect(resolveLocation("SHOP", "MAIN", "WH")).toBe("SHOP");
+    expect(resolveLocation(null, "MAIN", "WH")).toBe("MAIN");
+    expect(resolveLocation(null, null, "WH")).toBe("WH");
+    // Nowhere is a real answer. A business with one shed should not have to
+    // invent a warehouse before it can record a receipt.
+    expect(resolveLocation(null, null, null)).toBeNull();
+  });
+
+  it("will not split a serial number", () => {
+    expect(batchTake({ kind: "SERIAL", heldMilli: 1_000n, wantedMilli: 500n })).toEqual({ ok: false, reason: "serial-split" });
+    expect(batchTake({ kind: "SERIAL", heldMilli: 1_000n, wantedMilli: 1_000n })).toEqual({ ok: true });
+    // A batch, by contrast, goes as far as it holds and no further: taking more
+    // means the next batch is going out, not that this one owes goods.
+    expect(batchTake({ kind: "BATCH", heldMilli: 400n, wantedMilli: 500n })).toEqual({ ok: false, reason: "short", heldMilli: 400n });
+    expect(batchTake({ kind: "BATCH", heldMilli: 400n, wantedMilli: 400n })).toEqual({ ok: true });
+  });
+
+  it("will not put two things behind one serial number", () => {
+    expect(batchPut({ kind: "SERIAL", heldMilli: 1_000n, addingMilli: 1_000n })).toEqual({ ok: false, reason: "serial-reused" });
+    expect(batchPut({ kind: "SERIAL", heldMilli: 0n, addingMilli: 2_000n })).toEqual({ ok: false, reason: "serial-split" });
+    expect(batchPut({ kind: "SERIAL", heldMilli: 0n, addingMilli: 1_000n })).toEqual({ ok: true });
+    expect(batchPut({ kind: "BATCH", heldMilli: 5_000n, addingMilli: 2_000n })).toEqual({ ok: true });
+  });
+
+  it("keeps no reorder level and a level of nothing apart", () => {
+    const none = reorderVerdict({ quantityMilli: 0n, reorderLevelMilli: null, onOrderMilli: 0n });
+    const zero = reorderVerdict({ quantityMilli: 0n, reorderLevelMilli: 0n, onOrderMilli: 0n });
+    // Nobody has decided what low means for this item, which is not the same
+    // fact as the item being fine.
+    expect(none.monitored).toBe(false);
+    expect(none.below).toBe(false);
+    // A level of nothing means "tell me the moment it runs out", and it has.
+    expect(zero.monitored).toBe(true);
+    expect(zero.below).toBe(true);
+    expect(zero.shortfallMilli).toBe(0n);
+  });
+
+  it("treats being exactly at the level as being below it", () => {
+    const at = reorderVerdict({ quantityMilli: 50_000n, reorderLevelMilli: 50_000n, onOrderMilli: 0n });
+    expect(at.below).toBe(true);
+    expect(at.shortfallMilli).toBe(0n);
+    expect(at.covered).toBe(false);
+    // Goods on a lorry are not goods on a shelf: an order says somebody has
+    // acted, it does not make the finding go away.
+    const ordered = reorderVerdict({ quantityMilli: 10_000n, reorderLevelMilli: 50_000n, onOrderMilli: 100_000n });
+    expect(ordered.below).toBe(true);
+    expect(ordered.shortfallMilli).toBe(40_000n);
+    expect(ordered.covered).toBe(true);
+  });
+
+  it("splits one carried value across locations without losing a fil", () => {
+    const shares = apportion(1_000n, [1_000n, 1_000n, 1_000n]);
+    expect(shares.reduce((a, s) => a + s, 0n)).toBe(1_000n);
+    expect(shares.filter((s) => s === 334n).length).toBe(1);
+    expect(apportion(1_000n, [1_000n, 3_000n])).toEqual([250n, 750n]);
+    // The residue lands on the largest holding rather than being spread thinly.
+    expect(apportion(100n, [1n, 2n])).toEqual([33n, 67n]);
+    expect(apportion(0n, [5n, 5n])).toEqual([0n, 0n]);
+  });
+
+  it("ties a batch register to the item it describes", () => {
+    expect(tieBatches(100_000n, 100_000n).agrees).toBe(true);
+    const gap = tieBatches(100_000n, 90_000n);
+    expect(gap.agrees).toBe(false);
+    expect(gap.differenceMilli).toBe(10_000n);
+  });
+});
+
+/* ------------------------------------------------------ stock by location --- */
+
+const ORG_S = "t-org-inv-stock";
+const ENT_S = "t-ent-inv-stock";
+
+d("stock locations", () => {
+  const loc = { orgId: ORG_S, entityId: ENT_S };
+  const RS = (sku: string, qty: number, value: number, on: string, location?: string) =>
+    receive({ orgId: ORG_S, entityId: ENT_S, sku, movedOn: on, quantityMilli: qty, valueMinor: value, location });
+  const at = async (code: string | null, sku: string) => {
+    const v = await stockByLocation(loc);
+    return v.locations.find((l) => l.code === code)!.lines.find((l) => l.sku === sku) ?? null;
+  };
+  const stockRow = async () => {
+    const tb = await trialBalance({ orgId: ORG_S, entityId: ENT_S, periodLabel: "2026-05" });
+    return tb.rows.find((r) => r.code === "1200")?.balanceMinor ?? 0n;
+  };
+
+  beforeAll(async () => {
+    await wipe(ORG_S);
+    await openFiscalYear({ orgId: ORG_S, entityId: ENT_S, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG_S, entityId: ENT_S });
+    await addLocation({ ...loc, code: "MAIN", name: "Main warehouse", isDefault: true });
+    await addLocation({ ...loc, code: "SHOP", name: "Shop floor" });
+    await addItem({ ...loc, item: { sku: "BOLT", name: "Bolt", uom: "EA" } });
+    await addItem({ ...loc, item: { sku: "NUT", name: "Nut", uom: "EA" } });
+    await RS("BOLT", 100_000, 500_000, "2026-05-01", "MAIN"); // 100 at 5.00
+    await RS("BOLT", 40_000, 200_000, "2026-05-02", "SHOP");  // 40 at 5.00
+  });
+  afterAll(async () => { await wipe(ORG_S); });
+
+  it("records where the goods landed and ties each location back to the item", async () => {
+    expect((await at("MAIN", "BOLT"))!.quantityMilli).toBe("100000");
+    expect((await at("SHOP", "BOLT"))!.quantityMilli).toBe("40000");
+    const v = await stockByLocation(loc);
+    const bolt = v.items.find((i) => i.sku === "BOLT")!;
+    expect(bolt.quantityMilli).toBe("140000");
+    expect(bolt.unassignedMilli).toBe("0");
+    expect(bolt.agrees).toBe(true);
+    // A location holds a quantity, never a cost of its own: the value column is
+    // the item's own cost apportioned, and the shares add back exactly.
+    expect(v.totals.differenceMinor).toBe("0");
+    expect(v.totals.agrees).toBe(true);
+    expect(BigInt((await at("MAIN", "BOLT"))!.valueMinor)).toBe(500_000n);
+  });
+
+  it("lands stock on the item's own shelf, then the entity's default", async () => {
+    await RS("NUT", 10_000, 20_000, "2026-05-03"); // nobody said: MAIN is the entity default
+    expect((await at("MAIN", "NUT"))!.quantityMilli).toBe("10000");
+    await setDefaultLocation({ ...loc, sku: "NUT", location: "SHOP" });
+    await RS("NUT", 10_000, 20_000, "2026-05-04"); // the item's own shelf now wins
+    expect((await at("SHOP", "NUT"))!.quantityMilli).toBe("10000");
+    expect((await at("MAIN", "NUT"))!.quantityMilli).toBe("10000");
+  });
+
+  it("transfers between locations and leaves the ledger exactly as it was", async () => {
+    const before = await stockRow();
+    const tbBefore = await trialBalance({ orgId: ORG_S, entityId: ENT_S, periodLabel: "2026-05" });
+    const entriesBefore = await db.journalEntry.count({ where: { orgId: ORG_S } });
+    const item = await db.inventoryItem.findFirstOrThrow({ where: { orgId: ORG_S, sku: "BOLT" } });
+
+    const t = await transferStock({ ...loc, sku: "BOLT", from: "MAIN", to: "SHOP", quantityMilli: 25_000, on: "2026-05-10", reference: "TN-1" });
+    expect(t.posted).toBe(false);
+    expect(t.entryId).toBeNull();
+    expect(t.fromHoldsMilli).toBe("75000");
+    expect(t.toHoldsMilli).toBe("65000");
+
+    // Two movements, not one: a single row cannot say that a quantity left A
+    // and arrived at B, and if it cannot say that neither total is right.
+    expect(await db.inventoryMovement.count({ where: { orgId: ORG_S, itemId: item.id, reference: "TRF/TN-1" } })).toBe(2);
+
+    // The item stays the authority on quantity and value, and a transfer moved
+    // neither — the goods never left the business.
+    const after = await db.inventoryItem.findFirstOrThrow({ where: { id: item.id } });
+    expect(after.quantityMilli).toBe(item.quantityMilli);
+    expect(after.valueMinor).toBe(item.valueMinor);
+
+    // And the ledger did not twitch.
+    expect(await db.journalEntry.count({ where: { orgId: ORG_S } })).toBe(entriesBefore);
+    expect(await stockRow()).toBe(before);
+    const tb = await trialBalance({ orgId: ORG_S, entityId: ENT_S, periodLabel: "2026-05" });
+    expect(tb.balanced).toBe(true);
+    expect(tb.differenceMinor).toBe(0n);
+    expect(tb.totalDebitMinor).toBe(tbBefore.totalDebitMinor);
+    expect(tb.totalCreditMinor).toBe(tbBefore.totalCreditMinor);
+    const v = await stockValuation({ orgId: ORG_S, entityId: ENT_S });
+    expect(v.ledger.agrees).toBe(true);
+  });
+
+  it("records the transfer once when the note is sent twice", async () => {
+    const again = await transferStock({ ...loc, sku: "BOLT", from: "MAIN", to: "SHOP", quantityMilli: 25_000, on: "2026-05-10", reference: "TN-1" });
+    expect(again.replayed).toBe(true);
+    expect(again.fromHoldsMilli).toBe("75000");
+    expect(await db.inventoryMovement.count({ where: { orgId: ORG_S, reference: "TRF/TN-1" } })).toBe(2);
+  });
+
+  it("refuses to move more than the location holds, or to move nothing anywhere", async () => {
+    await expect(transferStock({ ...loc, sku: "BOLT", from: "SHOP", to: "MAIN", quantityMilli: 999_000, on: "2026-05-11" }))
+      .rejects.toThrow(/SHOP Shop floor holds 65 EA of BOLT/);
+    await expect(transferStock({ ...loc, sku: "BOLT", from: "MAIN", to: "MAIN", quantityMilli: 1_000, on: "2026-05-11" }))
+      .rejects.toThrow(/both ends of that transfer/i);
+  });
+
+  it("refuses to close a location that still holds stock, and says what is on the shelf", async () => {
+    await expect(closeLocation({ ...loc, code: "SHOP" })).rejects.toThrow(/still holds 65 EA of BOLT/);
+    await expect(closeLocation({ ...loc, code: "SHOP" })).rejects.toThrow(/still on the balance sheet/i);
+    // Refused means refused.
+    expect((await locationList(loc)).locations.find((l) => l.code === "SHOP")!.status).toBe("active");
+  });
+
+  it("closes a location once it has been emptied, and stops stock moving through it", async () => {
+    await addLocation({ ...loc, code: "TEMP", name: "Temporary bay" });
+    await RS("BOLT", 5_000, 25_000, "2026-05-12", "TEMP");
+    await expect(closeLocation({ ...loc, code: "TEMP" })).rejects.toThrow(/still holds 5 EA of BOLT/);
+    await transferStock({ ...loc, sku: "BOLT", from: "TEMP", to: "MAIN", quantityMilli: 5_000, on: "2026-05-13" });
+    expect((await closeLocation({ ...loc, code: "TEMP" })).status).toBe("closed");
+    await expect(RS("BOLT", 1_000, 5_000, "2026-05-14", "TEMP")).rejects.toThrow(/is closed/i);
+  });
+
+  it("refuses to close the location everything lands in by default", async () => {
+    await addLocation({ ...loc, code: "SPARE", name: "Spare bay", isDefault: true });
+    // One default or none — the old one steps down as the new one takes over.
+    expect((await locationList(loc)).locations.filter((l) => l.isDefault).map((l) => l.code)).toEqual(["SPARE"]);
+    await expect(closeLocation({ ...loc, code: "SPARE" })).rejects.toThrow(/where stock lands when nobody says/i);
+    await updateLocation({ ...loc, code: "MAIN", isDefault: true });
+    expect((await locationList(loc)).locations.filter((l) => l.isDefault).map((l) => l.code)).toEqual(["MAIN"]);
+  });
+
+  it("reports stock nobody placed as unassigned rather than dropping it", async () => {
+    await updateLocation({ ...loc, code: "MAIN", isDefault: false });
+    await addItem({ ...loc, item: { sku: "WASHER", name: "Washer" } });
+    await RS("WASHER", 8_000, 16_000, "2026-05-15");
+    const v = await stockByLocation(loc);
+    const nowhere = v.locations.find((l) => !l.assigned)!;
+    expect(nowhere.code).toBeNull();
+    expect(nowhere.lines.find((l) => l.sku === "WASHER")!.quantityMilli).toBe("8000");
+    const washer = v.items.find((i) => i.sku === "WASHER")!;
+    expect(washer.unassignedMilli).toBe("8000");
+    expect(washer.locatedMilli).toBe("0");
+    // Dropping it is exactly what would make the total stop tying.
+    expect(washer.agrees).toBe(true);
+    expect(v.totals.agrees).toBe(true);
+    await updateLocation({ ...loc, code: "MAIN", isDefault: true });
+  });
+
+  it("draws stock by location at a past date from the movements", async () => {
+    // On 1 May the second delivery had not arrived, so the shop floor was empty.
+    const then = await stockByLocation({ ...loc, asOf: "2026-05-01" });
+    expect(then.asOf).toBe("2026-05-01");
+    expect(then.locations.find((l) => l.code === "MAIN")!.lines.find((l) => l.sku === "BOLT")!.quantityMilli).toBe("100000");
+    expect(then.locations.find((l) => l.code === "SHOP")!.lines.length).toBe(0);
+    expect(then.items.find((i) => i.sku === "BOLT")!.agrees).toBe(true);
+    expect(then.totals.agrees).toBe(true);
+  });
+});
+
+/* -------------------------------------------- batches, serials and expiry --- */
+
+const ORG_B = "t-org-inv-batch";
+const ENT_B = "t-ent-inv-batch";
+
+d("batches, serials and expiry", () => {
+  const ctx = { orgId: ORG_B, entityId: ENT_B };
+  const RB = (sku: string, qty: number, value: number, on: string, batch: { code: string; kind?: string; expiresOn?: string }) =>
+    receive({ ...ctx, sku, movedOn: on, quantityMilli: qty, valueMinor: value, batch });
+  const IB = (sku: string, qty: number, on: string, batch?: string) =>
+    issue({ ...ctx, sku, movedOn: on, quantityMilli: qty, batch });
+
+  beforeAll(async () => {
+    await wipe(ORG_B);
+    await openFiscalYear({ orgId: ORG_B, entityId: ENT_B, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG_B, entityId: ENT_B });
+    await addLocation({ ...ctx, code: "STORE", name: "Cold store", isDefault: true });
+    await addItem({ ...ctx, item: { sku: "PILL", name: "Perishable", uom: "EA" } });
+    await addItem({ ...ctx, item: { sku: "PUMP", name: "Serialised pump", uom: "EA" } });
+  });
+  afterAll(async () => { await wipe(ORG_B); });
+
+  it("records which batch arrived, and ties the batches to the item", async () => {
+    await RB("PILL", 100_000, 100_000, "2026-06-01", { code: "L-1", expiresOn: "2026-06-20" });
+    await RB("PILL", 50_000, 60_000, "2026-06-02", { code: "L-2", expiresOn: "2026-12-31" });
+
+    const reg = await batchRegister({ ...ctx, sku: "PILL" });
+    expect(reg.batches.map((b) => b.code)).toEqual(["L-1", "L-2"]);
+    expect(reg.batches.map((b) => b.quantityMilli)).toEqual(["100000", "50000"]);
+    expect(reg.batches.map((b) => b.location)).toEqual(["STORE", "STORE"]);
+    const tie = reg.reconciliation.items.find((r) => r.sku === "PILL")!;
+    expect(tie.itemMilli).toBe("150000");
+    expect(tie.batchMilli).toBe("150000");
+    expect(tie.differenceMilli).toBe("0");
+    expect(tie.agrees).toBe(true);
+    expect(reg.reconciliation.agrees).toBe(true);
+    // Each batch carries its share of the item's cost, and the shares add back.
+    expect(reg.batches.reduce((a, b) => a + BigInt(b.valueMinor), 0n)).toBe(160_000n);
+  });
+
+  it("refuses an issue that does not say which batch left", async () => {
+    await expect(IB("PILL", 10_000, "2026-06-05")).rejects.toThrow(/tracked by batch/i);
+    await expect(IB("PILL", 10_000, "2026-06-05")).rejects.toThrow(/recall becomes impossible to trace/i);
+    // Refused means refused: nothing moved and nothing posted.
+    const item = await db.inventoryItem.findFirstOrThrow({ where: { orgId: ORG_B, sku: "PILL" } });
+    expect(item.quantityMilli).toBe(150_000n);
+  });
+
+  it("refuses a receipt into a batch-tracked item that names no batch", async () => {
+    await expect(receive({ ...ctx, sku: "PILL", movedOn: "2026-06-05", quantityMilli: 10_000, valueMinor: 10_000 }))
+      .rejects.toThrow(/no later issue could name/i);
+  });
+
+  it("takes the batch that was named, and only that one", async () => {
+    const r = await IB("PILL", 20_000, "2026-06-06", "L-2");
+    expect(r.balanceQtyMilli).toBe("130000");
+    const reg = await batchRegister({ ...ctx, sku: "PILL" });
+    expect(reg.batches.find((b) => b.code === "L-1")!.quantityMilli).toBe("100000");
+    expect(reg.batches.find((b) => b.code === "L-2")!.quantityMilli).toBe("30000");
+    expect(reg.reconciliation.items[0].agrees).toBe(true);
+    // And the movement says which lot it was, so a recall has something to go on.
+    const h = await itemHistory({ ...ctx, sku: "PILL" });
+    expect(h.movements[h.movements.length - 1].batch).toBe("L-2");
+  });
+
+  it("refuses to take more out of a batch than it holds", async () => {
+    await expect(IB("PILL", 40_000, "2026-06-07", "L-2")).rejects.toThrow(/holds 30 EA/);
+    await expect(IB("PILL", 40_000, "2026-06-07", "L-2")).rejects.toThrow(/next batch is going out/i);
+    await expect(IB("PILL", 1_000, "2026-06-07", "L-9")).rejects.toThrow(/no batch L-9/i);
+  });
+
+  it("refuses to record one batch under two expiry dates", async () => {
+    await expect(RB("PILL", 10_000, 10_000, "2026-06-08", { code: "L-2", expiresOn: "2027-01-31" }))
+      .rejects.toThrow(/already expires on 2026-12-31/);
+  });
+
+  it("will not split a serial number, or hang two things off one", async () => {
+    await RB("PUMP", 1_000, 250_000, "2026-06-03", { code: "SN-001", kind: "SERIAL" });
+    await expect(RB("PUMP", 2_000, 500_000, "2026-06-04", { code: "SN-002", kind: "SERIAL" }))
+      .rejects.toThrow(/cannot be split/i);
+    await expect(RB("PUMP", 1_000, 250_000, "2026-06-04", { code: "SN-001", kind: "SERIAL" }))
+      .rejects.toThrow(/already on the shelf/i);
+    // What a code is was settled the first time it was seen.
+    await expect(RB("PUMP", 5_000, 10_000, "2026-06-04", { code: "SN-001", kind: "BATCH" }))
+      .rejects.toThrow(/One code cannot be both/i);
+    // Half a serial number identifies half a thing, which is nothing.
+    await expect(IB("PUMP", 500, "2026-06-05", "SN-001")).rejects.toThrow(/goes whole or not at all/i);
+
+    const out = await IB("PUMP", 1_000, "2026-06-06", "SN-001");
+    expect(out.balanceQtyMilli).toBe("0");
+    const reg = await batchRegister({ ...ctx, sku: "PUMP" });
+    expect(reg.batches.map((b) => b.code)).toEqual(["SN-001"]);
+    expect(reg.batches[0].kind).toBe("SERIAL");
+    expect(reg.batches[0].status).toBe("consumed");
+    expect(reg.reconciliation.items[0].agrees).toBe(true);
+  });
+
+  it("reports what has gone off apart from what is about to", async () => {
+    const near = await expiringStock({ ...ctx, within: 30, asOf: "2026-06-25" });
+    expect(near.expired.map((b) => b.code)).toEqual(["L-1"]);
+    expect(near.expired[0].daysToExpiry).toBe(-5);
+    expect(near.expiring.map((b) => b.code)).toEqual([]);
+    expect(BigInt(near.totals.expiredValueMinor)).toBeGreaterThan(0n);
+
+    const wide = await expiringStock({ ...ctx, within: 400, asOf: "2026-06-25" });
+    expect(wide.expiring.map((b) => b.code)).toEqual(["L-2"]);
+    expect(wide.horizon).toBe("2027-07-30");
+  });
+
+  it("quarantines expired stock without saying anything about what it is worth", async () => {
+    const before = await db.journalEntry.count({ where: { orgId: ORG_B } });
+    const q = await sweepExpired({ ...ctx, on: "2026-06-25", action: "quarantine" });
+    expect(q.swept.map((s) => s.code)).toEqual(["L-1"]);
+    expect(q.totals.valueMinor).toBe("0");
+    // Quarantine is a decision about sale, not about value, so it posts nothing.
+    expect(await db.journalEntry.count({ where: { orgId: ORG_B } })).toBe(before);
+    await expect(IB("PILL", 1_000, "2026-06-26", "L-1")).rejects.toThrow(/quarantined/i);
+  });
+
+  it("writes expired stock off through the ledger, because it is worth nothing", async () => {
+    const w = await sweepExpired({ ...ctx, on: "2026-06-27", action: "write_off" });
+    expect(w.swept.length).toBe(1);
+    const swept = w.swept[0];
+    expect(swept.code).toBe("L-1");
+    expect(swept.status).toBe("expired");
+    // 100 of the 130 on hand, at the 1,066.66… weighted average behind them.
+    expect(w.totals.valueMinor).toBe("106666");
+    // To stock variance, not to cost of sales: a business that cannot see what
+    // it threw away cannot stop throwing it away.
+    expect(await linesOf(swept.entryId!)).toEqual({ "5300": 106_666n, "1200": -106_666n });
+
+    const item = await db.inventoryItem.findFirstOrThrow({ where: { orgId: ORG_B, sku: "PILL" } });
+    expect(item.quantityMilli).toBe(30_000n);
+    expect(item.valueMinor).toBe(32_001n);
+    const reg = await batchRegister({ ...ctx, sku: "PILL" });
+    expect(reg.batches.find((b) => b.code === "L-1")!.status).toBe("expired");
+    expect(reg.batches.find((b) => b.code === "L-1")!.quantityMilli).toBe("0");
+    // The register still ties to the item after the sweep.
+    expect(reg.reconciliation.items[0].batchMilli).toBe("30000");
+    expect(reg.reconciliation.agrees).toBe(true);
+  });
+
+  it("does not write the same batch off twice, and still ties to the ledger", async () => {
+    const entries = await db.journalEntry.count({ where: { orgId: ORG_B } });
+    const again = await sweepExpired({ ...ctx, on: "2026-06-27", action: "write_off" });
+    expect(again.swept.length).toBe(0);
+    expect(await db.journalEntry.count({ where: { orgId: ORG_B } })).toBe(entries);
+
+    const v = await stockValuation(ctx);
+    expect(v.ledger.agrees).toBe(true);
+    expect(v.ledger.differenceMinor).toBe("0");
+    const tb = await trialBalance({ orgId: ORG_B, entityId: ENT_B, periodLabel: "2026-06" });
+    expect(tb.balanced).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------ reorder levels */
+
+const ORG_O = "t-org-inv-reorder";
+const ENT_O = "t-ent-inv-reorder";
+
+d("reorder levels", () => {
+  const ctx = { orgId: ORG_O, entityId: ENT_O };
+
+  beforeAll(async () => {
+    await wipe(ORG_O);
+    await openFiscalYear({ orgId: ORG_O, entityId: ENT_O, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG_O, entityId: ENT_O });
+    for (const [sku, name] of [["SCREW", "Screw"], ["GLUE", "Glue"], ["PAINT", "Paint"], ["TAPE", "Tape"]]) {
+      await addItem({ ...ctx, item: { sku, name } });
+    }
+    await receive({ ...ctx, sku: "SCREW", movedOn: "2026-07-01", quantityMilli: 40_000, valueMinor: 40_000 });
+    await receive({ ...ctx, sku: "PAINT", movedOn: "2026-07-01", quantityMilli: 5_000, valueMinor: 50_000 });
+    await receive({ ...ctx, sku: "TAPE", movedOn: "2026-07-01", quantityMilli: 200_000, valueMinor: 100_000 });
+    // GLUE is deliberately never received: it stands at nothing.
+    await setReorderLevel({ ...ctx, sku: "SCREW", reorderLevelMilli: 50_000 });
+    await setReorderLevel({ ...ctx, sku: "GLUE", reorderLevelMilli: 0 });
+    await setReorderLevel({ ...ctx, sku: "TAPE", reorderLevelMilli: 50_000 });
+    // PAINT is deliberately left without a level.
+
+    const order = await createOrder({
+      ...ctx,
+      order: {
+        number: "PO-500", supplierName: "Fasteners LLC", orderedOn: "2026-07-02", expectedOn: "2026-07-20",
+        lines: [{ description: "Screws", sku: "SCREW", quantityMilli: 100_000, unitPriceMinor: 100 }],
+      },
+    });
+    await issueOrder({ orgId: ORG_O, orderId: order.id });
+  });
+  afterAll(async () => { await wipe(ORG_O); await db.$disconnect(); });
+
+  it("keeps a nil level and a level of nothing apart, all the way to the report", async () => {
+    const r = await belowReorderLevel(ctx);
+    const skus = r.items.map((i) => i.sku);
+    expect(skus).toContain("SCREW");
+    // A level of nothing means "tell me the moment it runs out", and GLUE has.
+    expect(skus).toContain("GLUE");
+    // Nobody has set a level for PAINT, so it is not below one — and it is not
+    // fine either, which is why it is reported rather than left out.
+    expect(skus).not.toContain("PAINT");
+    expect(r.unmonitored.map((i) => i.sku)).toEqual(["PAINT"]);
+    // TAPE has a level and is comfortably above it.
+    expect(skus).not.toContain("TAPE");
+    expect(r.monitored).toBe(3);
+
+    const glue = r.items.find((i) => i.sku === "GLUE")!;
+    expect(glue.reorderLevelMilli).toBe("0");
+    expect(glue.shortfallMilli).toBe("0");
+    expect(glue.atLevel).toBe(true);
+    expect(glue.covered).toBe(false);
+  });
+
+  it("says what is already on order without pretending it is on the shelf", async () => {
+    const r = await belowReorderLevel(ctx);
+    const screw = r.items.find((i) => i.sku === "SCREW")!;
+    expect(screw.quantityMilli).toBe("40000");
+    expect(screw.reorderLevelMilli).toBe("50000");
+    expect(screw.shortfallMilli).toBe("10000");
+    // Read off procurement's own idea of what is still outstanding.
+    expect(screw.onOrderMilli).toBe("100000");
+    expect(screw.orders.map((o) => o.number)).toEqual(["PO-500"]);
+    expect(screw.orders[0].expectedOn).toBe("2026-07-20");
+    // Still below its level: goods on a lorry are not goods on a shelf.
+    expect(screw.covered).toBe(true);
+    expect(r.totals.below).toBe(2);
+    expect(r.totals.covered).toBe(1);
+  });
+
+  it("clears a level rather than reading an empty field as nothing", async () => {
+    const cleared = await setReorderLevel({ ...ctx, sku: "GLUE", reorderLevelMilli: null });
+    expect(cleared.reorderLevelMilli).toBeNull();
+    expect(cleared.monitored).toBe(false);
+    const r = await belowReorderLevel(ctx);
+    expect(r.items.map((i) => i.sku)).not.toContain("GLUE");
+    expect(r.unmonitored.map((i) => i.sku).sort()).toEqual(["GLUE", "PAINT"]);
+    expect(r.monitored).toBe(2);
+    await expect(setReorderLevel({ ...ctx, sku: "GLUE", reorderLevelMilli: -1 })).rejects.toThrow(/cannot be negative/i);
   });
 });

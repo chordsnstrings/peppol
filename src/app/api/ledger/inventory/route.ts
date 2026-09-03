@@ -4,17 +4,39 @@ import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
 import {
   addItem, receive, issue, adjust, assessNrv, setCostMethod, stockValuation, itemHistory,
+  addLocation, updateLocation, closeLocation, locationList, stockByLocation, transferStock,
+  batchRegister, expiringStock, sweepExpired, belowReorderLevel, setReorderLevel, setDefaultLocation,
 } from "@/lib/server/ledger/inventory";
 
 export const runtime = "nodejs";
 
-/** The stock valuation, or one item's movement history. */
+/**
+ * The stock valuation, one item's movement history, or the stocking picture —
+ * where the goods are, which lots they are in, what is about to go off and what
+ * needs ordering.
+ *
+ * The stocking reads come back together because the screen shows them together
+ * and four round trips to draw one page is four chances for the four halves of
+ * it to disagree about what "now" means.
+ */
 export async function GET(req: Request) {
   try {
     const { orgId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+
+    if (url.searchParams.get("view") === "stocking") {
+      const within = Number(url.searchParams.get("within") ?? 30);
+      const [locations, byLocation, batches, expiring, reorder] = await Promise.all([
+        locationList({ orgId, entityId }),
+        stockByLocation({ orgId, entityId }),
+        batchRegister({ orgId, entityId }),
+        expiringStock({ orgId, entityId, within: Number.isInteger(within) && within >= 0 ? within : 30 }),
+        belowReorderLevel({ orgId, entityId }),
+      ]);
+      return json({ ...locations, byLocation, ...batches, expiring, reorder });
+    }
 
     const sku = url.searchParams.get("sku");
     if (sku) return json(await itemHistory({ orgId, entityId, sku }));
@@ -25,13 +47,20 @@ export async function GET(req: Request) {
   }
 }
 
-/** Add an item, move stock, assess its net realisable value, or change how it is costed. */
+/**
+ * Add an item, move stock, transfer it between locations, assess its net
+ * realisable value, sweep what has expired, or change how it is costed and when
+ * it is reordered.
+ */
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
-      action?: "add" | "receive" | "issue" | "count" | "nrv" | "method";
+      action?:
+        | "add" | "receive" | "issue" | "count" | "nrv" | "method"
+        | "add-location" | "update-location" | "close-location" | "default-location"
+        | "transfer" | "reorder" | "sweep";
       entityId?: string;
       sku?: string;
       name?: string;
@@ -46,6 +75,21 @@ export async function POST(req: Request) {
       contraAccount?: string;
       reference?: string;
       memo?: string;
+      /** Where the stock moved, and which lot it was. */
+      location?: string;
+      batch?: string;
+      batchKind?: string;
+      expiresOn?: string | null;
+      /** A location's own fields. */
+      code?: string;
+      address?: string;
+      isDefault?: boolean;
+      /** A transfer's two ends. */
+      from?: string;
+      to?: string;
+      /** Thousandths, or null to say nobody has set a level. */
+      reorderLevelMilli?: number | string | null;
+      sweepAction?: "quarantine" | "write_off";
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
 
@@ -66,7 +110,10 @@ export async function POST(req: Request) {
         return json(await receive({
           orgId, entityId: b.entityId, sku: b.sku, movedOn: b.movedOn,
           quantityMilli: b.quantityMilli, valueMinor: b.valueMinor,
-          contraAccount: b.contraAccount, reference: b.reference, memo: b.memo, actorId: userId,
+          contraAccount: b.contraAccount, reference: b.reference, memo: b.memo,
+          location: b.location,
+          batch: b.batch?.trim() ? { code: b.batch, kind: b.batchKind, expiresOn: b.expiresOn } : undefined,
+          actorId: userId,
         }));
 
       case "issue":
@@ -75,7 +122,8 @@ export async function POST(req: Request) {
         }
         return json(await issue({
           orgId, entityId: b.entityId, sku: b.sku, movedOn: b.movedOn,
-          quantityMilli: b.quantityMilli, reference: b.reference, memo: b.memo, actorId: userId,
+          quantityMilli: b.quantityMilli, reference: b.reference, memo: b.memo,
+          location: b.location, batch: b.batch, actorId: userId,
         }));
 
       case "count":
@@ -84,7 +132,18 @@ export async function POST(req: Request) {
         }
         return json(await adjust({
           orgId, entityId: b.entityId, sku: b.sku, movedOn: b.movedOn,
-          countedMilli: b.countedMilli, reference: b.reference, reason: b.memo, actorId: userId,
+          countedMilli: b.countedMilli, reference: b.reference, reason: b.memo,
+          location: b.location, batch: b.batch, actorId: userId,
+        }));
+
+      case "transfer":
+        if (!b.sku || !b.from || !b.to || b.quantityMilli === undefined || !b.movedOn) {
+          return json({ error: "A transfer needs an item, where it left, where it went, a quantity and a date." }, 400);
+        }
+        return json(await transferStock({
+          orgId, entityId: b.entityId, sku: b.sku, from: b.from, to: b.to,
+          quantityMilli: b.quantityMilli, on: b.movedOn,
+          batch: b.batch, reference: b.reference, memo: b.memo, actorId: userId,
         }));
 
       case "nrv":
@@ -102,6 +161,51 @@ export async function POST(req: Request) {
       case "method":
         if (!b.sku || !b.costMethod) return json({ error: "Say which item, and which cost method." }, 400);
         return json(await setCostMethod({ orgId, entityId: b.entityId, sku: b.sku, costMethod: b.costMethod }));
+
+      case "add-location":
+        if (!b.code || !b.name) return json({ error: "A location needs a code and a name." }, 400);
+        return json({
+          location: await addLocation({
+            orgId, entityId: b.entityId, code: b.code, name: b.name,
+            nameAr: b.nameAr, address: b.address, isDefault: b.isDefault,
+          }),
+        });
+
+      case "update-location":
+        if (!b.code) return json({ error: "Say which location." }, 400);
+        return json({
+          location: await updateLocation({
+            orgId, entityId: b.entityId, code: b.code,
+            name: b.name, nameAr: b.nameAr, address: b.address, isDefault: b.isDefault,
+          }),
+        });
+
+      case "close-location":
+        if (!b.code) return json({ error: "Say which location." }, 400);
+        return json({ location: await closeLocation({ orgId, entityId: b.entityId, code: b.code }) });
+
+      case "default-location":
+        if (!b.sku) return json({ error: "Say which item." }, 400);
+        return json(await setDefaultLocation({
+          orgId, entityId: b.entityId, sku: b.sku, location: b.location ?? null,
+        }));
+
+      case "reorder":
+        // Undefined is not nil: leaving the field out is a request with nothing
+        // in it, whereas an explicit null says nobody is watching this item.
+        if (!b.sku || b.reorderLevelMilli === undefined) {
+          return json({ error: "A reorder level needs an item and a level — or an explicit nil to clear it." }, 400);
+        }
+        return json(await setReorderLevel({
+          orgId, entityId: b.entityId, sku: b.sku, reorderLevelMilli: b.reorderLevelMilli,
+        }));
+
+      case "sweep":
+        if (!b.movedOn) return json({ error: "A sweep needs the date it was made." }, 400);
+        return json(await sweepExpired({
+          orgId, entityId: b.entityId, on: b.movedOn,
+          action: b.sweepAction ?? "quarantine", reason: b.memo, actorId: userId,
+        }));
 
       default:
         return json({ error: "Unknown action." }, 400);
