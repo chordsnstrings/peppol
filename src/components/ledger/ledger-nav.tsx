@@ -121,6 +121,7 @@ export const LEDGER_NAV: NavGroup[] = [
     label: "Tax and close",
     items: [
       { href: "/accounting/vat", label: "VAT return" },
+      { href: "/accounting/vat-schemes", label: "VAT schemes" },
       { href: "/accounting/corporate-tax", label: "Corporate tax" },
       { href: "/accounting/deferred-tax", label: "Deferred tax" },
       { href: "/accounting/month-end", label: "Month end" },
