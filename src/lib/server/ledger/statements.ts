@@ -126,7 +126,15 @@ async function balances(opts: {
       where: {
         orgId: opts.orgId,
         entry: {
-          entityId: opts.entityId, bookId: book.id, status: "posted",
+          entityId: opts.entityId, bookId: book.id,
+          // A reversed entry's lines are real postings that happened; the
+          // separate reversing entry is what offsets them. Counting only
+          // "posted" drops the original while keeping the reversal, so a
+          // statement cut mid-period comes out wrong by the reversal — and in
+          // the wrong direction, since only the offsetting half survives. The
+          // balance cache counts both, so this has to as well or the two paths
+          // disagree about the same month.
+          status: { in: ["posted", "reversed"] },
           periodId: { in: partial.map((p) => p.id) },
           entryDate: { lte: opts.to, ...(opts.from ? { gte: opts.from } : {}) },
         },

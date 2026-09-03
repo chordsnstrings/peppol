@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { post } from "@/lib/server/ledger/post";
+import { post, reverse } from "@/lib/server/ledger/post";
 import { profitAndLoss, balanceSheet } from "@/lib/server/ledger/statements";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 
@@ -147,6 +147,31 @@ d("financial statements", () => {
   it("excludes a posting that falls just after the cut-off", async () => {
     const pl = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: "2026-03-14" });
     expect(pl.expenses.totalMinor).toBe("0");
+  });
+
+  it("treats a reversed entry and its reversal consistently mid-period", async () => {
+    // A reversed entry's lines are real postings that happened; the separate
+    // reversing entry offsets them. Counting only "posted" would drop the
+    // original while keeping the reversal, so a statement cut mid-period would
+    // be wrong by exactly the reversal — and in the wrong direction, since only
+    // the offsetting half survived.
+    // The cut-off has to fall INSIDE the period, or the read takes the cached
+    // path where both halves are already netted and the bug cannot show.
+    const CUT = "2026-03-25";
+    const before = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: CUT });
+
+    const e = await P("2026-03-20", [{ account: "6900", debit: 77_000 }, { account: "1010", credit: 77_000 }], "Booked in error");
+    const withEntry = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: CUT });
+    expect(BigInt(withEntry.expenses.totalMinor) - BigInt(before.expenses.totalMinor)).toBe(77_000n);
+
+    await reverse({ orgId: ORG, entryId: e.id, entryDate: "2026-03-21", memo: "Reversing" });
+    const after = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: CUT });
+    // Back to where it started: the pair nets to nothing.
+    expect(after.expenses.totalMinor).toBe(before.expenses.totalMinor);
+
+    // And the balance sheet, read at the same mid-period date, still balances.
+    const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: CUT });
+    expect(bs.balanced).toBe(true);
   });
 
   it("refuses a period that ends before it starts", async () => {
