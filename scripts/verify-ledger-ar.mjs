@@ -103,12 +103,66 @@ const tbAr = r.body?.rows?.find(x => x.code === '1100');
 check('the receivable control account nets to zero', tbAr === undefined || tbAr.balanceMinor === '0', `balance ${tbAr?.balanceMinor ?? 'absent'}`);
 check('and the trial balance still ties', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
 
+console.log('\nPAYABLES — THE BUYER SIDE');
+const billId = 'bill-' + Date.now();
+const bill = {
+  id: billId, entityId: ENT, direction: 'INBOUND', docType: 'TAX_INVOICE',
+  number: 'SUP-9001', issueDate: '2026-02-10', supplyDate: '2026-02-10', currency: 'AED',
+  buyer: { nameEn: 'AR Test LLC' }, seller: { nameEn: 'Gulf Supplies LLC', trn: '100000000000011' },
+  lines: [
+    { id: 'b1', lineNo: 1, description: 'Office rent', qty: 1, unitCode: 'C62', unitPriceMinor: 300000,
+      taxProfileCode: 'STANDARD_5', lineNetMinor: 300000, lineVatMinor: 15000 },
+    { id: 'b2', lineNo: 2, description: 'Overseas consultancy', qty: 1, unitCode: 'C62', unitPriceMinor: 100000,
+      taxProfileCode: 'REVERSE_CHARGE', lineNetMinor: 100000, lineVatMinor: 0 },
+  ],
+  totals: { taxExclusiveMinor: 400000, vatMinor: 15000, taxInclusiveMinor: 415000, payableMinor: 415000, perCategory: [] },
+  lifecycleStatus: 'SENT', exchangeStatus: 'NOT_SENT', reportingStatusC2: 'NOT_REPORTED',
+  source: 'INGEST', compliance: { taxableEventDate: '2026-02-10', daysRemaining: 14, breached: false },
+  createdAt: '2026-02-10T00:00:00Z', updatedAt: '2026-02-10T00:00:00Z',
+};
+r = await call('POST', '/api/store/invoices', bill);
+check('supplier bill saved', r.status === 200, `HTTP ${r.status}`);
+
+r = await call('POST', '/api/ledger/ap/post', { billId, coding: { b1: '6100' } });
+check('bill posts to the ledger', r.status === 200 && r.body?.alreadyPosted === false, r.body?.reference ?? JSON.stringify(r.body).slice(0, 90));
+check('reverse charge is self-accounted at 5%', r.body?.reverseChargeMinor === '5000', `${r.body?.reverseChargeMinor} fils`);
+
+r = await call('POST', '/api/ledger/ap/post', { billId });
+check('posting the same bill again is a no-op', r.body?.alreadyPosted === true, r.body?.reference);
+
+r = await call('GET', `/api/ledger/accounts/6100?entityId=${ENT}`);
+check('the coded line lands in rent, not in a suspense account', r.body?.lines?.[0]?.debitMinor === '300000', `dr ${r.body?.lines?.[0]?.debitMinor}`);
+
+r = await call('GET', `/api/ledger/accounts/2100?entityId=${ENT}`);
+const outputVat = (r.body?.lines ?? []).reduce((a, l) => a + BigInt(l.creditMinor) - BigInt(l.debitMinor), 0n);
+check('self-accounted VAT reaches the output box', outputVat === 15000n, `output VAT ${outputVat} (10,000 on sales + 5,000 reverse charge)`);
+
+r = await call('GET', `/api/ledger/accounts/1350?entityId=${ENT}`);
+const inputVat = (r.body?.lines ?? []).reduce((a, l) => a + BigInt(l.debitMinor) - BigInt(l.creditMinor), 0n);
+check('and the same amount is reclaimable as input VAT', inputVat === 20000n, `input VAT ${inputVat} (15,000 charged + 5,000 reclaimed)`);
+
+r = await call('GET', `/api/ledger/ap/ageing?entityId=${ENT}&asOf=2026-03-01`);
+check('the bill shows as owed, reported positive', r.body?.totalMinor === '415000', `total ${r.body?.totalMinor}`);
+
+r = await call('POST', '/api/ledger/ap/post', { billId, kind: 'payment', paymentId: 'sp-1', paidOn: '2026-02-28', bankAmountMinor: 415000 });
+check('the supplier payment posts', r.status === 200, r.body?.reference ?? JSON.stringify(r.body).slice(0,80));
+
+r = await call('GET', `/api/ledger/ap/ageing?entityId=${ENT}&asOf=2026-03-01`);
+check('a paid bill leaves the payables report', r.body?.totalMinor === '0' && r.body?.open?.length === 0, `total ${r.body?.totalMinor}`);
+
+r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
+check('the trial balance ties across both subledgers', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';
 r = await call('POST', '/api/auth/register', { name: 'Other', email: other, password: 'test-password-123', orgName: 'Other LLC', locale: 'en' });
 r = await call('POST', '/api/ledger/ar/post', { invoiceId: invId });
 check("another tenant cannot post someone else's invoice", r.status === 404, `HTTP ${r.status}`);
+r = await call('POST', '/api/ledger/ap/post', { billId });
+check("another tenant cannot post someone else's bill", r.status === 404, `HTTP ${r.status}`);
+r = await call('GET', `/api/ledger/ap/ageing?entityId=${ENT}`);
+check("another tenant sees nothing in this entity's payables", r.status !== 200 || r.body?.totalMinor === '0', `HTTP ${r.status} total ${r.body?.totalMinor}`);
 cookie = keep;
 
 console.log(`\n${pass} passed, ${fail} failed`);
