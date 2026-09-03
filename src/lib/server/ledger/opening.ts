@@ -32,6 +32,13 @@ export interface OpeningLine {
   creditMinor?: number | bigint | string;
   /** Create the account if the chart does not have it. */
   createIfMissing?: { name: string; nameAr?: string; type: string; subtype?: string };
+  /**
+   * The account name as it appeared in the paste. Carried so the preview can
+   * show which account a row meant when the code is not in the chart; it is
+   * never used to create one, because creating an account also needs a type
+   * and a paste box has no way to ask for it.
+   */
+  pastedName?: string;
 }
 
 export interface OpeningPreview {
@@ -141,11 +148,14 @@ export async function previewOpeningBalances(opts: {
 
     return {
       accountCode: code,
-      accountName: account?.name ?? l.createIfMissing?.name ?? null,
+      accountName: account?.name ?? l.createIfMissing?.name ?? l.pastedName ?? null,
       debitMinor: debit.toString(),
       creditMinor: credit.toString(),
       exists: Boolean(account),
-      postable: account ? account.isPostable && account.status === "active" : true,
+      // An account that does not exist is not postable. Reporting true because
+      // it might be created later makes the preview say the paste will work
+      // when it will not.
+      postable: account ? account.isPostable && account.status === "active" : Boolean(l.createIfMissing),
       problem,
     };
   });
@@ -406,13 +416,17 @@ export function parseTrialBalance(text: string): {
     }
 
     if (debit === 0n && credit === 0n) return; // nothing to carry over
+    // The pasted name column is deliberately not turned into a createIfMissing
+    // here. Creating an account needs a type as well as a name, and a paste
+    // box has no way to ask for one — guessing it from the code would invent
+    // the single fact that decides which statement the balance appears in. So
+    // an unknown code is reported as unknown, and the name is carried only so
+    // the preview can show which account the paste meant.
     lines.push({
       accountCode: code,
       debitMinor: debit.toString(),
       creditMinor: credit.toString(),
-      ...(iName >= 0 && c[iName]
-        ? { createIfMissing: undefined }
-        : {}),
+      ...(iName >= 0 && c[iName] ? { pastedName: c[iName].trim() } : {}),
     });
   });
 

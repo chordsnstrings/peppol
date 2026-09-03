@@ -422,6 +422,77 @@ try {
     (focused.outline !== "none" || (focused.shadow && focused.shadow !== "none")),
     focused ? `${focused.tag} outline=${focused.outline}` : "nothing took focus");
 
+  console.log("\nACCESSIBLE NAMES");
+  // Every control a person can type into has to be announced as something. A
+  // form field with no accessible name is read out as "edit text" and nothing
+  // else, which on a screen full of amounts is indistinguishable from every
+  // other field on it. Checked in the browser rather than by grepping, because
+  // a name can come from four different places and only the browser resolves
+  // all of them.
+  const unnamed = [];
+  for (const href of [...seen]) {
+    await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(500);
+    const bad = await page.evaluate(() => {
+      const named = (el) => {
+        if (el.getAttribute("aria-label")?.trim()) return true;
+        const by = el.getAttribute("aria-labelledby");
+        if (by && by.split(/\s+/).some((id) => document.getElementById(id)?.textContent?.trim())) return true;
+        if (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)) return true;
+        if (el.closest("label")?.textContent?.trim()) return true;
+        if (el.getAttribute("title")?.trim()) return true;
+        // A checkbox inside a table cell whose row header names it is a
+        // judgement call; everything else is not.
+        return false;
+      };
+      return [...document.querySelectorAll("input:not([type=hidden]), select, textarea")]
+        .filter((el) => !named(el))
+        .map((el) => `${el.tagName.toLowerCase()}${el.type ? `[${el.type}]` : ""}${el.placeholder ? ` "${el.placeholder}"` : ""}`);
+    });
+    if (bad.length) unnamed.push(`${href}: ${bad.slice(0, 3).join(", ")}`);
+  }
+  check("every form control has an accessible name", unnamed.length === 0,
+    unnamed.length ? unnamed.slice(0, 4).join(" | ") : `${seen.size} screens checked`);
+
+  console.log("\nFIGURES");
+  // Two rules the whole ledger typography rests on, checked on real rendered
+  // pages rather than asserted in a stylesheet nobody re-reads:
+  //
+  //   a figure is right-aligned and set in tabular figures, so a column of
+  //   amounts lines up digit under digit and the eye can compare them;
+  //
+  //   a negative is written in parentheses, never with a minus sign. A minus
+  //   is a hyphen at small sizes and disappears; parentheses cannot be missed
+  //   and are what every set of accounts has used for a century.
+  const misaligned = [];
+  const minuses = [];
+  for (const href of [...seen]) {
+    await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(400);
+    const found = await page.evaluate(() => {
+      const cells = [...document.querySelectorAll("td.sw-num, th.sw-num")];
+      const wrong = [];
+      const signed = [];
+      for (const c of cells) {
+        const s = getComputedStyle(c);
+        const align = s.textAlign;
+        const figures = s.fontVariantNumeric || "";
+        if (align !== "right" && align !== "end") wrong.push(`align=${align}`);
+        else if (!/tabular-nums/.test(figures)) wrong.push(`figures=${figures || "none"}`);
+        const text = (c.textContent ?? "").trim();
+        // An en dash is the statement convention for a nil, not a minus.
+        if (/^-\s*[\d(]/.test(text) || /[\d)]\s*-$/.test(text)) signed.push(text.slice(0, 24));
+      }
+      return { wrong: wrong.slice(0, 3), signed: signed.slice(0, 3), count: cells.length };
+    });
+    if (found.wrong.length) misaligned.push(`${href}: ${found.wrong.join(", ")}`);
+    if (found.signed.length) minuses.push(`${href}: ${found.signed.join(", ")}`);
+  }
+  check("every figure is right-aligned in tabular numerals", misaligned.length === 0,
+    misaligned.length ? misaligned.slice(0, 3).join(" | ") : `${seen.size} screens checked`);
+  check("a negative is written in parentheses, never with a minus sign", minuses.length === 0,
+    minuses.length ? minuses.slice(0, 3).join(" | ") : "no minus signs on any figure");
+
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${B}/accounting/trial-balance`, { waitUntil: "domcontentloaded" });

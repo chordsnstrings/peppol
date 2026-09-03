@@ -228,6 +228,19 @@
 .sw-col-debit { box-shadow: inset 0 -2px 0 var(--sw-debit); }
 .sw-col-credit { box-shadow: inset 0 -2px 0 var(--sw-credit); }
 
+/* A figure column's heading has to sit over its digits.
+   `.sw-table thead th` and `.sw-table tbody th` both set `text-align: start`
+   and both outrank a bare `.sw-num`, so the heading of an amount column was
+   left-aligned above a right-aligned column of figures — the one alignment
+   mistake a ledger cannot afford, because the eye reads down the column from
+   the heading. Stated at matching specificity rather than with !important, so
+   the next rule can still win on merit. */
+.sw-table thead th.sw-num,
+.sw-table tbody th.sw-num,
+.sw-table tfoot th.sw-num {
+  text-align: end;
+}
+
 .sw-num {
   text-align: end;
   font-variant-numeric: tabular-nums;

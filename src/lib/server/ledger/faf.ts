@@ -4,6 +4,7 @@ import { exponentOf } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { profitAndLoss } from "./statements";
 import type { Entity, Invoice } from "@/lib/domain/types";
+import { csvField, csvRow, parseCsv } from "./csv";
 
 /**
  * The FTA Audit File (FAF), produced from the general ledger.
@@ -155,39 +156,7 @@ export interface FtaAuditFile {
 /* ------------------------------------------------------------------- CSV io */
 
 /** RFC 4180 quoting. A supplier called `Al Marri, Sons & Co "Trading"` must survive. */
-function csvField(v: string): string {
-  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-}
-const csvRow = (cells: string[]) => cells.map(csvField).join(",");
 
-/**
- * Read the generated file back. This exists so the footers can be checked
- * against the rows the file actually contains rather than against the variables
- * that were meant to produce them — a quoting bug that split one field into two
- * would otherwise pass every in-memory assertion.
- */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (quoted) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else quoted = false;
-      } else field += c;
-      continue;
-    }
-    if (c === '"') { quoted = true; continue; }
-    if (c === ",") { row.push(field); field = ""; continue; }
-    if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; continue; }
-    if (c === "\r") continue;
-    field += c;
-  }
-  if (field !== "" || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
 
 /** Minor units as the plain decimal the file carries: no grouping, no parentheses. */
 function decimal(minor: bigint, currency: string): string {
