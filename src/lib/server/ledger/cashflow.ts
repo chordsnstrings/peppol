@@ -107,6 +107,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "2260": "operating_noncash", // untaken leave provision
 
   // Working capital. IAS 7.20(c).
+  "1060": "operating_working_capital", // cheques in hand, post-dated — not cash
   "1100": "operating_working_capital", // trade receivables
   "1200": "operating_working_capital", // inventory
   "1250": "operating_working_capital", // goods received not invoiced
@@ -119,6 +120,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "1400": "operating_working_capital", // employee advances
   "2000": "operating_working_capital", // trade payables
   "2050": "operating_working_capital", // accrued expenses
+  "2060": "operating_working_capital", // cheques issued, not yet presented
   "2100": "operating_working_capital", // VAT output
   "2110": "operating_working_capital", // VAT payable to FTA
   "2200": "operating_working_capital", // salaries payable

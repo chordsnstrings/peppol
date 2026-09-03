@@ -295,3 +295,42 @@ describe("the classification map against the chart", () => {
     expect(wrong).toEqual([]);
   });
 });
+
+describe("what counts as cash", () => {
+  it("keeps post-dated cheques out of cash and cash equivalents", async () => {
+    // A cheque dated ninety days out is a promise, not money. IAS 7.7 wants an
+    // insignificant risk of a change in value and a post-dated cheque is
+    // nothing but that risk — it can bounce, and the whole cheque subledger
+    // exists because it can. Three modules keep their own cash list, and if
+    // any of them ever picks 1060 up the balance sheet will quietly start
+    // reporting paper as cash again.
+    const forecast = await import("@/lib/server/ledger/forecast");
+    const equity = await import("@/lib/server/ledger/equity");
+    const src = [
+      await import("node:fs").then((fs) =>
+        ["cashflow", "forecast", "equity"].map((m) =>
+          fs.readFileSync(`src/lib/server/ledger/${m}.ts`, "utf8"),
+        ),
+      ),
+    ].flat();
+
+    expect(CASH_CODES).not.toContain("1060");
+    for (const text of src) {
+      const line = text.split("\n").find((l) => l.includes("CASH_CODES") && l.includes("1000"));
+      expect(line, "each module states its own cash list on one line").toBeTruthy();
+      expect(line).not.toContain("1060");
+    }
+    // The imports are what make the failure land here rather than at runtime:
+    // a module that stops existing should break this test, not a screen.
+    expect(typeof forecast).toBe("object");
+    expect(typeof equity).toBe("object");
+  });
+
+  it("classifies both cheque accounts as operating working capital", () => {
+    // Taking a cheque moves a receivable to paper and clearing it moves the
+    // paper to the bank. Every step of that is the operating cycle; none of it
+    // is investing or financing.
+    expect(CLASSIFICATION["1060"]).toBe("operating_working_capital");
+    expect(CLASSIFICATION["2060"]).toBe("operating_working_capital");
+  });
+});

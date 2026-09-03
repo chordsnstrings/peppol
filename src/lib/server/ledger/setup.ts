@@ -34,6 +34,12 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "1010", name: "Bank — current account", nameAr: "البنك — الحساب الجاري", type: "ASSET", parent: "10", subtype: "BANK" },
   { code: "1020", name: "Bank — savings account", nameAr: "البنك — حساب التوفير", type: "ASSET", parent: "10", subtype: "BANK" },
   { code: "1050", name: "Undeposited funds", nameAr: "أموال غير مودعة", type: "ASSET", parent: "10", subtype: "CASH" },
+  // A post-dated cheque is not cash and is deliberately not a CASH subtype. It
+  // is a promise with a date on it, and IAS 7 asks for cash equivalents to be
+  // readily convertible to a known amount of cash — a ninety-day cheque is
+  // neither ready nor certain. Keeping it in 1050 would report it as cash,
+  // which is precisely the error the cheque subledger exists to prevent.
+  { code: "1060", name: "Cheques in hand (post-dated)", nameAr: "شيكات برسم التحصيل", type: "ASSET", parent: "10" },
   { code: "1100", name: "Trade receivables", nameAr: "الذمم المدينة التجارية", type: "ASSET", parent: "10", subtype: "AR", isControl: true },
   { code: "1150", name: "Allowance for doubtful debts", nameAr: "مخصص الديون المشكوك فيها", type: "ASSET", parent: "10" },
   { code: "1200", name: "Inventory", nameAr: "المخزون", type: "ASSET", parent: "10", subtype: "INVENTORY", isControl: true },
@@ -56,6 +62,11 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "20", name: "Current liabilities", nameAr: "الالتزامات المتداولة", type: "LIABILITY", parent: "2", isPostable: false },
   { code: "2000", name: "Trade payables", nameAr: "الذمم الدائنة التجارية", type: "LIABILITY", parent: "20", subtype: "AP", isControl: true },
   { code: "2050", name: "Accrued expenses", nameAr: "مصروفات مستحقة", type: "LIABILITY", parent: "20" },
+  // Our own cheque, written and dated forward. The supplier's open account is
+  // discharged — they hold the paper — but the bank has not been touched. It
+  // is its own liability so a payables ageing is not asked to carry a debt
+  // that is no longer on any invoice.
+  { code: "2060", name: "Cheques issued, not yet presented", nameAr: "شيكات صادرة لم تقدم", type: "LIABILITY", parent: "20" },
   { code: "2100", name: "VAT output (payable)", nameAr: "ضريبة القيمة المضافة على المبيعات", type: "LIABILITY", parent: "20", subtype: "VAT_OUTPUT", isControl: true },
   { code: "2110", name: "VAT payable to FTA", nameAr: "ضريبة مستحقة للهيئة", type: "LIABILITY", parent: "20", subtype: "VAT_PAYABLE" },
   { code: "2150", name: "Provisions", nameAr: "المخصصات", type: "LIABILITY", parent: "20", subtype: "PROVISION" },

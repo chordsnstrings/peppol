@@ -126,7 +126,7 @@ d("post-dated cheques", () => {
     // Not cash, and not an ordinary receivable either: a receivable whose form
     // has changed.
     expect(await linesOf(r.entryId)).toEqual({
-      "1050": 105_000n,   // Dr cheques in hand — the paper
+      "1060": 105_000n,   // Dr cheques in hand — the paper
       "1100": -105_000n,  // Cr trade receivables — no longer owed in the ordinary way
     });
 
@@ -175,7 +175,7 @@ d("post-dated cheques", () => {
     expect(r.entryId).toBeNull();
     // The paper moved from a drawer to a counter; nothing the business owns changed.
     expect(await db.journalEntry.count({ where: { orgId: ORG } })).toBe(before);
-    expect(await balanceOf("1050")).toBe(105_000n);
+    expect(await balanceOf("1060")).toBe(105_000n);
   });
 
   it("clears through the same open item, so the money lands and nothing re-opens", async () => {
@@ -184,7 +184,7 @@ d("post-dated cheques", () => {
 
     expect(await linesOf(r.entryId!)).toEqual({
       "1010": 105_000n,   // Dr bank — the money arrived
-      "1050": -105_000n,  // Cr cheques in hand — the paper is spent
+      "1060": -105_000n,  // Cr cheques in hand — the paper is spent
     });
     expect(r.status).toBe("cleared");
 
@@ -197,7 +197,7 @@ d("post-dated cheques", () => {
     });
     expect(arLines.reduce((a, l) => a + l.txnAmountMinor, 0n)).toBe(0n);
     expect(await openItem("inv-held", "2026-06-30")).toBeNull();
-    expect(await balanceOf("1050")).toBe(0n);
+    expect(await balanceOf("1060")).toBe(0n);
 
     // The paper is spent, so the register holds nothing against it.
     const reg = await chequeRegister({ ...scope, asOf: "2026-06-30" });
@@ -225,7 +225,7 @@ d("post-dated cheques", () => {
 
     expect(await linesOf(b.entryId!)).toEqual({
       "1100": 52_500n,   // Dr trade receivables — the customer owes it again
-      "1050": -52_500n,  // Cr cheques in hand — the paper was worthless
+      "1060": -52_500n,  // Cr cheques in hand — the paper was worthless
     });
 
     // Exactly where they were: same document, same date, same band — plus a
@@ -294,7 +294,7 @@ d("post-dated cheques", () => {
 
     expect(again.status).toBe("held");
     expect(await linesOf(again.entryId!)).toEqual({
-      "1050": 52_500n,    // the paper goes back out of receivables
+      "1060": 52_500n,    // the paper goes back out of receivables
       "1100": -52_500n,
     });
     expect(await openItem("inv-bounce", "2026-06-02")).toBeNull();
@@ -314,7 +314,7 @@ d("post-dated cheques", () => {
     // mistaken for a retry of the first presentation.
     const cleared = await clearCheque({ ...scope, chequeId: c.id, on: "2026-06-04" });
     expect(cleared.alreadyPosted).toBe(false);
-    expect(await linesOf(cleared.entryId!)).toEqual({ "1010": 52_500n, "1050": -52_500n });
+    expect(await linesOf(cleared.entryId!)).toEqual({ "1010": 52_500n, "1060": -52_500n });
     expect(await db.journalEntry.count({ where: { orgId: ORG, sourceId: c.id } })).toBe(4);
 
     // Sale, cheque, bounce, cheque again, bank: nothing left against the customer.
@@ -333,13 +333,13 @@ d("post-dated cheques", () => {
     });
     expect(await linesOf(r.entryId)).toEqual({
       "2000": 105_000n,   // Dr trade payables — off the supplier's open account
-      "2050": -105_000n,  // Cr cheques issued — committed to a dated cheque
+      "2060": -105_000n,  // Cr cheques issued — committed to a dated cheque
     });
     expect(await openItem("bill-issued", "2026-06-30", "AP")).toBeNull();
 
     const cleared = await clearCheque({ ...scope, chequeId: r.chequeId, on: "2026-07-02" });
     expect(await linesOf(cleared.entryId!)).toEqual({
-      "2050": 105_000n,   // Dr cheques issued
+      "2060": 105_000n,   // Dr cheques issued
       "1010": -105_000n,  // Cr bank — the money left
     });
 
@@ -357,7 +357,7 @@ d("post-dated cheques", () => {
       ...scope, chequeId: own.chequeId, on: "2026-05-30", reason: "insufficient funds — our account",
     });
     expect(await linesOf(bounced.entryId!)).toEqual({
-      "2050": 42_000n,    // Dr cheques issued — the commitment is gone
+      "2060": 42_000n,    // Dr cheques issued — the commitment is gone
       "2000": -42_000n,   // Cr trade payables — we owe the supplier again
     });
     expect((await openItem("bill-bounced", "2026-05-31", "AP"))?.outstandingMinor).toBe("42000");
@@ -369,7 +369,7 @@ d("post-dated cheques", () => {
     expect(await db.journalEntry.count({ where: { orgId: ORG, sourceId: own.chequeId } })).toBe(2);
     // Both issued cheques are settled one way or the other, so nothing is
     // committed on the holding account.
-    expect(await balanceOf("2050")).toBe(0n);
+    expect(await balanceOf("2060")).toBe(0n);
   });
 
   it("hands an unpresented cheque back by undoing the journal that took it in", async () => {
@@ -386,7 +386,7 @@ d("post-dated cheques", () => {
     });
     expect(await linesOf(back.entryId!)).toEqual({
       "1100": 31_500n,   // the debt is back on the customer's account
-      "1050": -31_500n,
+      "1060": -31_500n,
     });
     expect((await openItem("inv-returned", "2026-04-30"))?.outstandingMinor).toBe("31500");
     expect(back.status).toBe("returned");
@@ -430,10 +430,10 @@ d("post-dated cheques", () => {
 
     // The register total comes from the cheques; the balance comes from the
     // journal lines. They are computed from different places on purpose.
-    expect(reg.received.ledgerMinor).toBe(await balanceOf("1050"));
+    expect(reg.received.ledgerMinor).toBe(await balanceOf("1060"));
     expect(reg.received.differenceMinor).toBe(0n);
     expect(reg.received.reconciled).toBe(true);
-    expect(reg.issued.ledgerMinor).toBe(-(await balanceOf("2050")));
+    expect(reg.issued.ledgerMinor).toBe(-(await balanceOf("2060")));
     expect(reg.issued.reconciled).toBe(true);
     expect(reg.reconciled).toBe(true);
     expect(reg.received.outstandingMinor).toBe(
@@ -446,7 +446,7 @@ d("post-dated cheques", () => {
     // into agreeing with it.
     await post({
       ...scope, entryDate: "2026-07-30", memo: "Stray journal against cheques in hand", series: "GJ",
-      lines: [{ account: "1050", debit: 5_000 }, { account: "1010", credit: 5_000 }],
+      lines: [{ account: "1060", debit: 5_000 }, { account: "1010", credit: 5_000 }],
     });
     const drifted = await chequeRegister({ ...scope, asOf });
     expect(drifted.received.differenceMinor).toBe(5_000n);
@@ -541,8 +541,8 @@ d("post-dated cheques", () => {
       counterparty: "Someone else", writtenOn: "2026-01-06", dueOn: "2026-07-06", amountMinor: 1_000,
     });
     expect(clash.chequeId).not.toBe(mine.id);
-    expect(await balanceOf("1050", OTHER_ORG)).toBe(1_000n);
-    expect(await balanceOf("1050", ORG)).not.toBe(1_000n);
+    expect(await balanceOf("1060", OTHER_ORG)).toBe(1_000n);
+    expect(await balanceOf("1060", ORG)).not.toBe(1_000n);
   });
 
   it("keeps the trial balance tied after everything above", async () => {

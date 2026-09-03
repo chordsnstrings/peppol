@@ -82,32 +82,27 @@ import { ledgerBalances } from "./balances";
  * Where a cheque sits while it is neither a trade balance nor money.
  *
  * The chart in `setup.ts` has no "cheques in hand" account and no "cheques
- * issued" account, so neither of these is the account a UAE bookkeeper would
- * have chosen; they are the closest the chart holds, and the reasons are worth
- * stating rather than hiding.
+ * issued" account, so two were added to it for this: 1060 "Cheques in hand
+ * (post-dated)" and 2060 "Cheques issued, not yet presented".
  *
- * 1050 "Undeposited funds" is exactly the idea — value received and not yet in
- * the bank — and it reads correctly on the face of the balance sheet. Its one
- * defect is real and worth knowing: `cashflow.ts`, `forecast.ts` and
- * `equity.ts` all count 1050 among the cash codes, so a ninety-day cheque
- * parked here is reported as cash and cash equivalents when it plainly is not
- * one (IAS 7.7 wants an insignificant risk of change in value, and a
- * post-dated cheque is nothing but that risk). The chart wants a 1060 "Cheques
- * in hand" sitting outside those cash codes; adding it is a change to the
- * chart and to three modules this one does not own, so it is named here rather
- * than made silently. Until then the register below is what tells the truth
- * about how much of "cash" is paper with a future date on it.
+ * They are deliberately not cash. `cashflow.ts`, `forecast.ts` and `equity.ts`
+ * count 1000, 1010, 1020 and 1050 as cash and cash equivalents, and 1060 is
+ * kept out of all three: IAS 7.7 wants an insignificant risk of a change in
+ * value, and a ninety-day cheque is nothing but that risk. Parking post-dated
+ * cheques in 1050 "Undeposited funds" — which is where they would otherwise
+ * naturally go — would report them as cash, which is precisely the error this
+ * subledger exists to prevent, one level up.
  *
- * 2050 "Accrued expenses" is the weaker fit of the two — it is a generic
- * current liability rather than a cheques-payable account — but it is the only
- * liability in the chart that means "we owe this, and it is no longer sitting
- * on the supplier's open account". Nothing else in the product posts to it, so
- * the reconciliation below stays clean in practice; the cash-flow statement
- * classifies 2050 and 2000 identically (both operating working capital), so
- * moving a payable into it distorts nothing there.
+ * 2060 is likewise its own liability rather than an accrual. The supplier's
+ * open account is discharged when the cheque is handed over, so leaving the
+ * amount in 2000 would show a payables ageing a debt no invoice carries any
+ * more; folding it into 2050 "Accrued expenses" would bury a dated,
+ * bank-bound commitment among estimates. Both accounts are classified as
+ * operating working capital in the cash-flow statement, which is where a
+ * movement between a receivable, a cheque and a bank account belongs.
  */
-const CHEQUES_IN_HAND = "1050";
-const CHEQUES_ISSUED = "2050";
+const CHEQUES_IN_HAND = "1060";
+const CHEQUES_ISSUED = "2060";
 const AR_CONTROL = "1100";
 const AP_CONTROL = "2000";
 const BANK = "1010";
