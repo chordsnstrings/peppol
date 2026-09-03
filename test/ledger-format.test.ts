@@ -67,6 +67,20 @@ describe("what a bookkeeper types", () => {
     expect(parseAmount("-(10+5)")).toBe(-1500n);
   });
 
+  it("reads a parenthesised figure as negative, the way every ledger writes it", () => {
+    expect(parseAmount("(2,000.00)")).toBe(-200000n);
+    expect(parseAmount("(45)")).toBe(-4500n);
+    expect(parseAmount("( 45.50 )")).toBe(-4550n);
+    // The round trip has to close: what we print, we must read back.
+    expect(parseAmount(fmtMinor(-4500n, "AED"))).toBe(-4500n);
+  });
+
+  it("still treats parentheses as grouping when they hold an expression", () => {
+    expect(parseAmount("(450+80)*1.05")).toBe(55650n);
+    expect(parseAmount("(10+5)")).toBe(1500n);
+    expect(parseAmount("(100)/2")).toBe(5000n);
+  });
+
   it("refuses anything that is not an amount instead of silently zeroing", () => {
     expect(parseAmount("abc")).toBeNull();
     expect(parseAmount("12abc")).toBeNull();

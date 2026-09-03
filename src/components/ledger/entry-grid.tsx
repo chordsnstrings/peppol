@@ -19,6 +19,16 @@ interface Row {
 }
 
 const CURRENCY = "AED";
+/** The editable columns, in grid order. `keyof Row` would drag in the numeric
+ *  `key` and make every assignment narrow to never. */
+type TextCol = "account" | "memo" | "debit" | "credit";
+
+/** Strip whatever a spreadsheet decorated the figure with — currency symbols,
+ *  non-breaking spaces — before the amount parser sees it. */
+function sanitiseAmount(v: string): string {
+  return v.replace(/\u00a0/g, " ").replace(/[^\d+\-*/(). ,]/g, "").trim();
+}
+
 let nextKey = 1;
 const blank = (): Row => ({ key: nextKey++, account: "", debit: "", credit: "", memo: "" });
 
@@ -51,6 +61,7 @@ export function EntryGrid() {
   const [attempted, setAttempted] = React.useState(false);
   const [posting, setPosting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [pasteNote, setPasteNote] = React.useState<string | null>(null);
 
   const accountsQ = useLedgerQuery<{ accounts: Account[] }>(
     entityId ? `/api/ledger/accounts?entityId=${entityId}&postable=1` : null,
@@ -151,7 +162,73 @@ export function EntryGrid() {
     return undefined;
   };
 
-  const onCellKey = (e: React.KeyboardEvent<HTMLInputElement>, key: number, field: keyof Row) => {
+  /**
+   * Paste from a spreadsheet.
+   *
+   * This is not a nicety — a month-end accrual schedule lives in Excel, and
+   * the alternative to pasting it is retyping it, which is where transcription
+   * errors come from. Both Excel and Google Sheets put TSV on the clipboard.
+   *
+   * Rules that keep it honest:
+   *  - the paste anchors at the cell that has focus and expands right and down,
+   *    creating rows as needed. It never wraps into the next row.
+   *  - every pasted amount goes through the same parser as typed input, so
+   *    "1,200.00", "(450)" and a trailing-minus export all land correctly.
+   *  - nothing is posted. The grid fills in and the normal blocking rules
+   *    apply, so a paste that does not balance is as visible as one typed.
+   */
+  const onPaste = (e: React.ClipboardEvent<HTMLInputElement>, key: number, field: TextCol) => {
+    const text = e.clipboardData.getData("text/plain");
+    if (!text || !/[\t\r\n]/.test(text)) return; // a single value: let the browser handle it
+    e.preventDefault();
+
+    const matrix = text
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n$/, "")
+      .split("\n")
+      .map((line) => line.split("\t"));
+
+    const COLS: TextCol[] = ["account", "memo", "debit", "credit"];
+    const startCol = Math.max(0, COLS.indexOf(field));
+
+    setRows((rs) => {
+      const startRow = rs.findIndex((r) => r.key === key);
+      const next = [...rs];
+      matrix.forEach((cells, dy) => {
+        const idx = startRow + dy;
+        while (next.length <= idx) next.push(blank());
+        const row = { ...next[idx] };
+        // Land every cell first. Deciding the debit/credit side inside the
+        // loop lets a trailing empty column overwrite a figure that was just
+        // moved across — spreadsheet rows very often end in an empty cell.
+        const touched = new Set<TextCol>();
+        cells.forEach((raw, dx) => {
+          const col = COLS[startCol + dx];
+          if (!col) return; // truncate at the last column rather than wrapping
+          row[col] = raw.trim();
+          touched.add(col);
+        });
+
+        if (touched.has("debit") || touched.has("credit")) {
+          const d = parseAmount(sanitiseAmount(row.debit), CURRENCY);
+          const c = parseAmount(sanitiseAmount(row.credit), CURRENCY);
+          // A negative on either side means the other side, same as typing one.
+          let debit = d ?? 0n;
+          let credit = c ?? 0n;
+          if (debit < 0n) { credit += -debit; debit = 0n; }
+          if (credit < 0n) { debit += -credit; credit = 0n; }
+          row.debit = d === null && row.debit ? row.debit : debit === 0n ? "" : toInput(debit, CURRENCY);
+          row.credit = c === null && row.credit ? row.credit : credit === 0n ? "" : toInput(credit, CURRENCY);
+        }
+        next[idx] = row;
+      });
+      return next;
+    });
+
+    setPasteNote(`Pasted ${matrix.length} row${matrix.length === 1 ? "" : "s"}. Check the totals before posting.`);
+  };
+
+  const onCellKey = (e: React.KeyboardEvent<HTMLInputElement>, key: number, field: TextCol) => {
     // Ctrl+D copies the cell above — the single most repeated keystroke in
     // manual entry (same account, different amount).
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
@@ -198,8 +275,34 @@ export function EntryGrid() {
 
   const diffTone = attempted && difference !== 0n ? "sw-num-neg" : "";
 
+  /**
+   * The balance state is the textbook case for WCAG 4.1.3 Status Messages: a
+   * fact that must reach a screen-reader user without stealing focus.
+   *
+   * Three things make the difference between usable and maddening:
+   *  - the region is mounted before it has content. A role="status" element
+   *    injected together with its text announces nothing in most readers.
+   *  - it is debounced, so typing "12000" is one announcement rather than five.
+   *  - aria-atomic reads the whole sentence, so the user hears "out of balance
+   *    by 250.00, debits are short" instead of a naked "250".
+   */
+  const [liveMessage, setLiveMessage] = React.useState("");
+  const spoken = blocker
+    ? blocker
+    : `Balanced at ${fmtMinor(totalDebit, CURRENCY, { zero: "zero" })} across ${filled.length} lines. Ready to post.`;
+  React.useEffect(() => {
+    const t = setTimeout(() => setLiveMessage(spoken), 700);
+    return () => clearTimeout(t);
+  }, [spoken]);
+
   return (
     <div className="space-y-4">
+      {/* Mounted unconditionally and left empty until there is something to
+          say — see the note on liveMessage above. */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {liveMessage}
+      </div>
+
       <Panel className="p-4">
         <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
           <div>
@@ -252,6 +355,7 @@ export function EntryGrid() {
                         value={r.account}
                         onChange={(e) => setRow(r.key, { account: e.target.value })}
                         onKeyDown={(e) => onCellKey(e, r.key, "account")}
+                        onPaste={(e) => onPaste(e, r.key, "account")}
                         onBlur={() => { const a = resolve(r.account); if (a) setRow(r.key, { account: a.code }); }}
                       />
                       {p.account && (
@@ -267,6 +371,7 @@ export function EntryGrid() {
                         value={r.memo}
                         onChange={(e) => setRow(r.key, { memo: e.target.value })}
                         onKeyDown={(e) => onCellKey(e, r.key, "memo")}
+                        onPaste={(e) => onPaste(e, r.key, "memo")}
                       />
                     </td>
                     <td>
@@ -281,6 +386,7 @@ export function EntryGrid() {
                           if (e.key === "Tab" && !e.shiftKey && dSug && !r.debit) { setRow(r.key, { debit: dSug }); }
                           onCellKey(e, r.key, "debit");
                         }}
+                        onPaste={(e) => onPaste(e, r.key, "debit")}
                         onBlur={(e) => commitAmount(r.key, "debit", e.target.value)}
                         style={parseAmount(r.debit, CURRENCY) === null ? { boxShadow: "inset 0 -2px 0 var(--sw-neg)" } : undefined}
                       />
@@ -297,6 +403,7 @@ export function EntryGrid() {
                           if (e.key === "Tab" && !e.shiftKey && cSug && !r.credit) { setRow(r.key, { credit: cSug }); }
                           onCellKey(e, r.key, "credit");
                         }}
+                        onPaste={(e) => onPaste(e, r.key, "credit")}
                         onBlur={(e) => commitAmount(r.key, "credit", e.target.value)}
                         style={parseAmount(r.credit, CURRENCY) === null ? { boxShadow: "inset 0 -2px 0 var(--sw-neg)" } : undefined}
                       />
@@ -304,8 +411,7 @@ export function EntryGrid() {
                     <td>
                       <button
                         type="button"
-                        className="w-full px-2 text-[1rem] leading-none"
-                        style={{ color: "var(--sw-fg-faint)" }}
+                        className="sw-icon-btn"
                         aria-label={`Remove line ${i + 1}`}
                         onClick={() => setRows((rs) => (rs.length > 2 ? rs.filter((x) => x.key !== r.key) : rs.map((x) => (x.key === r.key ? blank() : x))))}
                       >
@@ -318,7 +424,7 @@ export function EntryGrid() {
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={3} style={{ textAlign: "end" }}>Totals</td>
+                <th scope="row" colSpan={3} style={{ textAlign: "end" }}>Totals</th>
                 <td className="sw-num" data-testid="total-debit">{fmtMinor(totalDebit, CURRENCY, { zero: "zero" })}</td>
                 <td className="sw-num" data-testid="total-credit">{fmtMinor(totalCredit, CURRENCY, { zero: "zero" })}</td>
                 <td />
@@ -326,9 +432,9 @@ export function EntryGrid() {
               {difference !== 0n && (
                 <tr>
                   {/* The difference sits under the column it is missing from. */}
-                  <td colSpan={3} style={{ textAlign: "end", fontWeight: 400, color: "var(--sw-fg-muted)" }}>
+                  <th scope="row" colSpan={3} style={{ textAlign: "end", fontWeight: 400, color: "var(--sw-fg-muted)" }}>
                     Out of balance
-                  </td>
+                  </th>
                   <td className={`sw-num ${diffTone}`} data-testid="diff-debit">
                     {difference < 0n ? fmtMinor(-difference, CURRENCY, { zero: "zero" }) : ""}
                   </td>
@@ -348,6 +454,12 @@ export function EntryGrid() {
         </datalist>
       </Panel>
 
+      {pasteNote && (
+        <div className="sw-note" data-testid="paste-note">
+          {pasteNote}{" "}
+          <button type="button" className="sw-link" onClick={() => setPasteNote(null)}>Dismiss</button>
+        </div>
+      )}
       {error && <ErrorNote>{error}</ErrorNote>}
 
       <div className="flex flex-wrap items-center gap-3">
@@ -366,12 +478,12 @@ export function EntryGrid() {
         </button>
         {/* Always rendered when blocked, never a dead button with no explanation. */}
         {blocker && (
-          <span id="je-blocker" className="sw-sub" role="status" aria-live="polite" data-testid="blocker">
+          <span id="je-blocker" className="sw-sub" data-testid="blocker">
             {blocker}
           </span>
         )}
         {!blocker && !posting && (
-          <span className="sw-sub" role="status" aria-live="polite">
+          <span className="sw-sub">
             Balanced at {fmtMinor(totalDebit, CURRENCY, { zero: "zero" })} — ready to post.
           </span>
         )}
@@ -379,7 +491,8 @@ export function EntryGrid() {
 
       <p className="sw-sub">
         Amount cells take arithmetic: <code>1200/3</code>, <code>(450+80)*1.05</code>. A minus typed
-        into Debit moves itself to Credit. <kbd>Ctrl</kbd>+<kbd>D</kbd> copies the cell above.
+        into Debit moves itself to Credit. <kbd>Ctrl</kbd>+<kbd>D</kbd> copies the cell above. Paste a block from Excel
+        or Sheets straight into the grid — account, description, debit, credit.
       </p>
     </div>
   );

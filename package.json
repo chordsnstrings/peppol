@@ -2,14 +2,18 @@
   "name": "arks-einvoicing-web",
   "version": "0.1.0",
   "private": true,
-  "description": "ARKS e-Invoicing Platform — web UI (apps/web). UAE e-invoicing SaaS front-end.",
+  "description": "ARKS e-Invoicing Platform \u2014 web UI (apps/web). UAE e-invoicing SaaS front-end.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify:contrast": "node scripts/verify-contrast.mjs",
+    "verify:ledger": "node scripts/verify-ledger.mjs",
+    "verify:ledger-api": "node scripts/verify-ledger-api.mjs",
+    "verify:ledger-ui": "node scripts/verify-ledger-ui.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

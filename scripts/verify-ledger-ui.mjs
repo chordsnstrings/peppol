@@ -174,6 +174,61 @@ try {
   blocker = await page.locator('[data-testid="blocker"]').innerText();
   check("a control account is refused with an explanation", /control account/i.test(blocker), blocker);
 
+  console.log("\nSPREADSHEET PASTE AND ACCESSIBILITY");
+  await page.goto(`${B}/accounting/journals/new`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="post-entry"]', { timeout: 15000 });
+
+  // The live region must exist before it has anything to say — a role="status"
+  // injected together with its text announces nothing in most screen readers.
+  const liveAtRest = await page.locator('[role="status"][aria-live="polite"][aria-atomic="true"]').count();
+  check("balance live region is mounted before it has content", liveAtRest === 1, `${liveAtRest} found`);
+
+  // WCAG 2.2 SC 2.5.8: a pointer target is at least 24x24 CSS px.
+  const removeBox = await page.locator('button[aria-label="Remove line 1"]').boundingBox();
+  check("row action button meets the 24px target size", removeBox.width >= 24 && removeBox.height >= 24,
+    `${Math.round(removeBox.width)}x${Math.round(removeBox.height)}`);
+  const cellBox = await page.locator('input[aria-label="Line 1 debit"]').boundingBox();
+  check("an editable row clears the target-size floor", cellBox.height >= 24, `${Math.round(cellBox.height)}px`);
+
+  // Paste a three-line accrual the way it arrives from a spreadsheet: TSV,
+  // with thousands separators and a parenthesised negative.
+  const tsv = "1010\tBank transfer\t1,200.00\t\n5000\tRent\t800\t\n1010\tRefund\t(2,000.00)\t";
+  await page.locator('input[aria-label="Line 1 account"]').focus();
+  await page.evaluate((text) => {
+    const el = document.activeElement;
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+    el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, tsv);
+  await page.waitForTimeout(400);
+
+  const note = await page.locator('[data-testid="paste-note"]').innerText();
+  check("a paste is announced, never posted silently", /Pasted 3 rows/.test(note), note.split("\n")[0]);
+
+  const pastedAcct = await page.locator('input[aria-label="Line 2 account"]').inputValue();
+  const pastedMemo = await page.locator('input[aria-label="Line 2 description"]').inputValue();
+  const pastedAmt = await page.locator('input[aria-label="Line 2 debit"]').inputValue();
+  check("pasted cells land in the right columns", pastedAcct === "5000" && pastedMemo === "Rent" && pastedAmt === "800.00",
+    `${pastedAcct} / ${pastedMemo} / ${pastedAmt}`);
+
+  const l1 = await page.locator('input[aria-label="Line 1 debit"]').inputValue();
+  check("thousands separators survive the paste", l1 === "1200.00", l1);
+
+  // "(2,000.00)" in a Debit column is a credit, same as typing a minus.
+  const l3d = await page.locator('input[aria-label="Line 3 debit"]').inputValue();
+  const l3c = await page.locator('input[aria-label="Line 3 credit"]').inputValue();
+  check("a parenthesised negative moves to the credit column", l3d === "" && l3c === "2000.00", `debit:"${l3d}" credit:"${l3c}"`);
+
+  const totalD = await page.locator('[data-testid="total-debit"]').innerText();
+  const totalC = await page.locator('[data-testid="total-credit"]').innerText();
+  check("a pasted block that balances shows as balanced", totalD.trim() === "2,000.00" && totalC.trim() === "2,000.00",
+    `dr ${totalD.trim()} / cr ${totalC.trim()}`);
+
+  // The live region should have caught up by now and speak a sentence.
+  await page.waitForTimeout(900);
+  const spoken = await page.locator('[role="status"][aria-live="polite"]').innerText();
+  check("the live region speaks a sentence, not a bare number", /Balanced at 2,000\.00/.test(spoken), spoken);
+
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${B}/accounting/trial-balance`, { waitUntil: "domcontentloaded" });

@@ -79,6 +79,18 @@ export function parseAmount(text: string, currency = "AED"): bigint | null {
   const src = text.trim();
   if (src === "") return 0n;
   if (!/^[0-9+\-*/(). ,]+$/.test(src)) return null;
+
+  // Accounting convention: a figure wholly wrapped in parentheses is negative.
+  // This is how every ledger export writes a credit, and it is how we render
+  // one, so without it the round trip through a spreadsheet is lossy. The rule
+  // only applies when there is no operator inside — "(450+80)*1.05" stays an
+  // expression, "(2,000.00)" is minus two thousand.
+  const wrapped = /^\(\s*([0-9., ]+)\s*\)$/.exec(src);
+  if (wrapped) {
+    const inner = parseAmount(wrapped[1], currency);
+    return inner === null ? null : -inner;
+  }
+
   try {
     const value = evalExpr(src.replace(/,/g, ""));
     if (!Number.isFinite(value)) return null;
