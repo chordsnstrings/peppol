@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
-import { balances, profitAndLoss } from "./statements";
+import { balances, profitAndLoss, removeYearEndClose } from "./statements";
 
 /**
  * Custom report layouts — a management pack defined as data rather than code.
@@ -534,6 +534,17 @@ export async function renderLayout(opts: {
     to,
     ...(from ? { from } : {}),
   });
+
+  // A profit layout must not see the year-end close. Closing a year debits
+  // income and credits expenses to nothing, so a layout drawn over a range
+  // covering a close would read every line as nil — and, because a custom
+  // layout is checked against `profitAndLoss()` below, the coverage difference
+  // would report zero and the whole report would look correct and be empty.
+  // The balance sheet keeps it, where it is exactly right.
+  if (def.basis === "PROFIT" && from) {
+    await removeYearEndClose({ orgId: opts.orgId, entityId: opts.entityId, from, to, rows: bal });
+  }
+
   const balanceOf = new Map(bal.map((b) => [b.code, b.balance]));
 
   const rendered: RenderedRow[] = [];

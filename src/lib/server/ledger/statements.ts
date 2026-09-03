@@ -62,7 +62,7 @@ export interface BalanceSheet {
   differenceMinor: string;
 }
 
-type Bal = { code: string; name: string; nameAr: string | null; type: string; subtype: string | null; balance: bigint };
+export type Bal = { code: string; name: string; nameAr: string | null; type: string; subtype: string | null; balance: bigint };
 
 /**
  * Balances for a date range.
@@ -199,7 +199,7 @@ const isCostOfSales = (r: Bal) => r.code.startsWith("5");
  * The balance sheet is deliberately left alone: there the close is exactly
  * right, and taking it out would count the year's result twice.
  */
-async function removeYearEndClose(opts: {
+export async function removeYearEndClose(opts: {
   orgId: string; entityId: string; from: Date; to: Date; rows: Bal[];
 }) {
   const lines = await prisma.journalLine.findMany({

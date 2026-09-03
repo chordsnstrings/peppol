@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { post } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { closeYear } from "@/lib/server/ledger/close";
 import { profitAndLoss, balanceSheet } from "@/lib/server/ledger/statements";
 import {
   saveLayout, listLayouts, getLayout, setLayoutStatus,
@@ -450,5 +451,27 @@ d("custom report layouts", () => {
     await expect(
       renderLayout({ orgId: ORG2, entityId: ENT, code: "MGMT_PL", ...PERIOD }),
     ).rejects.toThrow(/No ledger has been opened for this entity/);
+  });
+
+  it("still reports a closed year, because the close is not trading", async () => {
+    // Closing a year brings every income and expense account to nothing. A
+    // profit layout drawn over a range covering the close would read every
+    // line as nil — and because a layout is checked against profitAndLoss(),
+    // which also excludes it, the coverage difference would be zero and the
+    // report would look correct and be empty.
+    const before = await renderLayout({ orgId: ORG, entityId: ENT, code: "MGMT_PL", from: "2026-01-01", to: "2026-12-31" });
+    const beforeBottom = before.rows[before.rows.length - 1].valueMinor;
+    expect(before.bottomLineDifferenceMinor).toBe("0");
+
+    await db.accountingPeriod.updateMany({
+      where: { orgId: ORG, entityId: ENT, isAdjustment: false },
+      data: { status: "hard_closed" },
+    });
+    await closeYear({ orgId: ORG, entityId: ENT, fiscalYear: "2026" });
+
+    const after = await renderLayout({ orgId: ORG, entityId: ENT, code: "MGMT_PL", from: "2026-01-01", to: "2026-12-31" });
+    expect(after.rows[after.rows.length - 1].valueMinor).toBe(beforeBottom);
+    expect(after.bottomLineDifferenceMinor).toBe("0");
+    expect(after.rows.some((r) => r.valueMinor !== "0" && r.valueMinor !== null)).toBe(true);
   });
 });
