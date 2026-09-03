@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { trialBalance } from "./reports";
 import { templateStatus } from "./recurring";
@@ -71,12 +72,17 @@ export interface MonthEnd {
 }
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
-const money = (v: bigint) => {
-  const neg = v < 0n;
-  const s = (neg ? -v : v).toString().padStart(3, "0");
-  const body = `${s.slice(0, -2)}.${s.slice(-2)}`;
-  return neg ? `(${body})` : body;
-};
+/*
+ * Amounts are formatted through the one function that knows how many decimals
+ * a currency has.
+ *
+ * This used to pad to three digits and split at two, which is right for a
+ * dirham and wrong by a factor of ten for a Kuwaiti dinar, a Bahraini dinar
+ * or an Omani rial — all three of which have three. attention.ts already used
+ * fmtMinor and got it right, so the two screens disagreed about the same
+ * figure.
+ */
+const money = (v: bigint, currency = "AED") => fmtMinor(v, currency, { zero: "zero" });
 
 interface Ctx {
   orgId: string;

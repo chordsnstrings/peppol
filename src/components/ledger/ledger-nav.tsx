@@ -40,6 +40,7 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting", label: "Overview", exact: true },
       { href: "/accounting/attention", label: "Needs attention" },
+      { href: "/accounting/notifications", label: "Notifications" },
       { href: "/accounting/journals", label: "Journals" },
       { href: "/accounting/accounts", label: "Chart of accounts" },
       { href: "/accounting/chart", label: "Edit the chart" },

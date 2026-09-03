@@ -325,7 +325,8 @@ const unreconciledBank: Check = {
       title: "Bank lines have no entry behind them",
       detail:
         `${plural(lines.length, "statement line", "statement lines")} on ` +
-        `${plural(accounts.length, "account", "accounts")} have not been matched to anything in the ledger, ` +
+        `${plural(accounts.length, "account", "accounts")} ${lines.length === 1 ? "has" : "have"} not been ` +
+        `matched to anything in the ledger, ` +
         `a net ${money(net, currency)}. The oldest has been sitting since ${oldest}, ` +
         `${plural(age, "day", "days")} ago. Until they are matched or posted, the cash balance is a guess.`,
       count: lines.length,
