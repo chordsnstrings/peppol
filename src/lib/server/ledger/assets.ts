@@ -83,7 +83,7 @@ type AssetRow = {
   id: string; code: string; name: string; method: string;
   costMinor: bigint; residualMinor: bigint; accumulatedMinor: bigint;
   usefulLifeMonths: number; ratePercent: unknown;
-  acquiredOn: Date; depreciatedTo: string | null; status: string;
+  acquiredOn: Date; depreciatedTo: string | null; status: string; disposedOn: Date | null;
   assetAccount: string; accumAccount: string; expenseAccount: string;
 };
 
@@ -137,6 +137,43 @@ export function monthlyCharge(a: {
   // A charge that rounded away to nothing still has value to write off.
   if (charge <= 0n) charge = remaining;
   return charge;
+}
+
+/**
+ * What an asset would have accumulated by a date, from its own schedule.
+ *
+ * The register keeps one running figure, which answers "what is it worth now"
+ * and nothing else. A note or a statement drawn for a past year needs the
+ * register as it stood then, and the running figure would put today's
+ * accumulated depreciation beside that year's ledger — a difference that looks
+ * like a defect and is only the wrong question.
+ *
+ * Recomputed month by month rather than divided, because the schedule is a step
+ * function: reducing balance depends on what has already gone, and both methods
+ * let the last month absorb the rounding. Dividing would be right in the middle
+ * of an asset's life and wrong at both ends.
+ */
+export function accumulatedAt(
+  a: {
+    method: string; costMinor: bigint; residualMinor: bigint;
+    usefulLifeMonths: number; ratePercent?: number | null; acquiredOn: Date;
+  },
+  asOf: Date,
+): bigint {
+  if (asOf < a.acquiredOn) return 0n;
+
+  const months =
+    (asOf.getUTCFullYear() - a.acquiredOn.getUTCFullYear()) * 12 +
+    (asOf.getUTCMonth() - a.acquiredOn.getUTCMonth());
+  if (months < 0) return 0n;
+
+  let accumulated = 0n;
+  const depreciable = a.costMinor - a.residualMinor;
+  // The month of acquisition is charged, which is what runDepreciation does.
+  for (let i = 0; i <= months && accumulated < depreciable; i++) {
+    accumulated += monthlyCharge({ ...a, accumulatedMinor: accumulated });
+  }
+  return accumulated > depreciable ? depreciable : accumulated;
 }
 
 /**
@@ -365,11 +402,40 @@ export async function disposeAsset(opts: {
  * Showing both together is the point: a register nobody compares to the ledger
  * is a spreadsheet with extra steps.
  */
-export async function assetRegister(opts: { orgId: string; entityId: string }) {
-  const assets = (await prisma.fixedAsset.findMany({
+export async function assetRegister(opts: {
+  orgId: string;
+  entityId: string;
+  /**
+   * The date to draw the register at. Left out, it is the register as it
+   * stands — which is the right answer for the screen and the wrong one for a
+   * note about a year that has already closed.
+   */
+  asOf?: Date | string;
+}) {
+  const asOf = opts.asOf === undefined
+    ? null
+    : typeof opts.asOf === "string" ? new Date(opts.asOf) : opts.asOf;
+  if (asOf && Number.isNaN(asOf.getTime())) throw new LedgerError("A register needs a date it can read.");
+
+  const all = (await prisma.fixedAsset.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId },
     orderBy: [{ status: "asc" }, { code: "asc" }],
   })) as unknown as AssetRow[];
+
+  // At a past date the population is different: an asset bought since is not
+  // in it, and one disposed of since still is.
+  const assets = !asOf
+    ? all
+    : all
+        .filter((a) => a.acquiredOn <= asOf)
+        .map((a) => {
+          const disposedLater = a.disposedOn ? a.disposedOn > asOf : false;
+          return {
+            ...a,
+            status: disposedLater ? "active" : a.status,
+            accumulatedMinor: accumulatedAt({ ...a, ratePercent: a.ratePercent === null ? null : Number(a.ratePercent) }, asOf),
+          } as AssetRow;
+        });
 
   const active = assets.filter((a) => a.status === "active");
   const registerCost = active.reduce((a, x) => a + x.costMinor, 0n);
@@ -387,7 +453,7 @@ export async function assetRegister(opts: { orgId: string; entityId: string }) {
           // A reversed entry and its reversal net to nothing; reading only
           // "posted" lines counts the reversal alone and moves the balance by
           // the full amount, which shows up here as a false difference.
-          entry: { status: { in: ["posted", "reversed"] } } },
+          entry: { status: { in: ["posted", "reversed"] }, ...(asOf ? { entryDate: { lte: asOf } } : {}) } },
         select: { accountId: true, functionalAmountMinor: true },
       })
     : [];

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { addAsset, runDepreciation, disposeAsset, assetRegister, monthlyCharge } from "@/lib/server/ledger/assets";
+import { addAsset, runDepreciation, disposeAsset, assetRegister, monthlyCharge, accumulatedAt } from "@/lib/server/ledger/assets";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { post } from "@/lib/server/ledger/post";
 import { trialBalance } from "@/lib/server/ledger/reports";
@@ -257,5 +257,38 @@ d("fixed assets", () => {
   it("refuses a period that is not a month", async () => {
     await expect(runDepreciation({ orgId: ORG, entityId: ENT, period: "Q1" }))
       .rejects.toThrow(/looks like 2026-03/);
+  });
+
+  /* -------------------------------------------------- the register at a date */
+
+  it("recomputes accumulated depreciation to a date from the asset's own schedule", () => {
+    // 12,000.00 over 24 months, straight line: 500.00 a month, charged from the
+    // month of acquisition. Six months to the end of June, not five.
+    const a = {
+      method: "STRAIGHT_LINE", costMinor: 1_200_000n, residualMinor: 0n,
+      usefulLifeMonths: 24, ratePercent: null, acquiredOn: new Date("2026-01-15"),
+    };
+    expect(accumulatedAt(a, new Date("2026-01-31"))).toBe(50_000n);
+    expect(accumulatedAt(a, new Date("2026-06-30"))).toBe(300_000n);
+    expect(accumulatedAt(a, new Date("2027-12-31"))).toBe(1_200_000n);
+    // And never past the depreciable amount, however far the date runs on.
+    expect(accumulatedAt(a, new Date("2035-12-31"))).toBe(1_200_000n);
+    // Nothing before it was bought.
+    expect(accumulatedAt(a, new Date("2025-12-31"))).toBe(0n);
+  });
+
+  it("draws the register as it stood, not as it stands", async () => {
+    const now = await assetRegister({ orgId: ORG, entityId: ENT });
+    const then = await assetRegister({ orgId: ORG, entityId: ENT, asOf: "2020-01-01" });
+    // Nothing in this entity existed in 2020, so the register then is empty
+    // while the register now is not — which is the whole point of the date.
+    expect(now.assets.length).toBeGreaterThan(0);
+    expect(then.assets).toHaveLength(0);
+    expect(then.ledger.costMinor).toBe("0");
+  });
+
+  it("refuses a date it cannot read", async () => {
+    await expect(assetRegister({ orgId: ORG, entityId: ENT, asOf: "not a date" }))
+      .rejects.toThrow(/date it can read/i);
   });
 });
