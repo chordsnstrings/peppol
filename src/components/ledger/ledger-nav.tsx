@@ -7,6 +7,7 @@ const TABS = [
   { href: "/accounting", label: "Overview", exact: true },
   { href: "/accounting/journals", label: "Journals" },
   { href: "/accounting/accounts", label: "Chart of accounts" },
+  { href: "/accounting/receivables", label: "Receivables" },
   { href: "/accounting/trial-balance", label: "Trial balance" },
   { href: "/accounting/periods", label: "Periods" },
 ];

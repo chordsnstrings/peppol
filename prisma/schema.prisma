@@ -428,6 +428,10 @@ model JournalEntry {
   sourceId     String?
   /// Idempotency key for machine posting; a retry must not double-post.
   externalKey  String?
+  /// The document this entry settles, when it settles one — a receipt names the
+  /// invoice it pays. Open-item ageing nets a document's postings by this, so
+  /// without it a paid invoice keeps showing as outstanding forever.
+  settlesId    String?
   reversalOfId String?
   reversalOf   JournalEntry?    @relation("EntryReversal", fields: [reversalOfId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   reversals    JournalEntry[]   @relation("EntryReversal")
@@ -441,6 +445,7 @@ model JournalEntry {
   @@unique([orgId, externalKey])
   @@index([orgId, entityId, periodId])
   @@index([orgId, sourceType, sourceId])
+  @@index([orgId, settlesId])
   @@index([orgId, entityId, entryDate])
 }
 

@@ -60,6 +60,12 @@ export interface PostInput {
    * link is part of what the entry *is*, not a later edit to it.
    */
   reversalOfId?: string;
+  /**
+   * The document this entry settles. `sourceId` says what caused the entry
+   * (the receipt); `settlesId` says what it discharges (the invoice). Open-item
+   * ageing nets a document's postings by this.
+   */
+  settlesId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
   actorId?: string;
   series?: string;
@@ -121,7 +127,7 @@ function rethrowLedgerErrors(e: unknown): never {
 export async function post(input: PostInput) {
   const {
     orgId, entityId, bookCode = "PRIMARY", entryDate, memo, source = "manual",
-    sourceType, sourceId, externalKey, reversalOfId, actorType = "HUMAN", actorId,
+    sourceType, sourceId, externalKey, reversalOfId, settlesId, actorType = "HUMAN", actorId,
     series = "GJ", lines,
   } = input;
 
@@ -241,6 +247,7 @@ export async function post(input: PostInput) {
         entryDate: date, status: "posted", memo: memo ?? null,
         source, sourceType: sourceType ?? null, sourceId: sourceId ?? null,
         externalKey: externalKey ?? null, reversalOfId: reversalOfId ?? null,
+        settlesId: settlesId ?? null,
         actorType, actorId: actorId ?? null,
         lines: {
           create: prepared.map((p) => ({
