@@ -111,6 +111,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "1100": "operating_working_capital", // trade receivables
   "1200": "operating_working_capital", // inventory
   "1250": "operating_working_capital", // goods received not invoiced
+  "1255": "financing", // restricted margin deposits — cash the bank holds against a facility
   "1300": "operating_working_capital", // prepaid expenses
   // Work in progress is unbilled time. It moves with the operating cycle
   // exactly as inventory does — the raw material of a service business.
@@ -150,6 +151,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "3300": "operating_noncash", // revaluation surplus
 
   "2450": "financing", // borrowings, current portion — nets against 2500
+  "2470": "financing", // trust receipts — short-term bank borrowing against goods
   "2500": "financing", // long-term loans
   "2600": "financing", // lease liabilities
   "3000": "financing", // share capital

@@ -44,6 +44,12 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "1150", name: "Allowance for doubtful debts", nameAr: "مخصص الديون المشكوك فيها", type: "ASSET", parent: "10" },
   { code: "1200", name: "Inventory", nameAr: "المخزون", type: "ASSET", parent: "10", subtype: "INVENTORY", isControl: true },
   { code: "1250", name: "Goods received not invoiced", nameAr: "بضاعة مستلمة غير مفوترة", type: "ASSET", parent: "10", subtype: "GRNI" },
+  // Money the bank holds against a letter of credit or a guarantee. It is an
+  // asset and it is not cash: it cannot be spent, and IAS 7.48 asks for
+  // restricted cash to be disclosed as such. Reporting it as cash tells the
+  // reader the business has liquidity it does not have — the same mistake as
+  // counting a post-dated cheque.
+  { code: "1255", name: "Margin deposits (restricted)", nameAr: "ودائع الهامش المقيدة", type: "ASSET", parent: "10" },
   { code: "1300", name: "Prepaid expenses", nameAr: "مصروفات مدفوعة مقدماً", type: "ASSET", parent: "10" },
   { code: "1320", name: "Deferred tax asset", nameAr: "أصل ضريبي مؤجل", type: "ASSET", parent: "15", subtype: "DEFERRED_TAX_ASSET" },
   { code: "1310", name: "Contract assets (unbilled revenue)", nameAr: "أصول العقود (إيرادات غير مفوترة)", type: "ASSET", parent: "10", subtype: "CONTRACT_ASSET" },
@@ -84,6 +90,7 @@ export const UAE_CHART: SeedAccount[] = [
   // current portion of a loan needs a code in the lower band; a note alone
   // would not reach any statement the product prints.
   { code: "2450", name: "Borrowings — current portion", nameAr: "الجزء المتداول من القروض", type: "LIABILITY", parent: "20" },
+  { code: "2470", name: "Trust receipts and trade finance", nameAr: "إيصالات أمانة وتمويل تجاري", type: "LIABILITY", parent: "20" },
   { code: "2500", name: "Long-term loans", nameAr: "قروض طويلة الأجل", type: "LIABILITY", parent: "25" },
   { code: "2600", name: "Lease liabilities", nameAr: "التزامات عقود الإيجار", type: "LIABILITY", parent: "25" },
 

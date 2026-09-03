@@ -98,6 +98,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/asset-revaluation", label: "Asset revaluation" },
       { href: "/accounting/leases", label: "Leases" },
       { href: "/accounting/borrowings", label: "Borrowings" },
+      { href: "/accounting/trade-finance", label: "Trade finance" },
       { href: "/accounting/provisions", label: "Provisions" },
     ],
   },

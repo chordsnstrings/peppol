@@ -407,6 +407,7 @@ try {
     ["/accounting/numbering", /number/i],
     ["/accounting/related-parties", /related part/i],
     ["/accounting/notifications", /notification/i],
+    ["/accounting/trade-finance", /trade finance|letter of credit/i],
   ];
   for (const [href, heading] of screens) {
     const res = await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });

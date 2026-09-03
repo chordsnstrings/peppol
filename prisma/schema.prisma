@@ -2484,3 +2484,61 @@ model NotificationEvent {
 
   @@index([orgId, entityId, key, at])
 }
+
+
+/// A trade finance facility: a letter of credit, a bank guarantee, or a trust
+/// receipt.
+///
+/// A guarantee that has not been called is a contingent liability, not a
+/// liability — IAS 37.27 forbids recognising it and IAS 37.86 requires it to
+/// be disclosed. What IS recognised is the cash margin the bank holds and the
+/// commission it charges.
+model TradeFacility {
+  id            String    @id @default(cuid())
+  orgId         String
+  entityId      String
+  reference     String
+  /// LC_IMPORT | LC_EXPORT | BANK_GUARANTEE | TRUST_RECEIPT
+  kind          String
+  bank          String
+  /// Whom it is in favour of — the supplier on an import credit, the customer
+  /// on a performance guarantee.
+  beneficiary   String
+  currency      String    @default("AED")
+  amountMinor   BigInt
+  /// Cash the bank holds against the facility. Restricted: it is an asset, and
+  /// it is emphatically not cash and cash equivalents.
+  marginMinor   BigInt    @default(0)
+  commissionMinor BigInt  @default(0)
+  issuedOn      DateTime  @db.Date
+  expiresOn     DateTime  @db.Date
+  /// issued | drawn | expired | cancelled
+  status        String    @default("issued")
+  /// What has actually been called or negotiated against it.
+  drawnMinor    BigInt    @default(0)
+  closedOn      DateTime? @db.Date
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  events        TradeFacilityEvent[]
+
+  @@unique([orgId, entityId, reference])
+  @@index([orgId, entityId, status, expiresOn])
+}
+
+/// Each thing that happened to a facility, so a balance can be explained.
+model TradeFacilityEvent {
+  id          String   @id @default(cuid())
+  orgId       String
+  facilityId  String
+  facility    TradeFacility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  /// issue | amend | draw | settle | release | expire | cancel
+  kind        String
+  happenedOn  DateTime @db.Date
+  amountMinor BigInt   @default(0)
+  entryId     String?
+  memo        String?
+  createdAt   DateTime @default(now())
+
+  @@index([orgId, facilityId, happenedOn])
+}
