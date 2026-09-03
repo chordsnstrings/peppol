@@ -112,6 +112,89 @@ export async function previewClose(opts: {
   };
 }
 
+/**
+ * The closing amounts for an account that requires a dimension, split by the
+ * value each part of its balance was posted against.
+ *
+ * An account with `requiresDimension` refuses a posting that does not name a
+ * value, and the closing entry is a posting like any other — so a single line
+ * for the whole balance is refused and the year cannot be closed at all. The
+ * split is not a workaround for that: it is what closing such an account
+ * actually means. The balance is spread across cost centres, and bringing it
+ * to zero means bringing each cost centre to zero.
+ *
+ * Postings made before the requirement was added carry no value. They cannot
+ * be closed with one and cannot be closed without one, so the close stops and
+ * says which account and how much — the alternative is a year that silently
+ * will not close and nobody able to say why.
+ */
+async function splitByDimension(opts: {
+  orgId: string;
+  entityId: string;
+  from: Date;
+  to: Date;
+  accountCode: string;
+  dimensionCode: string;
+  closingMinor: bigint;
+}): Promise<{ valueCode: string; closingMinor: bigint }[]> {
+  const lines = await prisma.journalLine.findMany({
+    where: {
+      orgId: opts.orgId,
+      account: { entityId: opts.entityId, code: opts.accountCode },
+      entry: {
+        entityId: opts.entityId,
+        source: { not: "close" },
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: opts.from, lte: opts.to },
+      },
+    },
+    select: {
+      functionalAmountMinor: true,
+      dimensions: { select: { value: { select: { code: true, dimension: { select: { code: true } } } } } },
+    },
+  });
+
+  const byValue = new Map<string, bigint>();
+  let undimensioned = 0n;
+  for (const l of lines) {
+    const v = l.dimensions.find((d) => d.value.dimension.code === opts.dimensionCode)?.value.code;
+    if (!v) { undimensioned += l.functionalAmountMinor; continue; }
+    byValue.set(v, (byValue.get(v) ?? 0n) + l.functionalAmountMinor);
+  }
+
+  if (undimensioned !== 0n) {
+    throw new LedgerError(
+      `${opts.accountCode} requires a ${opts.dimensionCode} on every posting, but ${fmt(undimensioned)} of its ` +
+        `balance was posted without one — from before the requirement was added, most likely. Those postings cannot ` +
+        `be closed with a value and cannot be closed without one. Reverse and repost them with a ${opts.dimensionCode}, ` +
+        `or take the requirement off the account.`,
+    );
+  }
+
+  const split = [...byValue.entries()]
+    .filter(([, amount]) => amount !== 0n)
+    .map(([valueCode, amount]) => ({ valueCode, closingMinor: -amount }))
+    .sort((a, b) => a.valueCode.localeCompare(b.valueCode));
+
+  const total = split.reduce((a, x) => a + x.closingMinor, 0n);
+  if (total !== opts.closingMinor) {
+    throw new LedgerError(
+      `The ${opts.dimensionCode} split of ${opts.accountCode} comes to ${fmt(total)} against a balance of ` +
+        `${fmt(opts.closingMinor)}. Closing on that would move the difference into retained earnings without a ` +
+        `cost centre behind it. Please report it.`,
+    );
+  }
+  return split;
+}
+
+/** Minor units as a figure, for a message about a difference. */
+function fmt(minor: bigint): string {
+  const neg = minor < 0n;
+  const body = (neg ? -minor : minor).toString().padStart(3, "0");
+  const shown = `${body.slice(0, -2)}.${body.slice(-2)}`;
+  return neg ? `(${shown})` : shown;
+}
+
 export interface CloseResult {
   fiscalYear: string;
   entryId: string | null;
@@ -173,6 +256,47 @@ export async function closeYear(opts: {
 
   const profit = BigInt(preview.netProfitMinor);
 
+  // Accounts that demand a cost centre on every posting demand one here too.
+  const requiring = new Map(
+    (await prisma.account.findMany({
+      where: {
+        orgId: opts.orgId, entityId: opts.entityId,
+        code: { in: closing.map((l) => l.code) },
+        requiresDimension: { not: null },
+      },
+      select: { code: true, requiresDimension: true },
+    })).map((a) => [a.code, a.requiresDimension as string]),
+  );
+
+  const closingLines: {
+    account: string; debit?: bigint; credit?: bigint; memo: string; dimensions?: Record<string, string>;
+  }[] = [];
+  for (const l of closing) {
+    const dimensionCode = requiring.get(l.code);
+    if (!dimensionCode) {
+      const amount = BigInt(l.closingMinor);
+      closingLines.push({
+        account: l.code,
+        ...(amount > 0n ? { debit: amount } : { credit: -amount }),
+        memo: `Closing ${l.name}`,
+      });
+      continue;
+    }
+    const split = await splitByDimension({
+      orgId: opts.orgId, entityId: opts.entityId,
+      from: year.startsOn, to: year.endsOn,
+      accountCode: l.code, dimensionCode, closingMinor: BigInt(l.closingMinor),
+    });
+    for (const part of split) {
+      closingLines.push({
+        account: l.code,
+        ...(part.closingMinor > 0n ? { debit: part.closingMinor } : { credit: -part.closingMinor }),
+        memo: `Closing ${l.name} — ${part.valueCode}`,
+        dimensions: { [dimensionCode]: part.valueCode },
+      });
+    }
+  }
+
   try {
     const entry = await post({
       orgId: opts.orgId,
@@ -190,14 +314,7 @@ export async function closeYear(opts: {
       actorId: opts.actorId,
       series: "CL",
       lines: [
-        ...closing.map((l) => {
-          const amount = BigInt(l.closingMinor);
-          return {
-            account: l.code,
-            ...(amount > 0n ? { debit: amount } : { credit: -amount }),
-            memo: `Closing ${l.name}`,
-          };
-        }),
+        ...closingLines,
         // A profit is a credit to retained earnings; a loss is a debit.
         {
           account: RETAINED,

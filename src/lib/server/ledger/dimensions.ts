@@ -162,7 +162,10 @@ export interface DimensionalTrialBalance {
    * real balance.
    */
   reconciles: boolean;
+  /** By magnitude, so two accounts wrong in opposite directions cannot cancel. */
   differenceMinor: string;
+  /** Which accounts are out, so the difference can be looked at rather than only reported. */
+  offBy: { code: string; differenceMinor: string }[];
 }
 
 /* ------------------------------------------------------------------- set-up */
@@ -382,6 +385,14 @@ async function attributeLines(opts: {
   columnOf: Map<string, string>;
   from?: Date;
   to?: Date;
+  /**
+   * A posting source to leave out. The profit and loss drops the year-end
+   * close, because closing a year is a transfer into equity rather than
+   * trading — and the closing entry carries no dimensions, so leaving it in
+   * would put the whole year's result into "Not allocated" and make every
+   * dimensional report declare itself broken for any range covering a close.
+   */
+  excludeSource?: string;
 }): Promise<Map<string, DimBal>> {
   const byAccount = new Map<string, DimBal>();
   if (opts.periodIds.length === 0) return byAccount;
@@ -393,6 +404,7 @@ async function attributeLines(opts: {
         entityId: opts.entityId,
         bookId: opts.bookId,
         status: { in: ["posted", "reversed"] },
+        ...(opts.excludeSource ? { source: { not: opts.excludeSource } } : {}),
         periodId: { in: opts.periodIds },
         ...(opts.from || opts.to
           ? { entryDate: { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) } }
@@ -521,6 +533,7 @@ export async function dimensionalProfitAndLoss(opts: {
     columnOf,
     from,
     to,
+    excludeSource: "close",
   });
 
   const rows = [...byAccount.values()].sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
@@ -687,10 +700,28 @@ export async function dimensionalTrialBalance(opts: {
 
   // Checked across every column before any filtering, so "show me OPS" cannot
   // quietly turn the control off.
+  //
+  // Per account, and by magnitude. Adding the signed differences would report
+  // agreement whenever two accounts were wrong by equal and opposite amounts,
+  // which is precisely the shape a misattributed posting takes. And the walk
+  // is over the union of both sides, because an account the dimensional read
+  // never saw is exactly the one worth catching.
+  // Both sides restricted to the balance sheet, since that is what this report
+  // covers. Walking the control's income and expense accounts as well would
+  // report a difference on every one of them.
+  const controlCodes = control.rows.filter((r) => BALANCE_SHEET.has(r.type)).map((r) => r.code);
+  const codes = new Set([...all.map((r) => r.code), ...controlCodes]);
   let difference = 0n;
-  for (const r of all) {
-    difference += sumColumns(columns, (k) => at(r, k)) - (controlBy.get(r.code) ?? 0n);
+  const offBy: { code: string; differenceMinor: string }[] = [];
+  for (const code of codes) {
+    const row = all.find((r) => r.code === code);
+    const attributed = row ? sumColumns(columns, (k) => at(row, k)) : 0n;
+    const d = attributed - (controlBy.get(code) ?? 0n);
+    if (d === 0n) continue;
+    difference += d < 0n ? -d : d;
+    offBy.push({ code, differenceMinor: d.toString() });
   }
+  offBy.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
 
   let shown = columns;
   if (opts.valueCode !== undefined) {
@@ -727,6 +758,8 @@ export async function dimensionalTrialBalance(opts: {
     totalDebitMinor,
     totalCreditMinor,
     reconciles: difference === 0n,
+    /** The total by magnitude, so opposite errors cannot cancel to nil. */
     differenceMinor: difference.toString(),
+    offBy,
   };
 }

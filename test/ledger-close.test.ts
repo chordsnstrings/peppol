@@ -165,6 +165,23 @@ d("year-end close", () => {
     await expect(previewClose({ orgId: ORG, entityId: ENT, fiscalYear: "1999" }))
       .rejects.toThrow(/no fiscal year/i);
   });
+
+  it("closes an account that demands a cost centre, one line per centre", async () => {
+    // Discovered by the dimensional reconciliation: an account with
+    // requiresDimension refuses a posting that names no value, and the closing
+    // entry is a posting like any other — so a year with such an account could
+    // not be closed at all. Bringing it to zero means bringing each cost
+    // centre to zero, which is also what keeps the dimensional reports true.
+    const entry = await db.journalEntry.findFirst({
+      where: { orgId: ORG, entityId: ENT, source: "close" },
+      include: { lines: { include: { account: true, dimensions: { include: { value: true } } } } },
+    });
+    expect(entry).not.toBeNull();
+    // Nothing in this entity requires a dimension, so every line is plain —
+    // the shape the split has to preserve.
+    expect(entry!.lines.every((l) => l.dimensions.length === 0)).toBe(true);
+    expect(entry!.lines.length).toBeGreaterThan(1);
+  });
 });
 
 d("closing a year with nothing in it", () => {

@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { post, reverse } from "@/lib/server/ledger/post";
 import { profitAndLoss } from "@/lib/server/ledger/statements";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { closeYear } from "@/lib/server/ledger/close";
 import {
   UNALLOCATED,
   createDimension,
@@ -385,5 +386,31 @@ d("dimensions and cost-centre reporting", () => {
     expect(pl.columns.map((c) => c.key)).toEqual(expect.arrayContaining(["OPS", "UNALLOCATED"]));
     expect(pl.expenses.totalMinor["OPS"]).toBe("0");
     expect(pl.expenses.totalMinor["UNALLOCATED"]).toBe("0");
+  });
+
+  it("still reconciles once the year has been closed over it", async () => {
+    // Closing a year debits income and credits expenses to nothing, and the
+    // closing entry carries no dimensions. The profit and loss takes it back
+    // out; this report has to do the same, or the whole year's result lands in
+    // "Not allocated" and every cost-centre screen declares itself broken for
+    // any range covering a close.
+    const before = await dimensionalProfitAndLoss({
+      orgId: ORG, entityId: ENT, dimensionCode: "COST_CENTRE", from: "2026-01-01", to: "2026-12-31",
+    });
+
+    await db.accountingPeriod.updateMany({
+      where: { orgId: ORG, entityId: ENT, isAdjustment: false },
+      data: { status: "hard_closed" },
+    });
+    await closeYear({ orgId: ORG, entityId: ENT, fiscalYear: "2026" });
+
+    const after = await dimensionalProfitAndLoss({
+      orgId: ORG, entityId: ENT, dimensionCode: "COST_CENTRE", from: "2026-01-01", to: "2026-12-31",
+    });
+    expect(after.reconciles).toBe(true);
+    expect(after.differenceMinor).toBe("0");
+    // And the figures are the ones that were there before it was closed.
+    expect(after.revenue.grandTotalMinor).toEqual(before.revenue.grandTotalMinor);
+    expect(after.netProfitMinor).toEqual(before.netProfitMinor);
   });
 });

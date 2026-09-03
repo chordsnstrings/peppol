@@ -480,4 +480,39 @@ d("leases under IFRS 16", () => {
     await expect(payLease({ orgId: ORG, entityId: ENT, leaseCode: "LS-001", period: "2026" }))
       .rejects.toThrow(/looks like 2026-03/);
   });
+
+  /* -------------------------------------------------- the register at a date */
+
+  it("draws the register as it stood, not as it stands", async () => {
+    const now = await leaseRegister({ orgId: ORG, entityId: ENT });
+    expect(now.leases.length).toBeGreaterThan(0);
+
+    // Nothing had commenced in 2020, so the register then is empty — and the
+    // ledger side is read to the same date, or the comparison would be a
+    // register from one year against a ledger from another.
+    const then = await leaseRegister({ orgId: ORG, entityId: ENT, asOf: "2020-01-01" });
+    expect(then.leases).toHaveLength(0);
+    expect(then.ledger.liabilityMinor).toBe("0");
+    expect(then.ledger.rouMinor).toBe("0");
+  });
+
+  it("takes the position from the amortisation schedule, not by dividing", async () => {
+    // The lease used throughout: 24 payments of 5,000.00 at 50bp a month from
+    // 1 January 2026. After twelve of them the liability is what the schedule's
+    // twelfth row closes at — and that is *more* than half the opening balance,
+    // because early payments are mostly interest and principal repays slowly at
+    // first. Halving the term would have understated the liability.
+    const schedule = await leaseSchedule({ orgId: ORG, entityId: ENT, leaseCode: "LS-001" });
+    const twelfth = schedule.rows[11];
+
+    const reg = await leaseRegister({ orgId: ORG, entityId: ENT, asOf: "2026-12-31" });
+    const ls = reg.leases.find((l) => l.code === "LS-001")!;
+    expect(ls.liabilityMinor).toBe(String(twelfth.closingLiabilityMinor));
+    expect(BigInt(ls.liabilityMinor)).toBeGreaterThan(PV_24_AT_50BP / 2n);
+  });
+
+  it("refuses a date it cannot read", async () => {
+    await expect(leaseRegister({ orgId: ORG, entityId: ENT, asOf: "not a date" }))
+      .rejects.toThrow(/date it can read/i);
+  });
 });

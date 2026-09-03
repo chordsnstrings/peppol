@@ -87,6 +87,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/inventory", label: "Inventory" },
       { href: "/accounting/revaluation", label: "Revaluation" },
       { href: "/accounting/leases", label: "Leases" },
+      { href: "/accounting/provisions", label: "Provisions" },
     ],
   },
   {
@@ -101,6 +102,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/layouts", label: "Report layouts" },
       { href: "/accounting/dimensions", label: "Cost centres" },
       { href: "/accounting/projects", label: "Projects" },
+      { href: "/accounting/segments", label: "Segments" },
       { href: "/accounting/insights", label: "Insights" },
       { href: "/accounting/consolidation", label: "Consolidation" },
       { href: "/accounting/equity", label: "Equity and notes" },

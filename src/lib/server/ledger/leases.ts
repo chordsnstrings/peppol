@@ -1000,18 +1000,75 @@ export async function payLease(opts: {
  * only place a reader can find out that it exists at all. IFRS 16.60 requires
  * the short-term and low-value expense to be disclosed for exactly that reason.
  */
-export async function leaseRegister(opts: { orgId: string; entityId: string }) {
-  const leases = (await prisma.lease.findMany({
+/**
+ * A lease's liability and right-of-use asset as they stood at a date.
+ *
+ * The register keeps running figures, which answer "where is this lease now"
+ * and nothing else. A note or a statement for a year that has already closed
+ * needs the position as at that year end, and the running figures would put
+ * today's liability beside that year's ledger — a difference that looks like a
+ * defect and is only the wrong question.
+ *
+ * Taken from the amortisation schedule rather than divided, because unwinding a
+ * liability is not linear: interest is charged on what is left, so the split
+ * between interest and principal moves every period.
+ */
+export function positionAt(lease: LeaseRow, asOf: Date): { liabilityMinor: bigint; rouCarryingMinor: bigint } {
+  if (asOf < lease.startsOn) return { liabilityMinor: 0n, rouCarryingMinor: 0n };
+
+  const periods = termMonths(lease.startsOn, lease.endsOn);
+  const elapsed = Math.min(
+    periods,
+    (asOf.getUTCFullYear() - lease.startsOn.getUTCFullYear()) * 12 +
+      (asOf.getUTCMonth() - lease.startsOn.getUTCMonth()) + 1,
+  );
+  if (elapsed <= 0) {
+    return { liabilityMinor: lease.initialLiabilityMinor, rouCarryingMinor: lease.initialRouMinor };
+  }
+
+  const schedule = buildSchedule({
+    liabilityMinor: lease.initialLiabilityMinor,
+    rouMinor: lease.initialRouMinor,
+    paymentMinor: lease.paymentMinor,
+    ratePerPeriodBps: periodRateBps(lease.discountRateBps, 12),
+    periods,
+  });
+  const row = schedule[elapsed - 1];
+  return { liabilityMinor: row.closingLiabilityMinor, rouCarryingMinor: row.closingRouMinor };
+}
+
+export async function leaseRegister(opts: {
+  orgId: string;
+  entityId: string;
+  /**
+   * The date to draw the register at. Left out, it is the register as it
+   * stands — right for the screen, wrong for a note about a closed year.
+   */
+  asOf?: Date | string;
+}) {
+  const asOf = opts.asOf === undefined
+    ? null
+    : typeof opts.asOf === "string" ? new Date(opts.asOf) : opts.asOf;
+  if (asOf && Number.isNaN(asOf.getTime())) throw new LedgerError("A register needs a date it can read.");
+
+  const all = (await prisma.lease.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId },
     orderBy: [{ status: "asc" }, { code: "asc" }],
   })) as unknown as LeaseRow[];
 
+  // At a past date a lease commenced since is not in the register at all.
+  const leases = asOf ? all.filter((l) => l.startsOn <= asOf) : all;
+
   const rows = leases.map((l) => {
     const exemption = exemptionOf(l);
+    if (!asOf) {
+      return { lease: l, exemption, rouCarrying: l.initialRouMinor - l.accumRouDepMinor };
+    }
+    const at = positionAt(l, asOf);
     return {
-      lease: l,
+      lease: { ...l, liabilityMinor: at.liabilityMinor } as LeaseRow,
       exemption,
-      rouCarrying: l.initialRouMinor - l.accumRouDepMinor,
+      rouCarrying: at.rouCarryingMinor,
     };
   });
 
@@ -1033,7 +1090,7 @@ export async function leaseRegister(opts: { orgId: string; entityId: string }) {
           // A reversed entry and its reversal net to nothing; reading only
           // "posted" lines counts the reversal alone and moves the balance by
           // the full amount, which shows up here as a false difference.
-          entry: { status: { in: ["posted", "reversed"] } } },
+          entry: { status: { in: ["posted", "reversed"] }, ...(asOf ? { entryDate: { lte: asOf } } : {}) } },
         select: { accountId: true, functionalAmountMinor: true },
       })
     : [];
