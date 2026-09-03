@@ -310,9 +310,15 @@ d("comparative and analytical reporting", () => {
     }
 
     // A quotient can be checked from its own two terms and its day multiplier.
+    // Rounded half away from zero, as kpi.ts and statements.ts both now do —
+    // BigInt division truncates, so the half has to be added by hand here.
     for (const r of set.ratios.filter((x) => x.op === "divide" && x.computable)) {
       const numerator = BigInt(r.numerator.value!) * BigInt(r.factor) * 10_000n;
-      expect(Number(numerator / BigInt(r.denominator.value!))).toBe(r.valueBps);
+      const denominator = BigInt(r.denominator.value!);
+      const d = denominator < 0n ? -denominator : denominator;
+      const signed = denominator < 0n ? -numerator : numerator;
+      const rounded = signed >= 0n ? (signed + d / 2n) / d : -((-signed + d / 2n) / d);
+      expect(Number(rounded)).toBe(r.valueBps);
     }
 
     // And the one that is a difference rather than a quotient.
@@ -327,14 +333,15 @@ d("comparative and analytical reporting", () => {
 
     expect(by.get("current")!.valueBps).toBe(609_000);           // 12,180,000 ÷ 200,000
     expect(by.get("quick")!.valueBps).toBe(569_000);             // stock excluded
-    expect(by.get("gross_margin")!.valueBps).toBe(6666);
+    // 66.665% rounds to 66.67%, not down to 66.66% — Statements says the same.
+    expect(by.get("gross_margin")!.valueBps).toBe(6667);
     expect(by.get("net_margin")!.valueBps).toBe(4250);
     // Profit before interest and tax is 1,530,000 + 100,000 of interest.
     expect(by.get("interest_cover")!.numerator.value).toBe("1630000");
     expect(by.get("interest_cover")!.valueBps).toBe(163_000);
     // Capital employed is total assets less what falls due within the year.
     expect(by.get("return_on_capital_employed")!.denominator.value).toBe("11980000");
-    expect(by.get("return_on_capital_employed")!.valueBps).toBe(1360);
+    expect(by.get("return_on_capital_employed")!.valueBps).toBe(1361);
   });
 
   it("measures the working-capital cycle from its three legs", async () => {
@@ -342,8 +349,8 @@ d("comparative and analytical reporting", () => {
     const by = new Map(set.ratios.map((r) => [r.key, r]));
     expect(by.get("receivable_days")!.valueBps).toBe(608_333);   // 60.83 days
     expect(by.get("payable_days")!.valueBps).toBe(608_333);
-    expect(by.get("inventory_days")!.valueBps).toBe(1_216_666);  // 121.67 days
-    expect(by.get("cash_conversion_cycle")!.valueBps).toBe(1_216_666);
+    expect(by.get("inventory_days")!.valueBps).toBe(1_216_667);  // 121.67 days
+    expect(by.get("cash_conversion_cycle")!.valueBps).toBe(1_216_667);
     expect(by.get("receivable_days")!.factor).toBe(365);
   });
 

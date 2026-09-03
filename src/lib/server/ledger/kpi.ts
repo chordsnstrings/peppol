@@ -109,9 +109,29 @@ function money(minor: bigint, currency: string): string {
   return `${neg ? "-" : ""}${currency} ${whole}.${abs.slice(-2)}`;
 }
 
-/** Exact integer ratio, scaled. Null denominators never become zero. */
-const bpsOf = (numerator: bigint, denominator: bigint, scale = 10_000n): bigint | null =>
-  denominator === 0n ? null : (numerator * scale) / denominator;
+/**
+ * Integer ratio, scaled, rounded half away from zero. Null denominators never
+ * become zero.
+ *
+ * This used to truncate, and statements.ts has always rounded. On identical
+ * figures the same gross margin therefore came out 6667 on the Statements
+ * screen and 6666 on Insights, and two screens disagreeing about one number by
+ * a hundredth of a per cent is the kind of thing that makes somebody distrust
+ * both of them. Rounding is the one that is right: 66.665% is nearer 66.67%
+ * than 66.66%, and truncation biases every ratio in the product downwards.
+ *
+ * BigInt division truncates towards zero, so the half has to be added to the
+ * magnitude and the sign put back — adding it to a negative numerator would
+ * round towards zero, not away from it.
+ */
+const bpsOf = (numerator: bigint, denominator: bigint, scale = 10_000n): bigint | null => {
+  if (denominator === 0n) return null;
+  const n = numerator * scale;
+  const d = denominator < 0n ? -denominator : denominator;
+  const signed = denominator < 0n ? -n : n;
+  const half = d / 2n;
+  return signed >= 0n ? (signed + half) / d : -((-signed + half) / d);
+};
 
 function sumWhere(lines: StatementLine[], re: RegExp): bigint {
   return lines.filter((l) => re.test(l.code)).reduce((a, l) => a + BigInt(l.presentedMinor), 0n);

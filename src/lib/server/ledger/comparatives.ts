@@ -696,14 +696,16 @@ const lineAmount = (section: StatementSection, codes: string[]): bigint =>
   section.lines.filter((l) => codes.includes(l.code)).reduce((a, l) => a + BigInt(l.presentedMinor), 0n);
 
 /**
- * Exact integer ratio, scaled, truncated — the same helper `kpi.ts` uses, on
- * purpose. A set of ratios in which some round and some truncate cannot be
- * compared with each other, and the ones taken from the metrics module come
- * back already truncated. Movements and common-size proportions round instead,
- * because there the sign symmetry matters more than agreeing with a ratio.
+ * A ratio in basis points, rounded half away from zero.
+ *
+ * This used to truncate, to stay comparable with the metrics module, which
+ * truncated too. Both now round, so the set is internally consistent and also
+ * agrees with the statements: on the same figures a gross margin of 66.665%
+ * is 6667 everywhere in the product rather than 6667 on one screen and 6666
+ * on another.
  */
 const bpsOf = (numerator: bigint, denominator: bigint): number | null =>
-  denominator === 0n ? null : Number((numerator * 10_000n) / denominator);
+  denominator === 0n ? null : roundedBps(numerator, denominator);
 
 function inputOf(kpi: Kpi, label: string): bigint {
   const hit = kpi.inputs.find((i) => i.label === label);
