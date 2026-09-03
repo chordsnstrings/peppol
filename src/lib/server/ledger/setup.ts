@@ -39,6 +39,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "1200", name: "Inventory", nameAr: "المخزون", type: "ASSET", parent: "10", subtype: "INVENTORY", isControl: true },
   { code: "1250", name: "Goods received not invoiced", nameAr: "بضاعة مستلمة غير مفوترة", type: "ASSET", parent: "10", subtype: "GRNI" },
   { code: "1300", name: "Prepaid expenses", nameAr: "مصروفات مدفوعة مقدماً", type: "ASSET", parent: "10" },
+  { code: "1320", name: "Deferred tax asset", nameAr: "أصل ضريبي مؤجل", type: "ASSET", parent: "15", subtype: "DEFERRED_TAX_ASSET" },
   { code: "1310", name: "Contract assets (unbilled revenue)", nameAr: "أصول العقود (إيرادات غير مفوترة)", type: "ASSET", parent: "10", subtype: "CONTRACT_ASSET" },
   { code: "1350", name: "VAT input (recoverable)", nameAr: "ضريبة القيمة المضافة على المشتريات", type: "ASSET", parent: "10", subtype: "VAT_INPUT", isControl: true },
   { code: "1360", name: "VAT receivable from FTA", nameAr: "ضريبة مستحقة من الهيئة", type: "ASSET", parent: "10", subtype: "VAT_RECEIVABLE" },
@@ -59,6 +60,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "2200", name: "Salaries payable", nameAr: "رواتب مستحقة", type: "LIABILITY", parent: "20", subtype: "PAYROLL" },
   { code: "2250", name: "End-of-service benefits provision", nameAr: "مخصص مكافأة نهاية الخدمة", type: "LIABILITY", parent: "20", subtype: "EOSB" },
   { code: "2300", name: "Customer deposits and advances", nameAr: "دفعات مقدمة من العملاء", type: "LIABILITY", parent: "20" },
+  { code: "2320", name: "Deferred tax liability", nameAr: "التزام ضريبي مؤجل", type: "LIABILITY", parent: "25", subtype: "DEFERRED_TAX_LIABILITY" },
   { code: "2310", name: "Contract liabilities (deferred revenue)", nameAr: "التزامات العقود (إيرادات مؤجلة)", type: "LIABILITY", parent: "20", subtype: "CONTRACT_LIABILITY" },
   { code: "2400", name: "Corporate tax payable", nameAr: "ضريبة الشركات المستحقة", type: "LIABILITY", parent: "20", subtype: "CT_PAYABLE" },
   { code: "25", name: "Non-current liabilities", nameAr: "الالتزامات غير المتداولة", type: "LIABILITY", parent: "2", isPostable: false },
@@ -106,6 +108,7 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "6800", name: "Foreign exchange loss", nameAr: "خسائر فروق العملة", type: "EXPENSE", parent: "6", subtype: "FX_LOSS" },
   { code: "6900", name: "Other operating expenses", nameAr: "مصروفات تشغيلية أخرى", type: "EXPENSE", parent: "6" },
   { code: "7000", name: "Corporate tax expense", nameAr: "مصروف ضريبة الشركات", type: "EXPENSE", subtype: "CT_EXPENSE" },
+  { code: "7010", name: "Deferred tax expense", nameAr: "مصروف الضريبة المؤجلة", type: "EXPENSE", subtype: "DEFERRED_TAX_EXPENSE" },
 ];
 
 /** Open a fiscal year and generate its twelve periods plus an adjustment period. */

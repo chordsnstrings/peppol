@@ -46,12 +46,12 @@ import { trialBalance } from "./reports";
  * Two facts this module needs are not in the ledger, and both are derived
  * rather than invented:
  *
- *  - A journal entry records what an invoice did to the books, not the document
- *    it came from, so no due date reaches the ledger. Terms are therefore taken
- *    as `TERM_DAYS` from the document date — the same 30 days `invoice-build.ts`
- *    puts on every invoice it raises, which is the only due-date rule the
- *    product actually applies. The ageing reports already count days from the
- *    document date, so "overdue" is a bucket boundary rather than a new query.
+ *  - A document's own due date is used where it has one. Where it has none the
+ *    term falls back to `TERM_DAYS` from the document date — the same 30 days
+ *    `invoice-build.ts` puts on every invoice it raises. The distinction is not
+ *    cosmetic: a customer genuinely on sixty days, chased from the thirty-first,
+ *    learns that this list is wrong, and a list somebody has learned to ignore
+ *    is worse than no list.
  *  - Nothing records that a VAT return was filed, by design: filing happens at
  *    the FTA, not here. What the books do carry is the period lock, which the
  *    periods screen describes as the thing "that lets a filed return stay
@@ -105,6 +105,20 @@ export interface AttentionList {
  * not carry the document — see the note at the top of `ar.ts`.
  */
 const TERM_DAYS = 30;
+
+/**
+ * When a document falls due, relative to the date the list is being read at:
+ * negative is overdue, nought is today, positive is the days remaining.
+ *
+ * The document's own due date wins; TERM_DAYS is only the fallback for one
+ * raised before terms reached the ledger.
+ */
+function dueIn(o: { date: string; dueDate: string | null }, asOf: Date): number {
+  const due = o.dueDate
+    ? new Date(`${o.dueDate}T00:00:00Z`)
+    : new Date(new Date(`${o.date}T00:00:00Z`).getTime() + TERM_DAYS * 86_400_000);
+  return Math.floor((due.getTime() - asOf.getTime()) / 86_400_000);
+}
 
 /** "Due soon" is the week ahead. Longer and everything is always on the list. */
 const DUE_SOON_DAYS = 7;
@@ -216,20 +230,20 @@ const overdueReceivables: Check = {
     // Positive only: a credit note sits in the same ageing as a negative open
     // item, and netting it into "what customers owe" would understate the
     // chase list rather than the balance.
-    const overdue = ageing.open.filter((o) => o.daysOld > TERM_DAYS && BigInt(o.outstandingMinor) > 0n);
+    const overdue = ageing.open.filter((o) => dueIn(o, asOf) < 0 && BigInt(o.outstandingMinor) > 0n);
     if (overdue.length === 0) return null;
 
     // `open` is already sorted oldest first, so the worst offender is the head.
     const worst = overdue[0];
     const total = overdue.reduce((a, o) => a + BigInt(o.outstandingMinor), 0n);
-    const pastDue = worst.daysOld - TERM_DAYS;
+    const pastDue = -dueIn(worst, asOf);
 
     return {
       key: "ar_overdue",
       severity: pastDue > BADLY_OVERDUE_DAYS ? "urgent" : "soon",
       title: "Customers are past their payment terms",
       detail:
-        `${plural(overdue.length, "invoice is", "invoices are")} past the ${TERM_DAYS}-day term, ` +
+        `${plural(overdue.length, "invoice is", "invoices are")} past their payment terms, ` +
         `${money(total, currency)} in total. The worst is ${worst.memo || worst.sourceId}: ` +
         `${money(BigInt(worst.outstandingMinor), currency)}, raised ${worst.date}, ` +
         `${plural(pastDue, "day", "days")} past due.`,
@@ -245,18 +259,15 @@ const payablesDueSoon: Check = {
   label: "Payables falling due",
   async run({ orgId, entityId, asOf, currency }) {
     const ageing = await payablesAgeing({ orgId, entityId, asOf });
-    // A bill is due TERM_DAYS after it was raised, so the ones falling due in
-    // the next week are the ones already that many days short of the term.
-    const window = ageing.open.filter(
-      (o) =>
-        BigInt(o.outstandingMinor) > 0n &&
-        o.daysOld >= TERM_DAYS - DUE_SOON_DAYS &&
-        o.daysOld <= TERM_DAYS,
-    );
+    const window = ageing.open.filter((o) => {
+      const days = dueIn(o, asOf);
+      return BigInt(o.outstandingMinor) > 0n && days >= 0 && days <= DUE_SOON_DAYS;
+    });
     if (window.length === 0) return null;
 
     const total = window.reduce((a, o) => a + BigInt(o.outstandingMinor), 0n);
-    const soonest = window[0];
+    // The list is ordered by age; what matters here is which falls due first.
+    const soonest = [...window].sort((a, b) => dueIn(a, asOf) - dueIn(b, asOf))[0];
 
     return {
       key: "ap_due_soon",
@@ -264,8 +275,9 @@ const payablesDueSoon: Check = {
       title: "Supplier bills fall due this week",
       detail:
         `${plural(window.length, "bill", "bills")} worth ${money(total, currency)} ` +
-        `${window.length === 1 ? "reaches its" : "reach their"} ${TERM_DAYS}-day term within the next ` +
-        `${DUE_SOON_DAYS} days. The nearest is ${soonest.memo || soonest.sourceId}, raised ${soonest.date}. ` +
+        `${window.length === 1 ? "falls" : "fall"} due within the next ` +
+        `${DUE_SOON_DAYS} days. The nearest is ${soonest.memo || soonest.sourceId}, raised ${soonest.date}` +
+        `${soonest.dueDate ? ` and due ${soonest.dueDate}` : ""}. ` +
         `Pay ${window.length === 1 ? "it" : "them"} or agree new terms before ` +
         `${window.length === 1 ? "it ages" : "they age"}.`,
       count: window.length,

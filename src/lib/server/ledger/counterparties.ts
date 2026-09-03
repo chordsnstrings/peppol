@@ -458,6 +458,8 @@ interface DocFacts {
   description: string;
   /** The date the item opened — the invoice date, never the receipt's. */
   date: Date;
+  /** The document's own due date, where it carried terms of its own. */
+  due: Date | null;
   reference: string;
   outstanding: bigint;
   opened: boolean;
@@ -542,7 +544,7 @@ async function receivableActivity(opts: {
     include: {
       entry: {
         select: {
-          entryDate: true, sourceId: true, settlesId: true, sourceType: true,
+          entryDate: true, dueDate: true, sourceId: true, settlesId: true, sourceType: true,
           memo: true, source: true, series: true, number: true,
         },
       },
@@ -565,7 +567,9 @@ async function receivableActivity(opts: {
   const lines: ActivityLine[] = [];
   const docs = new Map<string, DocFacts>();
   for (const l of sorted) {
-    const key = l.entry.settlesId ?? l.entry.sourceId ?? l.id;
+    // Line-level settlement first: one batch entry can discharge several
+    // documents, and the entry-level column names only one of them.
+    const key = l.settlesId ?? l.entry.settlesId ?? l.entry.sourceId ?? l.id;
     const reference = `${l.entry.series}-${l.entry.number}`;
     const opensItem = l.entry.source === "invoice";
     lines.push({
@@ -585,6 +589,7 @@ async function receivableActivity(opts: {
       if (opensItem && !prev.opened) {
         prev.description = l.entry.memo ?? prev.description;
         prev.date = l.entry.entryDate;
+        prev.due = l.entry.dueDate;
         prev.reference = reference;
         prev.opened = true;
       }
@@ -595,6 +600,7 @@ async function receivableActivity(opts: {
         number: "",
         description: l.entry.memo ?? "",
         date: l.entry.entryDate,
+        due: l.entry.dueDate,
         reference,
         outstanding: l.functionalAmountMinor,
         opened: opensItem,
@@ -631,7 +637,7 @@ export interface OpenItem {
   reference: string;
   description: string;
   date: string;
-  /** Invoice date plus this party's own terms. */
+  /** The document's own due date, or the invoice date plus this party's terms. */
   dueDate: string;
   outstandingMinor: string;
   daysOld: number;
@@ -644,7 +650,10 @@ function openItemsOf(activity: Activity, party: Counterparty, asOf: Date): OpenI
   for (const doc of activity.docs.values()) {
     if (doc.partyId !== party.id) continue;
     if (doc.outstanding === 0n) continue;
-    const due = addDays(doc.date, party.paymentTerms);
+    // The document's own terms beat the party's default: an invoice raised on
+    // sixty days does not become late on the thirty-first because the customer
+    // record says thirty.
+    const due = doc.due ?? addDays(doc.date, party.paymentTerms);
     // A credit sitting in the customer's favour is not "overdue" — nobody is
     // late paying it, and colouring it red sends the collections team after
     // money the business owes.

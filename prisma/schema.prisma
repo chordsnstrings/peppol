@@ -421,6 +421,10 @@ model JournalEntry {
   series       String           @default("GJ")
   number       String
   entryDate    DateTime         @db.Date
+  /// When the document falls due, where it has terms. Ageing without it can
+  /// only assume everyone pays on the same terms, which nags a customer on
+  /// sixty days from the thirty-first.
+  dueDate      DateTime?        @db.Date
   postedAt     DateTime?
   status       String           @default("draft") // draft | posted | reversed
   memo         String?
@@ -461,6 +465,12 @@ model JournalLine {
   lineNo                Int
   accountId             String
   account               Account                @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  /// The open item this line settles, where one entry settles several.
+  /// `JournalEntry.settlesId` can only name one document, so a batch payment
+  /// posted as a single entry would leave every bill but the first showing as
+  /// outstanding — which is how a supplier gets paid twice. Line-level
+  /// settlement is what lets one entry discharge many.
+  settlesId             String?
   txnCurrency           String
   txnAmountMinor        BigInt
   fxRate                Decimal                @default(1) @db.Decimal(20, 10)
@@ -481,6 +491,7 @@ model JournalLine {
   @@index([orgId, accountId])
   @@index([entryId])
   @@index([orgId, taxCode])
+  @@index([orgId, settlesId])
 }
 
 model JournalLineDimension {
@@ -1309,4 +1320,58 @@ model ReportLayout {
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
+}
+
+
+/// A temporary difference between what an item is worth in the accounts and
+/// what it is worth for tax (IAS 12.5). The register is kept per reporting
+/// date rather than as a running balance, because the deferred tax charge for
+/// a period is the movement between two dates and a running balance cannot be
+/// reconstructed once it has been overwritten.
+model DeferredTaxItem {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// The reporting date these figures were measured at.
+  asOf          DateTime @db.Date
+  code          String
+  description   String
+  /// FIXED_ASSET | PROVISION | LEASE | LOSS | REVENUE | OTHER
+  category      String   @default("OTHER")
+  /// What the accounts carry it at.
+  carryingMinor BigInt
+  /// What tax law will allow or charge in future — the tax base (IAS 12.7-8).
+  taxBaseMinor  BigInt
+  /// The rate expected to apply when the difference reverses (IAS 12.47), in
+  /// basis points. 900 is the UAE's 9% headline rate.
+  rateBps       Int      @default(900)
+  /// A deductible difference is only an asset to the extent future profit is
+  /// probable (IAS 12.24). Nil means recognised in full.
+  unrecognisedMinor BigInt @default(0)
+  note          String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([orgId, entityId, asOf, code])
+  @@index([orgId, entityId, asOf])
+}
+
+/// The deferred tax position posted at one reporting date, so the next period
+/// knows what the movement is measured against.
+model DeferredTaxPosting {
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  asOf         DateTime @db.Date
+  /// Net position: positive is a liability, negative an asset.
+  netMinor     BigInt
+  assetMinor   BigInt
+  liabilityMinor BigInt
+  /// The movement charged to profit or loss for the period.
+  chargeMinor  BigInt
+  entryId      String?
+  createdAt    DateTime @default(now())
+
+  @@unique([orgId, entityId, asOf])
+  @@index([orgId, entityId])
 }

@@ -190,6 +190,9 @@ export async function postBill(opts: {
     orgId,
     entityId: bill.entityId,
     entryDate: bill.issueDate,
+    // The supplier's terms, carried onto the entry so the payables ageing can
+    // tell what is actually late from what is merely not new.
+    dueDate: bill.dueDate ?? null,
     memo: `${isCredit ? "Supplier credit" : "Bill"} ${bill.number} — ${bill.seller?.nameEn ?? "supplier"}`,
     source: "bill",
     sourceType: bill.docType,
@@ -269,6 +272,26 @@ export async function postSupplierPayment(opts: {
 }
 
 /** Payables ageing — the same open-item netting as receivables, other way up. */
+/** One document, netted down to what is still outstanding on it. */
+export interface OpenItem {
+  sourceId: string;
+  memo: string;
+  /** The day the document was raised. */
+  date: string;
+  /** The day it falls due, where the document carried terms. */
+  dueDate: string | null;
+  outstandingMinor: string;
+  /** Days since it was raised — what the ageing bands are measured on. */
+  daysOld: number;
+  /** Days past its own due date; nil where none is known or it is not yet due. */
+  daysOverdue: number;
+}
+
+/** Whole days, so a report run at teatime says the same as one run at dawn. */
+function daysBetween(from: Date, to: Date): number {
+  return Math.floor((to.getTime() - from.getTime()) / 86_400_000);
+}
+
 export async function payablesAgeing(opts: { orgId: string; entityId: string; asOf?: Date }) {
   const asOf = opts.asOf ?? new Date();
   const account = await prisma.account.findFirst({
@@ -282,34 +305,49 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
       entry: { orgId: opts.orgId, status: { in: ["posted", "reversed"] }, entryDate: { lte: asOf } },
     },
     include: {
-      entry: { select: { entryDate: true, sourceId: true, settlesId: true, sourceType: true, memo: true, source: true } },
+      entry: { select: { entryDate: true, dueDate: true, sourceId: true, settlesId: true, sourceType: true, memo: true, source: true } },
     },
     orderBy: { entry: { entryDate: "asc" } },
   });
 
-  const byDoc = new Map<string, { memo: string; date: Date; outstanding: bigint; opened: boolean }>();
+  const byDoc = new Map<string, { memo: string; date: Date; due: Date | null; outstanding: bigint; opened: boolean }>();
   for (const l of lines) {
-    const key = l.entry.settlesId ?? l.entry.sourceId ?? l.id;
+    // Line-level settlement first: one batch payment entry discharges several
+    // bills, and the entry-level column can only name one of them.
+    const key = l.settlesId ?? l.entry.settlesId ?? l.entry.sourceId ?? l.id;
     const opensItem = l.entry.source === "bill";
     const prev = byDoc.get(key);
     if (prev) {
       prev.outstanding += l.functionalAmountMinor;
-      if (opensItem && !prev.opened) { prev.memo = l.entry.memo ?? prev.memo; prev.date = l.entry.entryDate; prev.opened = true; }
+      if (opensItem && !prev.opened) { prev.memo = l.entry.memo ?? prev.memo; prev.date = l.entry.entryDate; prev.due = l.entry.dueDate; prev.opened = true; }
     } else {
-      byDoc.set(key, { memo: l.entry.memo ?? "", date: l.entry.entryDate, outstanding: l.functionalAmountMinor, opened: opensItem });
+      byDoc.set(key, { memo: l.entry.memo ?? "", date: l.entry.entryDate, due: l.entry.dueDate, outstanding: l.functionalAmountMinor, opened: opensItem });
     }
   }
 
   const buckets = { current: 0n, d30: 0n, d60: 0n, d90: 0n, d90plus: 0n };
-  const open: { sourceId: string; memo: string; date: string; outstandingMinor: string; daysOld: number }[] = [];
+  const open: OpenItem[] = [];
+  let overdue = 0n;
   for (const [sourceId, row] of byDoc) {
     if (row.outstanding === 0n) continue;
-    const days = Math.floor((asOf.getTime() - row.date.getTime()) / 86_400_000);
+    const days = daysBetween(row.date, asOf);
     const bucket = days <= 30 ? "current" : days <= 60 ? "d30" : days <= 90 ? "d60" : days <= 120 ? "d90" : "d90plus";
     // Payables sit on the credit side, so the ledger holds them negative.
     // The report shows what is owed as a positive figure.
     buckets[bucket] += -row.outstanding;
-    open.push({ sourceId, memo: row.memo, date: row.date.toISOString().slice(0, 10), outstandingMinor: (-row.outstanding).toString(), daysOld: days });
+    // Overdue is a different question from old, and only the due date answers
+    // it. The bands stay measured from the document date, so a report that has
+    // always meant "age" keeps meaning it; what is added is the fact that used
+    // to be missing.
+    const daysOverdue = row.due ? Math.max(0, daysBetween(row.due, asOf)) : 0;
+    if (daysOverdue > 0) overdue += -row.outstanding;
+    open.push({
+      sourceId, memo: row.memo,
+      date: row.date.toISOString().slice(0, 10),
+      dueDate: row.due ? row.due.toISOString().slice(0, 10) : null,
+      outstandingMinor: (-row.outstanding).toString(),
+      daysOld: days, daysOverdue,
+    });
   }
 
   open.sort((a, b) => b.daysOld - a.daysOld);
@@ -317,6 +355,8 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
     asOf: asOf.toISOString().slice(0, 10),
     buckets: Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v.toString()])),
     totalMinor: Object.values(buckets).reduce((a, b) => a + b, 0n).toString(),
+    /** Of the total, what is past its own due date. Nil where none is known. */
+    overdueMinor: overdue.toString(),
     open,
   };
 }

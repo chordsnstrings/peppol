@@ -47,6 +47,13 @@ export interface PostLine {
   taxCode?: string;
   /** Emirate of supply; the VAT 201 splits standard-rated supplies by it. */
   taxEmirate?: string;
+  /**
+   * The open item this line settles. Use it where one entry discharges several
+   * documents — a batch payment run. `PostInput.settlesId` names one document
+   * for the whole entry, which cannot express that, and an open item that
+   * still looks outstanding is one that gets paid twice.
+   */
+  settlesId?: string;
   /** { dimensionCode: valueCode }, e.g. { COST_CENTRE: "OPS" }. */
   dimensions?: Record<string, string>;
 }
@@ -56,6 +63,12 @@ export interface PostInput {
   entityId: string;
   bookCode?: string;
   entryDate: Date | string;
+  /**
+   * When the document falls due, where it has terms. Ageing falls back to the
+   * entry date without it, which assumes every counterparty is on the same
+   * terms — and chases the ones who are not.
+   */
+  dueDate?: Date | string | null;
   memo?: string;
   /**
    * Post into a named period rather than the one the date falls in.
@@ -144,7 +157,7 @@ function rethrowLedgerErrors(e: unknown): never {
 
 export async function post(input: PostInput) {
   const {
-    orgId, entityId, bookCode = "PRIMARY", entryDate, memo, source = "manual",
+    orgId, entityId, bookCode = "PRIMARY", entryDate, dueDate, memo, source = "manual",
     sourceType, sourceId, externalKey, reversalOfId, settlesId, periodId,
     actorType = "HUMAN", actorId, series = "GJ", lines,
   } = input;
@@ -161,6 +174,12 @@ export async function post(input: PostInput) {
   }
 
   const date = asDate(entryDate);
+  const due = dueDate == null ? null : asDate(dueDate);
+  if (due && due < date) {
+    throw new LedgerError(
+      `${iso(due)} is before ${iso(date)}. A document cannot fall due before it is raised — check which way round the dates went in.`,
+    );
+  }
 
   return prisma.$transaction(async (tx) => {
     const book = await tx.book.findFirst({ where: { orgId, entityId, code: bookCode } });
@@ -277,6 +296,7 @@ export async function post(input: PostInput) {
         memo: l.memo ?? null,
         taxCode: l.taxCode ?? null,
         taxEmirate: l.taxEmirate ?? null,
+        settlesId: l.settlesId ?? null,
         dims: Object.entries(l.dimensions ?? {}).map(([d, v]) => dimValues.get(`${d}:${v}`)!),
       };
     });
@@ -305,7 +325,7 @@ export async function post(input: PostInput) {
     const entry = await tx.journalEntry.create({
       data: {
         orgId, entityId, bookId: book.id, periodId: period.id, series, number,
-        entryDate: date, status: "posted", memo: memo ?? null,
+        entryDate: date, dueDate: due, status: "posted", memo: memo ?? null,
         source, sourceType: sourceType ?? null, sourceId: sourceId ?? null,
         externalKey: externalKey ?? null, reversalOfId: reversalOfId ?? null,
         settlesId: settlesId ?? null,
@@ -315,7 +335,7 @@ export async function post(input: PostInput) {
             lineNo: p.lineNo, orgId: p.orgId, accountId: p.accountId,
             txnCurrency: p.txnCurrency, txnAmountMinor: p.txnAmountMinor, fxRate: p.fxRate,
             functionalCurrency: p.functionalCurrency, functionalAmountMinor: p.functionalAmountMinor,
-            memo: p.memo, taxCode: p.taxCode, taxEmirate: p.taxEmirate,
+            memo: p.memo, taxCode: p.taxCode, taxEmirate: p.taxEmirate, settlesId: p.settlesId,
             dimensions: { create: p.dims.map((d) => ({ dimensionId: d.dimensionId, valueId: d.valueId })) },
           })),
         },
@@ -383,6 +403,9 @@ export async function reverse(opts: {
         // invoice would quietly leave its supply on the VAT return.
         taxCode: l.taxCode ?? undefined,
         taxEmirate: l.taxEmirate ?? undefined,
+        // And which open item the line settled: without it, reversing a batch
+        // payment would credit the bank back but leave the bills discharged.
+        settlesId: l.settlesId ?? undefined,
         // And its dimensions, for two reasons. Without them a cost-centre
         // report is right in total and wrong in every column — the cost stays
         // against the department and the credit lands in Unallocated, and
@@ -404,6 +427,11 @@ export async function reverse(opts: {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/** A date as the reader wrote it, for a message about two dates. */
+function iso(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
 
 function fmt(minor: bigint) {
   const neg = minor < 0n;

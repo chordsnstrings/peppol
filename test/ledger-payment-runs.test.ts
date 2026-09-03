@@ -308,31 +308,38 @@ d("supplier payment runs", () => {
 
   /* ---------------------------------------------------------------- release */
 
-  it("posts one debit to payables per bill and credits the bank the total", async () => {
+  it("posts one debit to payables per bill and one credit to the bank for the transfer", async () => {
     const before = await payablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-04-25") });
     const r = await releaseRun({ orgId: ORG, runId: run1, releasedOn: "2026-04-25" });
 
     expect(r.status).toBe("released");
     expect(r.alreadyReleased).toBe(false);
-    expect(r.entryIds).toHaveLength(3);
+    // One entry, because one transfer left the bank. A separate entry per bill
+    // would credit the bank three times against a statement showing one debit,
+    // and the reconciliation would have nothing to match.
+    expect(r.entryIds).toHaveLength(1);
     expect(r.entryId).toBe(r.entryIds[0]);
 
     const total = 105_000n + 12_600n + 31_500n;
     expect(await linesOfRun(run1)).toEqual({ "2000": total, "1010": -total });
 
-    // Each entry settles its own bill, exactly as postSupplierPayment would.
     const entries = await db.journalEntry.findMany({
       where: { orgId: ORG, sourceType: "PAYMENT_RUN", sourceId: run1 },
       include: { lines: { include: { account: true } } },
     });
-    expect(entries.every((e) => e.series === "PR")).toBe(true);
-    expect(new Set(entries.map((e) => e.settlesId))).toEqual(new Set([A1.id, A5.id, CTRL.id]));
-    for (const e of entries) {
-      const debit = e.lines.find((l) => l.account.code === "2000")!;
-      const credit = e.lines.find((l) => l.account.code === "1010")!;
-      expect(debit.txnAmountMinor).toBe(-credit.txnAmountMinor);
-      expect(debit.txnAmountMinor > 0n).toBe(true);
-    }
+    expect(entries).toHaveLength(1);
+    expect(entries[0].series).toBe("PR");
+
+    // Settlement is on the line, so one entry discharges all three bills.
+    const payableLines = entries[0].lines.filter((l) => l.account.code === "2000");
+    expect(payableLines).toHaveLength(3);
+    expect(new Set(payableLines.map((l) => l.settlesId))).toEqual(new Set([A1.id, A5.id, CTRL.id]));
+    expect(payableLines.every((l) => l.txnAmountMinor > 0n)).toBe(true);
+
+    const bankLines = entries[0].lines.filter((l) => l.account.code === "1010");
+    expect(bankLines).toHaveLength(1);
+    expect(bankLines[0].txnAmountMinor).toBe(-total);
+
     expect(BigInt(before.totalMinor)).toBeGreaterThan(0n);
   });
 
@@ -366,12 +373,12 @@ d("supplier payment runs", () => {
   it("releases twice without paying twice", async () => {
     const again = await releaseRun({ orgId: ORG, runId: run1, releasedOn: "2026-04-25" });
     expect(again.alreadyReleased).toBe(true);
-    expect(again.entryIds).toHaveLength(3);
+    expect(again.entryIds).toHaveLength(1);
 
     const total = 105_000n + 12_600n + 31_500n;
     expect(await linesOfRun(run1)).toEqual({ "2000": total, "1010": -total });
     const count = await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYMENT_RUN", sourceId: run1 } });
-    expect(count).toBe(3);
+    expect(count).toBe(1);
   });
 
   it("refuses to cancel a released run and says to reverse the entries instead", async () => {
@@ -510,10 +517,9 @@ d("supplier payment runs", () => {
 
   it("gives one run back in full, with the entries it posted", async () => {
     const run = await runDetail({ orgId: ORG, runId: run1 });
-    expect(run.entries).toHaveLength(3);
-    expect(run.entries.every((e) => e.reference.startsWith("PR-"))).toBe(true);
-    expect(run.entries.map((e) => e.entryDate)).toEqual(["2026-04-25", "2026-04-25", "2026-04-25"]);
-    expect(new Set(run.entries.map((e) => e.settlesId))).toEqual(new Set([A1.id, A5.id, CTRL.id]));
+    expect(run.entries).toHaveLength(1);
+    expect(run.entries[0].reference.startsWith("PR-")).toBe(true);
+    expect(run.entries[0].entryDate).toBe("2026-04-25");
     await expect(runDetail({ orgId: ORG, runId: "no-such-run" })).rejects.toThrow(/does not exist/i);
   });
 

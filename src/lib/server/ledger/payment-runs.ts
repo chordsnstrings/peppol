@@ -47,21 +47,17 @@ import type { Invoice } from "@/lib/domain/types";
  * path that would call assertApproved() before it posts. That call is not made
  * from here — the same reason approvals.ts gives for not making it itself.
  *
- * WHAT THIS FILE FOUND IN THE LEDGER, and could not fix from here. Settlement
- * is recorded at ENTRY granularity: `JournalEntry.settlesId` names one
- * document, and payablesAgeing() keys every 2000 line by
- * `entry.settlesId ?? entry.sourceId`. So a single journal entry can discharge
- * exactly one open item. One entry carrying "Dr 2000 ×N, Cr 1010 total" would
- * therefore leave N−1 bills showing as outstanding in the ageing while the cash
- * had gone — the precise condition under which a supplier gets paid twice. A
- * release consequently posts one settlement entry per bill, identical to what
- * postSupplierPayment() would have posted for each of them individually, tied
- * together by a shared sourceId (the run) and a shared series. The bank sees
- * one transfer per beneficiary rather than one lump; the ageing is right, which
- * is the half that must not be wrong. Fixing this properly needs either a
- * settlesId on the journal LINE or an allocation table, both of which are
- * schema changes; PaymentRun.entryId names the first entry of the batch, and
- * runDetail() lists them all.
+ * ONE ENTRY, MANY BILLS. A release posts a single entry: one debit to payables
+ * per bill, each line naming the bill it settles, and one credit to the bank
+ * for the transfer that actually left the account. That is only possible
+ * because settlement is recorded on the LINE (`JournalLine.settlesId`) as well
+ * as on the entry. It matters twice over. If the entry could name only one
+ * document, every bill but the first would still show as outstanding while the
+ * cash had gone — the precise condition under which a supplier gets paid twice.
+ * And if the run posted a separate entry per bill instead, the bank would be
+ * credited once per bill against a statement showing a single debit, leaving
+ * the run correct in the payables ledger and impossible to reconcile in the
+ * cash book.
  *
  * NOT MODELLED, deliberately:
  *   • Part payment. A run pays what the payable carries, in full. Paying half a
@@ -778,7 +774,6 @@ export async function releaseRun(opts: {
   }
 
   const entryDate = opts.releasedOn === undefined ? run.runDate : asDate(opts.releasedOn, "A release date");
-  const entryIds: string[] = [];
 
   for (const item of ins) {
     if (!item.billId) {
@@ -787,40 +782,48 @@ export async function releaseRun(opts: {
           `in the payables ageing. Take it out of the run and pay it on its own.`,
       );
     }
-    const entry = await post({
-      orgId: run.orgId,
-      entityId: run.entityId,
-      entryDate,
-      memo: `Payment run ${run.reference} — ${item.billNumber}`,
-      source: "payment",
-      sourceType: "PAYMENT_RUN",
-      sourceId: run.id,
-      // The same mechanism postSupplierPayment() uses: the payable is netted
-      // against the bill it discharges, so the ageing clears exactly as it
-      // would have done paying this bill on its own.
-      settlesId: item.billId,
-      externalKey: `payment-run:${run.id}:${item.id}`,
-      actorType: opts.actorType ?? "HUMAN",
-      actorId: opts.actorId,
-      series: "PR",
-      lines: [
-        { account: AP_CONTROL, debit: item.amountMinor, memo: `Settles ${item.billNumber}` },
-        { account: run.bankAccount, credit: item.amountMinor, memo: `Payment for ${item.billNumber}` },
-      ],
-    });
-    entryIds.push(entry.id);
   }
+
+  // One entry for the run, one bank line for the transfer that actually left
+  // the account. Posting a separate entry per bill would credit the bank once
+  // per bill while the statement shows a single debit for the total, and the
+  // bank reconciliation would then have nothing to match — the run would be
+  // correct in the payables ledger and unreconcilable in the cash book.
+  //
+  // What makes that possible is settlement recorded on the line: each payable
+  // line names the bill it discharges, so the ageing clears exactly as it
+  // would have done paying each bill on its own.
+  const total = ins.reduce((a, i) => a + i.amountMinor, 0n);
+  const entry = await post({
+    orgId: run.orgId,
+    entityId: run.entityId,
+    entryDate,
+    memo: `Payment run ${run.reference} — ${ins.length} bill${ins.length === 1 ? "" : "s"}`,
+    source: "payment",
+    sourceType: "PAYMENT_RUN",
+    sourceId: run.id,
+    externalKey: `payment-run:${run.id}`,
+    actorType: opts.actorType ?? "HUMAN",
+    actorId: opts.actorId,
+    series: "PR",
+    lines: [
+      ...ins.map((item) => ({
+        account: AP_CONTROL,
+        debit: item.amountMinor,
+        settlesId: item.billId as string,
+        memo: `Settles ${item.billNumber}`,
+      })),
+      { account: run.bankAccount, credit: total, memo: `Payment run ${run.reference}` },
+    ],
+  });
 
   await prisma.paymentRun.update({
     where: { id: run.id },
-    // The column holds one entry; the batch is found by sourceId. See the note
-    // at the top of the file — this names the first of them so the CHECK that
-    // a released run points at an entry means what it says.
-    data: { status: "released", entryId: entryIds[0], releasedAt: new Date() },
+    data: { status: "released", entryId: entry.id, releasedAt: new Date() },
   });
 
   const v = await view(await loadRun(opts.orgId, opts.runId));
-  return { ...v, entryIds, alreadyReleased: false };
+  return { ...v, entryIds: [entry.id], alreadyReleased: false };
 }
 
 /* ---------------------------------------------------------------- cancelling */
