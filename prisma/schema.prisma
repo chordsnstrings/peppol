@@ -1861,3 +1861,67 @@ model WipPosting {
   @@unique([orgId, entityId, period])
   @@index([orgId, entityId])
 }
+
+
+/// A price list: what an item is sold or bought at, for whom, from when.
+///
+/// Prices are otherwise typed onto every document by hand, which is where
+/// margin quietly leaks — nobody can report on a discount that was never
+/// recorded as one.
+model PriceList {
+  id        String    @id @default(cuid())
+  orgId     String
+  entityId  String
+  code      String
+  name      String
+  /// A list prices in one currency. A list in another currency is not
+  /// converted into the document's — see the module for why.
+  currency  String    @default("AED")
+  /// SELL | BUY
+  kind      String    @default("SELL")
+  /// The list used when a party has no list of its own.
+  isDefault Boolean   @default(false)
+  validFrom DateTime  @db.Date
+  validTo   DateTime? @db.Date
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, kind, isDefault])
+}
+
+/// One priced row: an item, at a quantity break, over a period.
+model PriceListEntry {
+  id              String    @id @default(cuid())
+  orgId           String
+  priceListId     String
+  itemCode        String
+  /// The quantity from which this row applies, in thousandths. Nought is the
+  /// base price.
+  minQuantityMilli BigInt   @default(0)
+  unitPriceMinor  BigInt
+  /// A discount carried by the list itself, so a "10% off list" arrangement
+  /// is a fact about the arrangement rather than arithmetic somebody did.
+  discountBps     Int       @default(0)
+  validFrom       DateTime  @db.Date
+  validTo         DateTime? @db.Date
+  createdAt       DateTime  @default(now())
+
+  @@index([orgId, priceListId, itemCode, minQuantityMilli])
+}
+
+/// Which list prices for which party. A party with no assignment is priced
+/// from the default list.
+model PriceListAssignment {
+  id          String   @id @default(cuid())
+  orgId       String
+  entityId    String
+  /// The customer or supplier, by the key counterparties.ts resolves to.
+  partyKey    String
+  priceListId String
+  createdAt   DateTime @default(now())
+
+  @@unique([orgId, entityId, partyKey, priceListId])
+  @@index([orgId, entityId, partyKey])
+}
