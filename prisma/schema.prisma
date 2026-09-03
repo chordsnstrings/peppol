@@ -1057,3 +1057,120 @@ model Lease {
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
 }
+
+/// A customer or supplier the books deal with.
+///
+/// Kept as its own record rather than a name repeated on every document,
+/// because credit limits, payment terms and a TRN are facts about the party,
+/// not about any one invoice.
+model Counterparty {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  code          String
+  name          String
+  nameAr        String?
+  /// CUSTOMER | SUPPLIER | BOTH
+  kind          String   @default("CUSTOMER")
+  trn           String?
+  email         String?
+  phone         String?
+  /// Days from invoice date. 0 means due on receipt.
+  paymentTerms  Int      @default(30)
+  /// Nil means no limit set, which is different from a limit of nothing.
+  creditLimitMinor BigInt?
+  /// Whether new sales are blocked because of overdue debt.
+  onHold        Boolean  @default(false)
+  holdReason    String?
+  currency      String   @default("AED")
+  notes         String?
+  status        String   @default("active")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, kind, status])
+}
+
+/// A batch of supplier payments prepared, approved and released together.
+model PaymentRun {
+  id           String            @id @default(cuid())
+  orgId        String
+  entityId     String
+  reference    String
+  runDate      DateTime          @db.Date
+  bankAccount  String            @default("1010")
+  currency     String            @default("AED")
+  /// draft | approved | released | cancelled
+  status       String            @default("draft")
+  approvedBy   String?
+  approvedAt   DateTime?
+  releasedAt   DateTime?
+  entryId      String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  items        PaymentRunItem[]
+
+  @@unique([orgId, entityId, reference])
+  @@index([orgId, entityId, status])
+}
+
+model PaymentRunItem {
+  id          String     @id @default(cuid())
+  orgId       String
+  runId       String
+  run         PaymentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// The bill being paid, and who it is owed to.
+  billId      String?
+  billNumber  String
+  supplierName String
+  amountMinor BigInt
+  /// Excluded from the run, with the reason, rather than silently dropped.
+  excluded    Boolean    @default(false)
+  excludeReason String?
+
+  @@index([runId])
+}
+
+/// A revenue contract under IFRS 15, with its performance obligations.
+model RevenueContract {
+  id             String                @id @default(cuid())
+  orgId          String
+  entityId       String
+  code           String
+  customerName   String
+  signedOn       DateTime              @db.Date
+  /// The total transaction price allocated across obligations.
+  priceMinor     BigInt
+  currency       String                @default("AED")
+  status         String                @default("active")
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  obligations    PerformanceObligation[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+model PerformanceObligation {
+  id             String          @id @default(cuid())
+  orgId          String
+  contractId     String
+  contract       RevenueContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  seq            Int
+  description    String
+  /// The standalone selling price, used to allocate the transaction price.
+  standalonePriceMinor BigInt
+  /// What the allocation gave this obligation.
+  allocatedMinor BigInt          @default(0)
+  /// POINT_IN_TIME | OVER_TIME
+  timing         String          @default("POINT_IN_TIME")
+  /// Recognised so far, in minor units.
+  recognisedMinor BigInt         @default(0)
+  /// Percent complete in basis points, for an over-time obligation.
+  progressBps    Int             @default(0)
+  satisfiedOn    DateTime?       @db.Date
+
+  @@unique([contractId, seq])
+  @@index([orgId, contractId])
+}
