@@ -5,9 +5,31 @@ importantly — what it does not. It is written to be checked rather than
 believed: every claim below points at the module that makes it and the test
 that holds it.
 
-Counts as at this revision: **54 server modules**, **54 HTTP endpoints**,
-**50 screens**, **56 test files** holding **1,156 tests**, **71 database
-models**, **40 migrations**.
+The counts below are derived, not maintained: `node scripts/capabilities.mjs`
+enumerates them from the source, so this section is either right or it is a bug
+in that script. A register kept by hand stops agreeing with the code the first
+week nobody updates it.
+
+A **capability** is one thing a user or an integration can ask the product to
+do, or one guarantee it makes and holds:
+
+| Kind | What it counts | Now |
+| --- | --- | --- |
+| operation | an exported function in a ledger module — the unit of work | 438 |
+| endpoint | an HTTP verb, or a named action within one | 331 |
+| rule | a constraint or trigger PostgreSQL enforces itself | 235 |
+| screen | a page somebody navigates to | 79 |
+| | **capabilities** | **1,083** |
+| check | an assertion in the verification suites | 1,645 |
+
+An operation reached over HTTP is counted once as each, because they are
+different things: one is what the code can do, the other is what is reachable
+over the wire, and a product with the first and not the second has a gap.
+Checks are counted apart from capabilities — an assertion is how a capability
+is held, not another capability.
+
+Also as at this revision: **65 test files**, **91 database models**,
+**50 migrations**.
 
 ---
 
@@ -33,6 +55,14 @@ module, and a mistake.
 | Unpaid leave cannot be recorded as paid | `LeaveRecord_unpaid_check` |
 | Two annual-leave records for one person cannot overlap, even under a race | `LeaveRecord_no_overlap`, a gist exclusion |
 | A revaluation surplus is a credit balance or nothing — a deficit is an expense | `FixedAsset_surplus_check` |
+| One item at one quantity break cannot be priced twice over the same days | `PriceListEntry_no_overlap`, a gist exclusion |
+| Only one default price list may be in force at a time, per kind | `PriceList_one_default_in_force`, a gist exclusion |
+| A delivery note cannot be signed for before it has been dispatched | `DeliveryNote_signed_check` |
+| A delivered cost with no movement behind it is refused — it could not be traced | `DeliveryNoteLine_movement_check` |
+| Time is recorded in minutes, and a day holds no more than 1,440 of them | `TimeEntry_minutes_check` |
+| Written-off time has to say why; invoiced time has to name the invoice | `TimeEntry_writeoff_check`, `TimeEntry_invoiced_check` |
+| Non-billable time can never be invoiced | `TimeEntry_billable_check` |
+| Work in progress is an asset or it is nothing — never a negative | `WipPosting_balance_check` |
 
 ## Recording
 
@@ -60,6 +90,24 @@ recognition under IFRS 15, which corrects to a target rather than posting
 increments, so running it twice posts nothing and running it after a
 modification posts the cumulative catch-up.
 
+**Price lists** answer one question — what does this item cost this party, in
+this quantity, on this date — and answer it with the derivation attached. Two
+gist exclusions stop that question ever having two answers. A list in another
+currency is refused rather than converted, because a rate chosen there ends up
+inside the selling price. What was charged is measured against what the list
+says, which is the only way a discount nobody recorded as a discount becomes a
+number.
+
+**Delivery notes** sit where the lorry is. Dispatching moves cost out of stock
+and nothing else; the revenue stays on the invoice. Delivered-and-not-invoiced
+is reported at the order price as a memorandum figure, not posted as accrued
+income — whether a delivery satisfies a performance obligation is an IFRS 15
+question and it is answered on the revenue screen. Goods coming back are
+received at the cost they left at, never at today's average.
+
+**Subscriptions** raise one invoice per scheduled period, held by a unique
+index rather than by a check, so an interrupted run can simply be run again.
+
 ## Purchases
 
 Payables and ageing; purchase orders, goods receipts and a three-way match with
@@ -70,6 +118,12 @@ one bank line for the transfer that actually left the account, and a payables
 line per bill naming what it settles.
 
 ## Cash
+
+**Post-dated cheques** — the normal way a UAE business gets paid — with their
+own account outside cash and cash equivalents, because IAS 7.7 wants an
+insignificant risk of a change in value and a ninety-day cheque is nothing but
+that risk. Taking the cheque discharges the invoice; a bounce puts the customer
+back on the same open item rather than on a fresh one that looks new.
 
 Bank reconciliation; statement import that reads MT940, CAMT.053, OFX and
 several CSV dialects, refuses a file whose own lines do not foot to its own
@@ -86,8 +140,10 @@ IAS 36, where the split between equity and profit follows that asset's own
 history. Inventory at weighted average or FIFO, carried at the lower of cost
 and net realisable value — where the allowance is derived rather than
 accumulated, which makes the IAS 2.33 ceiling structural instead of a guard.
-Leases under IFRS 16, with the recognition exemptions disclosed because an
-exemption nobody can see is an exemption nobody can audit. Provisions and
+Stock locations, batches, expiry dates and reorder levels — where a transfer
+posts nothing at all, because it changes neither the quantity on hand nor its
+cost. Leases under IFRS 16, with the recognition exemptions disclosed because
+an exemption nobody can see is an exemption nobody can audit. Provisions and
 contingencies under IAS 37.
 
 ## Reports
@@ -98,12 +154,31 @@ equity and the notes, a cash forecast that says how firm each line is, a report
 designer that reports which accounts no row claims, an audit trail, and
 analytics — the tests an auditor runs looking for what should not be there.
 
+**Comparatives** put the prior period beside the current one, with common-size
+proportions that add up exactly and eleven ratios that each hand back their own
+numerator and denominator. A percentage change against a nil or negative base
+is left undefined rather than printed: "revenue improved 150%" against a loss
+is a sentence with no meaning.
+
+**Timesheets and work in progress** record time in minutes — a quarter of an
+hour is 15, and 0.25 of an hour is a float that stops adding up by the third
+week — and carry unbilled billable time at what it cost, never at what it will
+be billed for. The run measures the movement against what account 1330
+actually holds, so running it twice posts once.
+
 ## Tax and close
 
 A month-end checklist that separates what would make the closed month *wrong*
 from what would merely be better done first, and counts a check that could not
 run against closing rather than as a pass. The VAT return, reconciled to both
-control accounts. Corporate tax under
+control accounts. The capital assets scheme under Executive Regulation
+Articles 57 and 58, which adjusts input tax over ten years for a building and
+five for anything else as actual use turns out differently from what was
+expected. The margin scheme, where the tax is 5/105 of the margin and the
+invoice shows no tax at all — Executive Regulation Article 43 — and the
+liability comes out of the revenue rather than being added to what the customer
+pays. Designated zones, which under Article 51 belong on no box of the VAT 201
+rather than in the zero-rated box. Corporate tax under
 Federal Decree-Law 47/2022 with Small Business Relief. Deferred tax under
 IAS 12. The FTA audit file. Periods and the year-end close.
 
@@ -133,6 +208,26 @@ on.
 - **Benford's law proves nothing.** It is a prompt to look, and the analytics
   module refuses to report a verdict on a population too small to mean
   anything.
+- **A price list never converts a currency.** Which rate — the day's, the
+  month's, the one written into the contract? Any answer chosen inside a price
+  puts an exchange difference where nobody would find it, so the list says it
+  is in the wrong currency and stops.
+- **Nothing knows whether expenditure is a capital asset**, what its useful
+  life is, or what proportion of its use is taxable. Those are inputs to the
+  capital assets scheme, and the screen, the return values and the due list
+  each say so. The due list reports a bound — one interval's share — never an
+  estimate of the adjustment.
+- **A back-dated cheque register is approximate about where a cheque was.**
+  With one status and one status date it can tell that a cheque was outstanding
+  on a past date but not whether it was in the drawer or with the bank. The
+  outstanding total, which is what the reconciliation is against, is exact.
+- **The FTA audit file's field names, record letters and date format have not
+  been verified** against the FTA's own specification. The figures are derived
+  from the ledger; the shape is a reading of the format.
+- **Margin-scheme output tax needs the purchase price.** Nothing in the ledger
+  holds what a second-hand item cost, so it is an input; without it no tax is
+  computed and none is posted, and the invoice says so rather than treating an
+  unknown cost as nought.
 
 ## How it is checked
 
