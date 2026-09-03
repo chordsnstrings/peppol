@@ -155,11 +155,34 @@ export async function postInvoice(opts: {
   }
   const fx = fxRate === undefined ? {} : { currency, fxRate };
 
+  /**
+   * A credit note against exactly one invoice settles that invoice.
+   *
+   * Without this the credit note stands as its own open item forever: the
+   * ageing shows the invoice gross and the credit separately, the over-90
+   * column is overstated by the amount of a credit that may relate to exactly
+   * that invoice, and a collections letter chases money the customer does not
+   * owe.
+   *
+   * Exactly one, and only where the document carries that invoice's id. A
+   * credit note naming three invoices needs an allocation across them, and
+   * nobody has made it — spreading it by amount would be arithmetic presented
+   * as a decision. One named only by number could match two documents with the
+   * same number in different years. In both cases the note stands alone, which
+   * is what it did before, and which is at least visibly incomplete rather
+   * than confidently wrong.
+   */
+  const credits = isCredit
+    ? (inv.precedingInvoices ?? []).map((p) => p.invoiceId).filter((id): id is string => !!id?.trim())
+    : [];
+  const settlesId = credits.length === 1 ? credits[0] : undefined;
+
   const lines: PostLine[] = [
     {
       account: AR_CONTROL,
       ...(gross > 0n ? { debit: gross } : { credit: -gross }),
       ...fx,
+      ...(settlesId ? { settlesId } : {}),
       memo: `${inv.buyer?.nameEn ?? "Customer"} — ${inv.number}`,
     },
   ];

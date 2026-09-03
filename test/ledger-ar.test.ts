@@ -67,6 +67,64 @@ d("receivables subledger", () => {
   });
   afterAll(async () => { await wipe(); await db.$disconnect(); });
 
+  it("nets a credit note against the one invoice it names", async () => {
+    const inv = invoice({ number: "INV-CR-BASE" });
+    await postInvoice({ orgId: ORG, invoice: inv });
+
+    const note = invoice({
+      number: "CRN-1",
+      docType: "TAX_CREDIT_NOTE",
+      precedingInvoices: [{ number: inv.number, invoiceId: inv.id }],
+    }, [line(40_000, 2_000)]);
+    await postInvoice({ orgId: ORG, invoice: note });
+
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-04-30") });
+    const item = ageing.open.find((i) => i.sourceId === inv.id);
+    // 105,000 invoiced less the 42,000 credit note leaves 63,000 outstanding
+    // on one open item, not two items of 105,000 and (42,000).
+    expect(item?.outstandingMinor).toBe("63000");
+    expect(ageing.open.some((i) => i.outstandingMinor === "-42000")).toBe(false);
+  });
+
+  it("leaves a credit note standing alone where it names more than one invoice", async () => {
+    const a = invoice({ number: "INV-CR-A" });
+    const b = invoice({ number: "INV-CR-B" });
+    await postInvoice({ orgId: ORG, invoice: a });
+    await postInvoice({ orgId: ORG, invoice: b });
+
+    // Spreading it across two invoices would be arithmetic presented as a
+    // decision. It stands alone, which is visibly incomplete rather than
+    // confidently wrong.
+    const note = invoice({
+      number: "CRN-2",
+      docType: "TAX_CREDIT_NOTE",
+      precedingInvoices: [
+        { number: a.number, invoiceId: a.id },
+        { number: b.number, invoiceId: b.id },
+      ],
+    }, [line(10_000, 500)]);
+    await postInvoice({ orgId: ORG, invoice: note });
+
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-04-30") });
+    expect(ageing.open.some((i) => i.outstandingMinor === "-10500")).toBe(true);
+  });
+
+  it("does not guess from an invoice named only by number", async () => {
+    const c = invoice({ number: "INV-CR-C" });
+    await postInvoice({ orgId: ORG, invoice: c });
+    const note = invoice({
+      number: "CRN-3",
+      docType: "TAX_CREDIT_NOTE",
+      precedingInvoices: [{ number: c.number }],
+    }, [line(5_000, 250)]);
+    await postInvoice({ orgId: ORG, invoice: note });
+
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-04-30") });
+    // Two documents can carry the same number in different years, so a number
+    // alone is not an identity.
+    expect(ageing.open.some((i) => i.outstandingMinor === "-5250")).toBe(true);
+  });
+
   it("posts margin-scheme tax out of revenue, never on top of the invoice", async () => {
     // A used car bought for AED 30,000 and sold for AED 35,000. Executive
     // Regulation Article 43 forbids the invoice showing any tax, so the
