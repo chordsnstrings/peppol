@@ -589,49 +589,49 @@ model BankStatementLine {
 /// silently rewrite prior periods every time an estimate changed — and a
 /// change in estimate is prospective under IAS 16, not retrospective.
 model FixedAsset {
-  id               String    @id @default(cuid())
+  id               String             @id @default(cuid())
   orgId            String
   entityId         String
   code             String
   name             String
   nameAr           String?
-  category         String    @default("EQUIPMENT")
-  acquiredOn       DateTime  @db.Date
+  category         String             @default("EQUIPMENT")
+  acquiredOn       DateTime           @db.Date
   /// What it cost, in minor units of the book's functional currency.
   costMinor        BigInt
   /// What it is expected to be worth at the end of its life.
-  residualMinor    BigInt    @default(0)
+  residualMinor    BigInt             @default(0)
   /// Straight line, or reducing balance at `ratePercent`.
-  method           String    @default("STRAIGHT_LINE")
+  method           String             @default("STRAIGHT_LINE")
   usefulLifeMonths Int
-  ratePercent      Decimal?  @db.Decimal(6, 3)
+  ratePercent      Decimal?           @db.Decimal(6, 3)
   /// Where the asset, its accumulated depreciation and the charge live.
-  assetAccount     String    @default("1500")
-  accumAccount     String    @default("1590")
-  expenseAccount   String    @default("6600")
+  assetAccount     String             @default("1500")
+  accumAccount     String             @default("1590")
+  expenseAccount   String             @default("6600")
   /// Depreciation already posted, kept as a running figure so a run never has
   /// to re-derive history it did not create.
-  accumulatedMinor BigInt    @default(0)
+  accumulatedMinor BigInt             @default(0)
   /// The last period depreciated, as YYYY-MM. A run is idempotent on it.
   depreciatedTo    String?
-  status           String    @default("active") // active | disposed | written_off
-  disposedOn       DateTime? @db.Date
+  status           String             @default("active") // active | disposed | written_off
+  disposedOn       DateTime?          @db.Date
   proceedsMinor    BigInt?
   notes            String?
   /// The revaluation surplus held in equity for this asset (IAS 16.39). Kept
   /// per asset because the split of a later decrease depends on this asset's
   /// own surplus, not on the entity's total.
-  surplusMinor     BigInt    @default(0)
+  surplusMinor     BigInt             @default(0)
   /// Impairment charged to profit for this asset and not yet reversed. A later
   /// increase reverses that first (IAS 36.117) before anything reaches equity.
-  impairedMinor    BigInt    @default(0)
+  impairedMinor    BigInt             @default(0)
   /// The date the current cost basis starts depreciating from. Nil until a
   /// revaluation restates the cost — after which depreciation is charged on
   /// the revalued amount over the REMAINING life (IAS 16.31), not on the
   /// original schedule again.
-  basisFrom        DateTime? @db.Date
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  basisFrom        DateTime?          @db.Date
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
   revaluations     AssetRevaluation[]
 
   @@unique([orgId, entityId, code])
@@ -646,33 +646,39 @@ model FixedAsset {
 /// of rows without replaying them, and replaying them would let a backdated
 /// receipt silently rewrite the cost of goods already sold.
 model InventoryItem {
-  id              String              @id @default(cuid())
-  orgId           String
-  entityId        String
-  sku             String
-  name            String
-  nameAr          String?
-  uom             String              @default("EA")
+  id                String              @id @default(cuid())
+  orgId             String
+  entityId          String
+  sku               String
+  name              String
+  nameAr            String?
+  uom               String              @default("EA")
   /// WEIGHTED_AVERAGE | FIFO. IAS 2.25 permits either, and requires the same
   /// one to be used for all inventories of a similar nature — so it is a
   /// decision recorded per item rather than a setting applied globally.
-  costMethod      String              @default("WEIGHTED_AVERAGE")
+  costMethod        String              @default("WEIGHTED_AVERAGE")
   /// Net realisable value per whole unit, where it has been assessed. IAS 2.9
   /// carries stock at the lower of cost and this; nil means never assessed,
   /// which is different from an assessment of nothing.
-  nrvMinor        BigInt?
+  nrvMinor          BigInt?
   /// Quantity in thousandths, so 1.5 kg is 1500. Stock is not always whole.
-  quantityMilli   BigInt              @default(0)
+  quantityMilli     BigInt              @default(0)
   /// What that quantity is carried at, in minor units.
-  valueMinor      BigInt              @default(0)
-  stockAccount    String              @default("1200")
-  cogsAccount     String              @default("5000")
-  varianceAccount String              @default("5300")
-  status          String              @default("active")
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  movements       InventoryMovement[]
-  layers          InventoryLayer[]
+  valueMinor        BigInt              @default(0)
+  stockAccount      String              @default("1200")
+  cogsAccount       String              @default("5000")
+  varianceAccount   String              @default("5300")
+  status            String              @default("active")
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  movements         InventoryMovement[]
+  layers            InventoryLayer[]
+  batches           StockBatch[]
+  /// Below this, the item needs ordering. Nil means nobody has set one, which
+  /// is different from a level of nothing.
+  reorderLevelMilli BigInt?
+  /// Where this item is normally kept.
+  defaultLocationId String?
 
   @@unique([orgId, entityId, sku])
   @@index([orgId, entityId, status])
@@ -699,6 +705,10 @@ model InventoryMovement {
   reference         String?
   memo              String?
   entryId           String?
+  /// Where the stock moved from or to.
+  locationId        String?
+  /// The batch or serial this movement was of.
+  batchId           String?
   createdAt         DateTime      @default(now())
 
   @@index([orgId, itemId, movedOn])
@@ -707,35 +717,35 @@ model InventoryMovement {
 
 /// An employee, for payroll and end-of-service benefits.
 model Employee {
-  id             String    @id @default(cuid())
-  orgId          String
-  entityId       String
-  code           String
-  name           String
-  nameAr         String?
-  emiratesId     String?
+  id               String        @id @default(cuid())
+  orgId            String
+  entityId         String
+  code             String
+  name             String
+  nameAr           String?
+  emiratesId       String?
   /// MOL personal id and routing code, required by the WPS salary information file.
-  molPersonId    String?
-  routingCode    String?
-  iban           String?
-  joinedOn       DateTime  @db.Date
-  leftOn         DateTime? @db.Date
+  molPersonId      String?
+  routingCode      String?
+  iban             String?
+  joinedOn         DateTime      @db.Date
+  leftOn           DateTime?     @db.Date
   /// Unlimited contracts accrue gratuity differently from limited ones.
-  contractType   String    @default("UNLIMITED")
-  basicMinor     BigInt
-  housingMinor   BigInt    @default(0)
-  transportMinor BigInt    @default(0)
-  otherMinor     BigInt    @default(0)
+  contractType     String        @default("UNLIMITED")
+  basicMinor       BigInt
+  housingMinor     BigInt        @default(0)
+  transportMinor   BigInt        @default(0)
+  otherMinor       BigInt        @default(0)
   /// Annual leave in calendar days a full year of service earns. Federal
   /// Decree-Law 33/2021 Article 29 gives 30 days after a year of service and
   /// two working days a month between six months and a year; a contract may
   /// give more, never less.
-  leaveDaysPerYear Int     @default(30)
-  status         String    @default("active")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  payslips       Payslip[]
-  leave          LeaveRecord[]
+  leaveDaysPerYear Int           @default(30)
+  status           String        @default("active")
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  payslips         Payslip[]
+  leave            LeaveRecord[]
 
   @@unique([orgId, entityId, code])
   @@index([orgId, entityId, status])
@@ -745,21 +755,21 @@ model Employee {
 /// service and the contract, and a stored entitlement is a figure that stops
 /// agreeing with the joining date the moment either changes.
 model LeaveRecord {
-  id           String   @id @default(cuid())
-  orgId        String
-  entityId     String
-  employeeId   String
-  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  orgId      String
+  entityId   String
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   /// ANNUAL | SICK | UNPAID | MATERNITY | PARENTAL | HAJJ | COMPASSIONATE | ENCASHED
-  kind         String   @default("ANNUAL")
-  startsOn     DateTime @db.Date
-  endsOn       DateTime @db.Date
+  kind       String   @default("ANNUAL")
+  startsOn   DateTime @db.Date
+  endsOn     DateTime @db.Date
   /// Days in tenths, so half a day is 5. Leave is taken in halves, not thirds.
-  daysTenth    Int
+  daysTenth  Int
   /// Paid at the time, as annual leave is; unpaid leave earns no entitlement.
-  paid         Boolean  @default(true)
-  note         String?
-  createdAt    DateTime @default(now())
+  paid       Boolean  @default(true)
+  note       String?
+  createdAt  DateTime @default(now())
 
   @@index([orgId, entityId, employeeId, startsOn])
 }
@@ -768,23 +778,22 @@ model LeaveRecord {
 /// the charge for a month is the movement between two dates and a running
 /// balance cannot be asked what last month's provision was.
 model LeaveProvision {
-  id          String   @id @default(cuid())
-  orgId       String
-  entityId    String
-  period      String
+  id           String   @id @default(cuid())
+  orgId        String
+  entityId     String
+  period       String
   /// The liability at the end of the period.
   balanceMinor BigInt
   /// The movement charged to profit for the period.
-  chargeMinor BigInt
+  chargeMinor  BigInt
   /// Days of untaken leave behind that liability, in tenths.
-  daysTenth   Int
-  entryId     String?
-  createdAt   DateTime @default(now())
+  daysTenth    Int
+  entryId      String?
+  createdAt    DateTime @default(now())
 
   @@unique([orgId, entityId, period])
   @@index([orgId, entityId])
 }
-
 
 /// One employee's pay for one month. Append-only once posted.
 model Payslip {
@@ -1394,35 +1403,34 @@ model ReportLayout {
   @@index([orgId, entityId, status])
 }
 
-
 /// A temporary difference between what an item is worth in the accounts and
 /// what it is worth for tax (IAS 12.5). The register is kept per reporting
 /// date rather than as a running balance, because the deferred tax charge for
 /// a period is the movement between two dates and a running balance cannot be
 /// reconstructed once it has been overwritten.
 model DeferredTaxItem {
-  id            String   @id @default(cuid())
-  orgId         String
-  entityId      String
+  id                String   @id @default(cuid())
+  orgId             String
+  entityId          String
   /// The reporting date these figures were measured at.
-  asOf          DateTime @db.Date
-  code          String
-  description   String
+  asOf              DateTime @db.Date
+  code              String
+  description       String
   /// FIXED_ASSET | PROVISION | LEASE | LOSS | REVENUE | OTHER
-  category      String   @default("OTHER")
+  category          String   @default("OTHER")
   /// What the accounts carry it at.
-  carryingMinor BigInt
+  carryingMinor     BigInt
   /// What tax law will allow or charge in future — the tax base (IAS 12.7-8).
-  taxBaseMinor  BigInt
+  taxBaseMinor      BigInt
   /// The rate expected to apply when the difference reverses (IAS 12.47), in
   /// basis points. 900 is the UAE's 9% headline rate.
-  rateBps       Int      @default(900)
+  rateBps           Int      @default(900)
   /// A deductible difference is only an asset to the extent future profit is
   /// probable (IAS 12.24). Nil means recognised in full.
-  unrecognisedMinor BigInt @default(0)
-  note          String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  unrecognisedMinor BigInt   @default(0)
+  note              String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@unique([orgId, entityId, asOf, code])
   @@index([orgId, entityId, asOf])
@@ -1431,23 +1439,22 @@ model DeferredTaxItem {
 /// The deferred tax position posted at one reporting date, so the next period
 /// knows what the movement is measured against.
 model DeferredTaxPosting {
-  id           String   @id @default(cuid())
-  orgId        String
-  entityId     String
-  asOf         DateTime @db.Date
+  id             String   @id @default(cuid())
+  orgId          String
+  entityId       String
+  asOf           DateTime @db.Date
   /// Net position: positive is a liability, negative an asset.
-  netMinor     BigInt
-  assetMinor   BigInt
+  netMinor       BigInt
+  assetMinor     BigInt
   liabilityMinor BigInt
   /// The movement charged to profit or loss for the period.
-  chargeMinor  BigInt
-  entryId      String?
-  createdAt    DateTime @default(now())
+  chargeMinor    BigInt
+  entryId        String?
+  createdAt      DateTime @default(now())
 
   @@unique([orgId, entityId, asOf])
   @@index([orgId, entityId])
 }
-
 
 /// A provision (IAS 37): a liability of uncertain timing or amount. The
 /// register is separate from the ledger because the standard's disclosures ask
@@ -1505,7 +1512,6 @@ model ProvisionMovement {
   @@index([orgId, provisionId])
 }
 
-
 /// A set of permissions someone can be given. Roles are per organisation and
 /// can be scoped to one entity, because a bookkeeper for the Dubai company is
 /// not thereby a bookkeeper for the Abu Dhabi one.
@@ -1547,7 +1553,6 @@ model RoleAssignment {
   @@index([orgId, userId])
 }
 
-
 /// A FIFO cost layer: one receipt, at the cost it came in at, with what is
 /// left of it. Weighted average needs no layers — it carries one cost — but
 /// first-in-first-out cannot be reconstructed from a running average, so the
@@ -1572,19 +1577,18 @@ model InventoryLayer {
   @@index([orgId, itemId, receivedOn])
 }
 
-
 /// A revaluation or impairment of a fixed asset, kept per event rather than as
 /// a running figure. IAS 16.39-40 splits an increase or decrease between profit
 /// and the revaluation surplus according to what has happened to that asset
 /// before — so the history is the rule's input, not a record of it.
 model AssetRevaluation {
-  id                  String   @id @default(cuid())
+  id                  String     @id @default(cuid())
   orgId               String
   entityId            String
   assetId             String
   asset               FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
   seq                 Int
-  revaluedOn          DateTime @db.Date
+  revaluedOn          DateTime   @db.Date
   /// REVALUATION (upward), IMPAIRMENT (downward), or REVERSAL of an impairment.
   kind                String
   /// The carrying amount immediately before this event.
@@ -1594,19 +1598,216 @@ model AssetRevaluation {
   /// Signed: positive is an increase in carrying amount.
   movementMinor       BigInt
   /// How the movement was split. The two always add to it.
-  toSurplusMinor      BigInt   @default(0)
-  toProfitMinor       BigInt   @default(0)
+  toSurplusMinor      BigInt     @default(0)
+  toProfitMinor       BigInt     @default(0)
   /// The revaluation surplus this asset carries after the event.
-  surplusAfterMinor   BigInt   @default(0)
+  surplusAfterMinor   BigInt     @default(0)
   /// Months of useful life left when the event happened. Recorded because the
   /// IAS 36.117 ceiling is a counterfactual — what the asset would be carried
   /// at had nothing been impaired — and that path depreciates over the life
   /// that remained then, which the register no longer holds afterwards.
-  lifeRemainingMonths Int      @default(0)
+  lifeRemainingMonths Int        @default(0)
   basis               String?
   entryId             String?
-  createdAt           DateTime @default(now())
+  createdAt           DateTime   @default(now())
 
   @@unique([assetId, seq])
   @@index([orgId, entityId, revaluedOn])
+}
+
+/// A cheque, held rather than banked.
+///
+/// Post-dated cheques are how a great deal of UAE business is actually
+/// settled, and a cheque in the drawer is not cash and not quite a receivable
+/// either — it is a receivable whose form has changed. The register carries it
+/// from the day it is taken to the day it clears or bounces, because those are
+/// different events with different journals and a system that models only the
+/// last one cannot answer where the money is today.
+model Cheque {
+  id             String    @id @default(cuid())
+  orgId          String
+  entityId       String
+  /// RECEIVED from a customer, or ISSUED to a supplier.
+  direction      String
+  number         String
+  bankName       String?
+  /// The account it will be drawn on or paid into, once it moves.
+  bankAccount    String    @default("1010")
+  /// Who wrote it, or who it is written to.
+  counterparty   String
+  counterpartyId String?
+  writtenOn      DateTime  @db.Date
+  /// The day it may be presented. That is what makes it post-dated.
+  dueOn          DateTime  @db.Date
+  amountMinor    BigInt
+  currency       String    @default("AED")
+  /// held | deposited | cleared | bounced | returned | cancelled
+  status         String    @default("held")
+  /// The open item it settles, once it clears.
+  settlesId      String?
+  /// Each state change that reached the ledger.
+  heldEntryId    String?
+  clearedEntryId String?
+  bouncedEntryId String?
+  statusOn       DateTime? @db.Date
+  bounceReason   String?
+  note           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([orgId, entityId, direction, number])
+  @@index([orgId, entityId, status, dueOn])
+}
+
+/// Somewhere stock is kept. A business with one store still has one location;
+/// the difference is whether the software can say which.
+model StockLocation {
+  id        String   @id @default(cuid())
+  orgId     String
+  entityId  String
+  code      String
+  name      String
+  nameAr    String?
+  /// Where goods land by default when nobody says.
+  isDefault Boolean  @default(false)
+  address   String?
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+/// A batch or a serial number, with the expiry that makes it perishable.
+/// Quantity is carried per batch as well as per item, because "how much do we
+/// have" and "how much of it can still be sold" are different questions.
+model StockBatch {
+  id            String        @id @default(cuid())
+  orgId         String
+  entityId      String
+  itemId        String
+  item          InventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  locationId    String?
+  /// The batch code, or the serial number where each unit is tracked singly.
+  code          String
+  /// SERIAL means exactly one unit and cannot be split.
+  kind          String        @default("BATCH")
+  receivedOn    DateTime      @db.Date
+  expiresOn     DateTime?     @db.Date
+  quantityMilli BigInt        @default(0)
+  status        String        @default("active")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@unique([orgId, entityId, itemId, code])
+  @@index([orgId, entityId, expiresOn])
+}
+
+/// An asset within the VAT capital assets scheme: input tax recovered when it
+/// was bought is adjusted over ten years for a building or five for anything
+/// else, as the proportion of taxable use changes.
+model CapitalAssetItem {
+  id             String                   @id @default(cuid())
+  orgId          String
+  entityId       String
+  code           String
+  description    String
+  /// BUILDING (ten intervals) | OTHER (five).
+  category       String                   @default("OTHER")
+  acquiredOn     DateTime                 @db.Date
+  /// The day the asset was first used, which starts the adjustment period.
+  firstUsedOn    DateTime                 @db.Date
+  costMinor      BigInt
+  /// Input tax on the purchase, in full.
+  inputTaxMinor  BigInt
+  /// The taxable-use proportion claimed at the outset, in basis points.
+  originalUseBps Int
+  status         String                   @default("active")
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  adjustments    CapitalAssetAdjustment[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
+
+model CapitalAssetAdjustment {
+  id              String           @id @default(cuid())
+  orgId           String
+  assetId         String
+  asset           CapitalAssetItem @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  /// 1 for the first interval after the year of purchase, and so on.
+  interval        Int
+  assessedOn      DateTime         @db.Date
+  /// Taxable use in this interval, in basis points.
+  useBps          Int
+  /// Positive is more input tax recoverable; negative is tax to repay.
+  adjustmentMinor BigInt
+  entryId         String?
+  createdAt       DateTime         @default(now())
+
+  @@unique([assetId, interval])
+  @@index([orgId, assetId])
+}
+
+
+/// A subscription: an invoice that recurs on its own schedule.
+///
+/// The lines are held as data rather than as a document, because a template is
+/// not an invoice — it is the instruction for making one, and every invoice it
+/// makes is a separate document with its own number, its own date and its own
+/// life. `RecurringJournal` does the same thing for journals; this is its
+/// counterpart on the sales side, and the two are deliberately separate
+/// because a journal template posts and an invoice template raises a document
+/// that somebody sends.
+model RecurringInvoice {
+  id            String   @id @default(cuid())
+  orgId         String
+  entityId      String
+  code          String
+  customerCode  String?
+  customerName  String
+  customerTrn   String?
+  /// WEEKLY | MONTHLY | QUARTERLY | ANNUAL
+  frequency     String   @default("MONTHLY")
+  startsOn      DateTime @db.Date
+  endsOn        DateTime? @db.Date
+  /// The next date an invoice is due to be raised.
+  nextOn        DateTime @db.Date
+  /// Days from the invoice date to the due date.
+  paymentTerms  Int      @default(30)
+  currency      String   @default("AED")
+  /// [{ description, quantityMilli, unitPriceMinor, taxCode, accountCode? }]
+  lines         Json
+  notes         String?
+  /// active | paused | ended
+  status        String   @default("active")
+  lastIssuedOn  DateTime? @db.Date
+  issuedCount   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  issued        RecurringInvoiceIssue[]
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status, nextOn])
+}
+
+/// One invoice a subscription raised, so a template can say what it has done
+/// and a retry cannot raise the same period twice.
+model RecurringInvoiceIssue {
+  id          String           @id @default(cuid())
+  orgId       String
+  templateId  String
+  template    RecurringInvoice @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  /// The period this invoice was for, as YYYY-MM-DD of its scheduled date.
+  scheduledOn DateTime         @db.Date
+  issuedOn    DateTime         @db.Date
+  invoiceId   String
+  invoiceNumber String
+  totalMinor  BigInt
+  createdAt   DateTime         @default(now())
+
+  @@unique([templateId, scheduledOn])
+  @@index([orgId, templateId])
 }
