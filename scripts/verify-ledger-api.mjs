@@ -155,10 +155,59 @@ for (const [path, body] of [
     : bad(`${path} refusal`, r.status + ' ' + JSON.stringify(r.body).slice(0,160));
 }
 
+// Every route, swept.
+//
+// The checks above test the routes somebody thought to test. This enumerates
+// the route files from disk instead, so a route added tomorrow is covered the
+// day it lands rather than the day somebody remembers it. Two things are asked
+// of every one of them, and they are the two things no route may ever get
+// wrong:
+//
+//   it must not answer 5xx — a crash is a crash whatever caused it, and a
+//   route that throws on a GET with a valid entity has a bug in it;
+//
+//   if it refuses, it must refuse with a sentence. Several of these need
+//   parameters this sweep does not know (a date range, a period, a document
+//   id) and 400 is the right answer to that — but "400" on its own is not an
+//   answer anybody can act on.
+console.log('\nEVERY ROUTE ANSWERS');
+const { readdirSync, existsSync } = await import('node:fs');
+const routes = readdirSync('src/app/api/ledger', { withFileTypes: true })
+  .filter((e) => e.isDirectory() && existsSync(`src/app/api/ledger/${e.name}/route.ts`))
+  .map((e) => e.name)
+  .sort();
+
+const crashed = [];
+const mute = [];
+for (const name of routes) {
+  r = await call('GET', `/api/ledger/${name}?entityId=${E2}`);
+  if (r.status >= 500) crashed.push(`${name} ${r.status}`);
+  else if (r.status >= 400 && !/[a-z]{4,}/.test(r.body?.error ?? '')) mute.push(`${name} ${r.status}`);
+}
+crashed.length === 0
+  ? ok(`no route crashes on a GET`, `${routes.length} routes`)
+  : bad('routes that answered 5xx', crashed.join(', ').slice(0, 200));
+mute.length === 0
+  ? ok('every refusal carries a sentence somebody can act on')
+  : bad('routes that refused without saying why', mute.join(', ').slice(0, 200));
+
 // auth
 cookie = '';
 r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-01`);
 r.status === 401 ? ok('unauthenticated request refused 401') : bad('auth guard', r.status);
+
+// And not one of them is readable without a session. One route that forgot
+// requireSession is one route that hands the whole ledger to anybody who knows
+// an entity id, and it would never show up in a test of the routes somebody
+// remembered.
+const open = [];
+for (const name of routes) {
+  r = await call('GET', `/api/ledger/${name}?entityId=${E2}`);
+  if (r.status !== 401) open.push(`${name} ${r.status}`);
+}
+open.length === 0
+  ? ok('every ledger route refuses an unauthenticated read', `${routes.length} routes`)
+  : bad('routes readable with no session', open.join(', ').slice(0, 200));
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
