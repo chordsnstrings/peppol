@@ -152,7 +152,7 @@ export default function AssetRevaluationPage() {
                   <td className="sw-num"><Figure minor={rec.ledgerSurplusMinor} colour={false} /></td>
                   <td>
                     {rec.agrees
-                      ? <span className="sw-chip sw-chip-good">agrees</span>
+                      ? <span className="sw-chip sw-chip-ok">agrees</span>
                       : <span className="sw-chip sw-chip-bad">differs</span>}
                   </td>
                 </tr>

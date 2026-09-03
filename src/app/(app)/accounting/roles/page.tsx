@@ -148,7 +148,7 @@ export default function RolesPage() {
                           ) : r.conflicts.length ? (
                             <span className="sw-chip">worth knowing</span>
                           ) : (
-                            <span className="sw-chip sw-chip-good">clean</span>
+                            <span className="sw-chip sw-chip-ok">clean</span>
                           )}
                         </td>
                         <td>

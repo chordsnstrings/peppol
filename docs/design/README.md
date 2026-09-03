@@ -103,3 +103,48 @@ the design language comes from and it is the right bar regardless. Auditing our
 own palette against it found two real failures — `--sw-fg-faint` at 2.97:1 and
 `--sw-line-strong` at 1.62:1 — which is precisely why the check is a script
 that can fail a build rather than a note in a document.
+
+## How the design language is held
+
+A written design language nobody checks is a written design language that
+drifts: it survives exactly as long as the person who wrote it is reviewing
+every screen. So the rules in `swedish-design-language.md` that can be
+asserted from the source are asserted, in `scripts/verify-swedish-design.mjs`,
+which runs inside `scripts/verify-all.mjs`.
+
+Eighteen checks, grouped by the idea each one comes from:
+
+**Ljusinsläpp** — no pure white and no pure black anywhere; the ground is
+limewash `#F4F1E9` and the ink is violet-biased `#1C1A24`; the accent is the
+flag blue `#006AA7` and Tailwind's `#3B82F6` is absent, because that colour is
+the single most recognisable tell of a generic interface.
+
+**Colour discipline** — the split that does the work. Debit and credit are
+structural and may not reach a numeral; positive and negative are values and
+may not reach chrome, except through a named status class. Money is rendered
+in one place, and no screen turns minor units into a string itself — that last
+one is not only a style rule, because a hard-coded hundred is wrong by a factor
+of ten for a Kuwaiti, Bahraini or Omani currency.
+
+**Funkis** — no radius on a table cell, because rounding a grid is a lie about
+where a cell ends; the ledger casts no shadow at all; and no shadow anywhere is
+neutral black.
+
+**Lagom** — three type weights, tabular numerals with the slashed zero that is
+Sweden Sans's own signature, and the Frank accent held to a handful of
+declarations rather than a theme.
+
+**Acceptera** — every class a screen uses exists in the stylesheet, numeric
+column headings are aligned with the figures beneath them, and every
+interactive class declares its own target size for WCAG 2.2 SC 2.5.8.
+
+**Democratic design** — every type size in `rem` so browser zoom works, and
+both theme paths defined so the toggle wins in both directions.
+
+Four real defects were found the first time it ran: three screens used a chip
+class that does not exist and rendered unstyled, and one screen converted minor
+units by hand in three places. None would have shown up in a screenshot test,
+because a screenshot tells you what changed rather than which rule broke.
+
+`scripts/verify-contrast.mjs` holds the ratios separately, against the worst
+surface each token can land on rather than the best.

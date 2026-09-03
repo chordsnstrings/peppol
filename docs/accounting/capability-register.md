@@ -260,15 +260,24 @@ on.
 
 ## How it is checked
 
-`node scripts/verify-all.mjs` runs six suites against a real server and a real
-database:
+`node scripts/verify-all.mjs` runs eight suites against a real server and a
+real database:
 
 1. **unit and database** — the test files above, every one against PostgreSQL.
 2. **ledger invariants** — the constraints and triggers, attacked directly.
 3. **palette contrast** — every colour pair in the stylesheet against WCAG 2.1 AA.
-4. **ledger HTTP** — the API, including that an unauthenticated request is refused.
-5. **subledgers HTTP** — receivables, payables and the close, end to end.
-6. **browser** — a real browser through the real onboarding, keying entries,
+4. **design language** — the rules in `docs/design/swedish-design-language.md`
+   that can be asserted from the source: where a colour is allowed to appear,
+   what a data surface may look like, whether a screen invented a class, and
+   whether any screen formats money itself. It found four real defects the
+   first time it ran.
+5. **capability count** — the register derived in `scripts/capabilities.mjs`,
+   asserted against the target rather than reported. A change that removes
+   capabilities fails the build instead of passing quietly.
+6. **ledger HTTP** — every route swept: none may answer 5xx, every refusal
+   carries a sentence, and not one is readable without a session.
+7. **subledgers HTTP** — receivables, payables and the close, end to end.
+8. **browser** — a real browser through the real onboarding, keying entries,
    pasting a block, reaching every screen in the navigation, and checking that
    nothing overflows on a phone. It also holds the typography to its own rules:
    every form control on every screen has an accessible name, every figure is

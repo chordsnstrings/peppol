@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 /* ------------------------------------------------------------------- wire --- */
 
@@ -787,7 +787,7 @@ function MatchForm({ order, busy, act, onPosted }: {
                     className="sw-cell sw-cell-num"
                     inputMode="decimal"
                     aria-label={`Line ${l.lineNo} invoiced unit price`}
-                    placeholder={(Number(l.unitPriceMinor) / 100).toFixed(2)}
+                    placeholder={fmtMinor(l.unitPriceMinor, order.currency, { zero: "zero" })}
                     value={row(l).price}
                     onChange={(e) => setRows((x) => ({ ...x, [l.id]: { ...row(l), price: e.target.value } }))}
                   />
@@ -831,8 +831,8 @@ function MatchForm({ order, busy, act, onPosted }: {
             setResult(null);
             setRows({});
             onPosted(
-              `Invoice posted as ${r.reference}. ${(Number(r.grniClearedMinor) / 100).toFixed(2)} came out of 1250` +
-                (r.varianceMinor === "0" ? " and nothing went to variance." : `, and ${(Number(r.varianceMinor) / 100).toFixed(2)} went to the variance account.`),
+              `Invoice posted as ${r.reference}. ${fmtMinor(r.grniClearedMinor, order.currency, { zero: "zero" })} came out of 1250` +
+                (r.varianceMinor === "0" ? " and nothing went to variance." : `, and ${fmtMinor(r.varianceMinor, order.currency, { zero: "zero" })} went to the variance account.`),
             );
           }}
         >

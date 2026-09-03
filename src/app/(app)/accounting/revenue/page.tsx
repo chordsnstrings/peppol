@@ -306,7 +306,7 @@ function Compare({ label, account, a, b, pending }: {
       <td className="sw-num"><Figure minor={b} colour={false} /></td>
       <td>
         {agrees ? (
-          <span className="sw-chip sw-chip-good">agrees</span>
+          <span className="sw-chip sw-chip-ok">agrees</span>
         ) : explained ? (
           <span className="sw-chip">to recognise</span>
         ) : (

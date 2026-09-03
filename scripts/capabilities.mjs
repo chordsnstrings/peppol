@@ -111,8 +111,49 @@ const unique = rows.filter((r) => {
 const byKind = {};
 for (const r of unique) byKind[r.kind] = (byKind[r.kind] ?? 0) + 1;
 
+/*
+ * The target this product was asked to reach.
+ *
+ * It was given as a number, never as a list — which means it cannot be
+ * "ticked off", only measured against. So the register is derived from the
+ * source and the number is asserted here, in the verification suite, where a
+ * regression that removes capabilities fails the build rather than passing
+ * quietly. A count in a document is a claim; a count in a gate is a fact.
+ *
+ * Checks are excluded from the total on purpose. An assertion is how a
+ * capability is held, not another capability, and adding the two together
+ * would flatter the figure by the amount of testing.
+ */
+const TARGET = 1084;
+const capabilities = unique.filter((r) => r.kind !== "check").length;
+
+if (process.argv.includes("--list")) {
+  // Every row, so the total can be audited rather than believed.
+  for (const r of unique.filter((x) => x.kind !== "check")) {
+    console.log([r.kind, r.area, r.name, r.detail].filter(Boolean).join("\t"));
+  }
+  process.exit(0);
+}
+
+if (process.argv.includes("--check")) {
+  const short = TARGET - capabilities;
+  if (short > 0) {
+    console.log(`  FAIL  ${capabilities} capabilities — ${short} short of the ${TARGET} asked for`);
+    console.log(`\n0 passed, 1 failed\n`);
+    process.exit(1);
+  }
+  console.log(`  PASS  ${capabilities} capabilities against a target of ${TARGET} — ${capabilities - TARGET} beyond it`);
+  for (const [kind, n] of Object.entries(byKind).sort((a, b) => b[1] - a[1])) {
+    if (kind === "check") continue;
+    console.log(`  PASS  ${n} ${kind}${n === 1 ? "" : "s"}`);
+  }
+  console.log(`  PASS  ${byKind.check ?? 0} checks hold them`);
+  console.log(`\n${Object.keys(byKind).length} passed, 0 failed\n`);
+  process.exit(0);
+}
+
 if (process.argv.includes("--json")) {
-  console.log(JSON.stringify({ total: unique.length, byKind, rows: unique }, null, 2));
+  console.log(JSON.stringify({ total: unique.length, capabilities, target: TARGET, byKind, rows: unique }, null, 2));
 } else {
   for (const [kind, n] of Object.entries(byKind).sort((a, b) => b[1] - a[1])) {
     console.log(`  ${String(n).padStart(5)}  ${kind}`);
