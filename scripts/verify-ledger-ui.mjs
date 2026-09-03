@@ -238,6 +238,7 @@ try {
     ["/accounting/vat", "VAT return"],
     ["/accounting/statements", "Financial statements"],
     ["/accounting/bank", "Bank reconciliation"],
+    ["/accounting/assets", "Fixed assets"],
   ]) {
     await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("h1", { timeout: 20000 });
@@ -282,6 +283,38 @@ try {
 
   const verdict = await page.locator('[data-testid="rec-verdict"]').innerText();
   check("the reconciliation states its position in words", verdict.length > 20, verdict.slice(0, 80));
+
+  // Fixed assets: the form must refuse impossible estimates before the server
+  // has to, and say which one is wrong.
+  await page.goto(`${B}/accounting/assets`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="run-depreciation"]', { timeout: 20000 });
+  await page.click('button:has-text("Add asset")');
+  await page.waitForSelector('[data-testid="save-asset"]', { timeout: 10000 });
+  let assetBlock = await page.locator('[data-testid="asset-blocker"]').innerText();
+  check("the asset form says what is missing", /give the asset a code/i.test(assetBlock), assetBlock);
+
+  const field = (label) => page.locator(`label:has-text("${label}")`).locator("input, select").first();
+  await field("Code").fill("FA-UI-1");
+  await field("Name").fill("Office fit-out");
+  await field("Cost").fill("120000");
+  await field("Residual value").fill("500000");
+  await page.waitForTimeout(200);
+  assetBlock = await page.locator('[data-testid="asset-blocker"]').innerText();
+  check("a residual above cost is caught in the form", /cannot exceed the cost/i.test(assetBlock), assetBlock);
+
+  await field("Residual value").fill("0");
+  await page.waitForTimeout(200);
+  const noBlock = await page.locator('[data-testid="asset-blocker"]').count();
+  check("and clears once the estimate is possible", noBlock === 0);
+
+  await page.click('[data-testid="save-asset"]');
+  await page.waitForSelector("text=FA-UI-1", { timeout: 20000 });
+  ok("the asset reaches the register");
+
+  await page.click('[data-testid="run-depreciation"]');
+  await page.waitForSelector('[data-testid="depreciation-result"]', { timeout: 20000 });
+  const depResult = await page.locator('[data-testid="depreciation-result"]').innerText();
+  check("running depreciation reports what it did", depResult.length > 10, depResult.slice(0, 90));
 
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });

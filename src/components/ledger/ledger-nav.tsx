@@ -10,6 +10,7 @@ const TABS = [
   { href: "/accounting/receivables", label: "Receivables" },
   { href: "/accounting/payables", label: "Payables" },
   { href: "/accounting/bank", label: "Bank" },
+  { href: "/accounting/assets", label: "Assets" },
   { href: "/accounting/vat", label: "VAT return" },
   { href: "/accounting/statements", label: "Statements" },
   { href: "/accounting/trial-balance", label: "Trial balance" },

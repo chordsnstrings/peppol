@@ -249,6 +249,44 @@ check('and the cheque in transit is among what explains the gap',
 r = await call('POST', '/api/ledger/bank', { entityId: ENT, action: 'post', bankLineId: fee.id, contraAccount: '6350' });
 check('the same bank line cannot be booked twice', r.status === 422, `HTTP ${r.status} ${String(r.body?.error).slice(0,50)}`);
 
+console.log('\nFIXED ASSETS');
+// Put the asset on the balance sheet first — the register records estimates
+// about a purchase, it does not replace the purchase.
+r = await call('POST', '/api/ledger/journals', { entityId: ENT, entryDate: '2026-02-01', memo: 'Van purchased',
+  lines: [{ account: '1500', debit: 12000000 }, { account: '1010', credit: 12000000 }] });
+check('the asset purchase posts', r.status === 200, r.body?.entry?.series + '-' + r.body?.entry?.number);
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'add', asset: {
+  code: 'FA-001', name: 'Delivery van', acquiredOn: '2026-02-01', costMinor: 12000000, usefulLifeMonths: 60 } });
+check('the asset is registered', r.status === 200, r.body?.asset?.code);
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'add', asset: {
+  code: 'FA-BAD', name: 'Impossible', acquiredOn: '2026-02-01', costMinor: 1000, residualMinor: 9999, usefulLifeMonths: 12 } });
+check('a residual above cost is refused', r.status === 422 && /more than the asset cost/i.test(r.body?.error ?? ''), String(r.body?.error).slice(0, 60));
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'depreciate', period: '2026-02' });
+check('a month of depreciation posts', r.status === 200 && r.body?.totalChargeMinor === '200000', `${r.body?.reference} charge ${r.body?.totalChargeMinor}`);
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'depreciate', period: '2026-02' });
+check('the same month cannot be charged twice', r.body?.assetsDepreciated === 0 && /already depreciated/.test(r.body?.skipped?.[0]?.reason ?? ''),
+  r.body?.skipped?.[0]?.reason);
+
+r = await call('GET', `/api/ledger/assets?entityId=${ENT}`);
+const van = (r.body?.assets ?? []).find(a => a.code === 'FA-001');
+check('the register shows the net book value', van?.netBookValueMinor === '11800000', `NBV ${van?.netBookValueMinor}`);
+check('and the register ties to the ledger', r.body?.ledger?.costAgrees === true && r.body?.ledger?.accumulatedAgrees === true,
+  `cost ${r.body?.ledger?.costMinor} accum ${r.body?.ledger?.accumulatedMinor}`);
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'dispose', assetCode: 'FA-001', disposedOn: '2026-02-25', proceedsMinor: 10000000 });
+check('disposal books the loss against net book value', r.status === 200 && r.body?.resultMinor === '-1800000' && r.body?.gain === false,
+  `NBV ${r.body?.netBookValueMinor}, result ${r.body?.resultMinor}`);
+
+r = await call('POST', '/api/ledger/assets', { entityId: ENT, action: 'dispose', assetCode: 'FA-001', disposedOn: '2026-02-26', proceedsMinor: 1 });
+check('an asset cannot be disposed of twice', r.status === 422, `HTTP ${r.status}`);
+
+r = await call('GET', `/api/ledger/trial-balance?entityId=${ENT}&period=2026-02`);
+check('the trial balance ties through purchase, depreciation and disposal', r.body?.balanced === true, `diff ${r.body?.differenceMinor}`);
+
 console.log('\nCROSS-TENANT');
 const other = `other${Date.now()}@test.ae`;
 const keep = cookie; cookie = '';

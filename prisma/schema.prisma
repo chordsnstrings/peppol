@@ -569,3 +569,46 @@ model BankStatementLine {
   @@index([orgId, importBatch])
   @@index([matchedLineId])
 }
+
+/// A capitalised asset and the schedule by which it is written down.
+///
+/// The asset is not the journal entry. Depreciation for a month is posted once
+/// and never recomputed, because a schedule that recalculates history would
+/// silently rewrite prior periods every time an estimate changed — and a
+/// change in estimate is prospective under IAS 16, not retrospective.
+model FixedAsset {
+  id                String    @id @default(cuid())
+  orgId             String
+  entityId          String
+  code              String
+  name              String
+  nameAr            String?
+  category          String    @default("EQUIPMENT")
+  acquiredOn        DateTime  @db.Date
+  /// What it cost, in minor units of the book's functional currency.
+  costMinor         BigInt
+  /// What it is expected to be worth at the end of its life.
+  residualMinor     BigInt    @default(0)
+  /// Straight line, or reducing balance at `ratePercent`.
+  method            String    @default("STRAIGHT_LINE")
+  usefulLifeMonths  Int
+  ratePercent       Decimal?  @db.Decimal(6, 3)
+  /// Where the asset, its accumulated depreciation and the charge live.
+  assetAccount      String    @default("1500")
+  accumAccount      String    @default("1590")
+  expenseAccount    String    @default("6600")
+  /// Depreciation already posted, kept as a running figure so a run never has
+  /// to re-derive history it did not create.
+  accumulatedMinor  BigInt    @default(0)
+  /// The last period depreciated, as YYYY-MM. A run is idempotent on it.
+  depreciatedTo     String?
+  status            String    @default("active") // active | disposed | written_off
+  disposedOn        DateTime? @db.Date
+  proceedsMinor     BigInt?
+  notes             String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([orgId, entityId, code])
+  @@index([orgId, entityId, status])
+}
