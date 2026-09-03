@@ -5,8 +5,9 @@ importantly — what it does not. It is written to be checked rather than
 believed: every claim below points at the module that makes it and the test
 that holds it.
 
-Counts as at this revision: **51 server modules**, **51 HTTP endpoints**,
-**47 screens**, **52 test files**, **71 database models**, **38 migrations**.
+Counts as at this revision: **54 server modules**, **54 HTTP endpoints**,
+**50 screens**, **56 test files** holding **1,156 tests**, **71 database
+models**, **40 migrations**.
 
 ---
 
@@ -30,6 +31,8 @@ module, and a mistake.
 | A revaluation's split into equity and profit always adds to the movement | `AssetRevaluation_split_check` |
 | Recognised revenue never exceeds what was allocated to the obligation | `PerformanceObligation_recognised_check` |
 | Unpaid leave cannot be recorded as paid | `LeaveRecord_unpaid_check` |
+| Two annual-leave records for one person cannot overlap, even under a race | `LeaveRecord_no_overlap`, a gist exclusion |
+| A revaluation surplus is a credit balance or nothing — a deficit is an expense | `FixedAsset_surplus_check` |
 
 ## Recording
 
@@ -80,7 +83,9 @@ and annual leave with the untaken-leave provision.
 Fixed assets with depreciation, disposal, and a register that can be drawn at a
 date rather than only as it stands. Revaluation and impairment under IAS 16 and
 IAS 36, where the split between equity and profit follows that asset's own
-history. Inventory at weighted average or FIFO, with net realisable value.
+history. Inventory at weighted average or FIFO, carried at the lower of cost
+and net realisable value — where the allowance is derived rather than
+accumulated, which makes the IAS 2.33 ceiling structural instead of a guard.
 Leases under IFRS 16, with the recognition exemptions disclosed because an
 exemption nobody can see is an exemption nobody can audit. Provisions and
 contingencies under IAS 37.
@@ -95,7 +100,10 @@ analytics — the tests an auditor runs looking for what should not be there.
 
 ## Tax and close
 
-The VAT return, reconciled to both control accounts. Corporate tax under
+A month-end checklist that separates what would make the closed month *wrong*
+from what would merely be better done first, and counts a check that could not
+run against closing rather than as a pass. The VAT return, reconciled to both
+control accounts. Corporate tax under
 Federal Decree-Law 47/2022 with Small Business Relief. Deferred tax under
 IAS 12. The FTA audit file. Periods and the year-end close.
 
@@ -138,7 +146,11 @@ database:
 5. **subledgers HTTP** — receivables, payables and the close, end to end.
 6. **browser** — a real browser through the real onboarding, keying entries,
    pasting a block, reaching every screen in the navigation, and checking that
-   nothing overflows on a phone.
+   nothing overflows on a phone. It also holds the typography to its own rules:
+   every form control on every screen has an accessible name, every figure is
+   right-aligned in tabular numerals, and no negative is ever written with a
+   minus sign. That last set caught a column heading sitting left-aligned above
+   its own right-aligned figures.
 
 A skipped test counts as a failure. The suites had been passing while skipping
 every database test, because nothing loaded the environment file — which is the
