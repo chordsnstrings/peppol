@@ -1432,3 +1432,45 @@ model ProvisionMovement {
   @@unique([provisionId, seq])
   @@index([orgId, provisionId])
 }
+
+
+/// A set of permissions someone can be given. Roles are per organisation and
+/// can be scoped to one entity, because a bookkeeper for the Dubai company is
+/// not thereby a bookkeeper for the Abu Dhabi one.
+model AccountingRole {
+  id          String           @id @default(cuid())
+  orgId       String
+  code        String
+  name        String
+  description String?
+  /// The permission keys this role grants, as a JSON array of strings.
+  permissions Json
+  /// A role the product ships. It can be assigned but not edited or deleted,
+  /// so a workspace cannot quietly redefine what "Approver" means.
+  builtIn     Boolean          @default(false)
+  status      String           @default("active")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  assignments RoleAssignment[]
+
+  @@unique([orgId, code])
+  @@index([orgId, status])
+}
+
+model RoleAssignment {
+  id        String         @id @default(cuid())
+  orgId     String
+  userId    String
+  roleId    String
+  role      AccountingRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  /// The entity this grant applies to, or "*" for every entity in the org.
+  /// A literal rather than null, so the uniqueness below actually holds —
+  /// Postgres treats two NULLs as distinct and would allow the same grant
+  /// twice.
+  entityId  String         @default("*")
+  grantedBy String?
+  grantedAt DateTime       @default(now())
+
+  @@unique([orgId, userId, roleId, entityId])
+  @@index([orgId, userId])
+}

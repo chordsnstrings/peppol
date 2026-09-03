@@ -3,6 +3,7 @@ import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError, type PostLine } from "@/lib/server/ledger/post";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 
 export const runtime = "nodejs";
@@ -42,12 +43,14 @@ export async function POST(req: Request) {
     if (!b.entityId || !b.entryDate || !Array.isArray(b.lines)) {
       return json({ error: "A journal needs an entity, a date and at least two lines." }, 400);
     }
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
     const entry = await post({
       orgId, entityId: b.entityId, entryDate: b.entryDate, memo: b.memo,
       source: "manual", actorType: "HUMAN", actorId: userId, lines: b.lines,
     });
     return json(ledgerJson({ entry }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

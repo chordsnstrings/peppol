@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { prisma } from "@/lib/server/prisma";
 
 export const runtime = "nodejs";
@@ -25,6 +26,7 @@ export async function GET(req: Request) {
     });
     return json({ periods });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -34,12 +36,20 @@ export async function GET(req: Request) {
 export async function PATCH(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as { periodId?: string; status?: string };
     if (!b.periodId || !b.status) return json({ error: "periodId and status are required." }, 400);
 
     const period = await prisma.accountingPeriod.findFirst({ where: { id: b.periodId, orgId } });
     if (!period) return json({ error: "That accounting period does not exist." }, 404);
+
+    // Closing a month and reopening one are different permissions. Reopening
+    // undoes somebody else's decision, and is the one that lets a figure
+    // already reported be changed underneath whoever reported it.
+    await requirePermission({
+      orgId, userId, entityId: period.entityId,
+      permission: b.status === "open" ? "period.reopen" : "period.close",
+    });
 
     const allowed = NEXT[period.status] ?? [];
     if (!allowed.includes(b.status)) {
@@ -56,6 +66,7 @@ export async function PATCH(req: Request) {
     });
     return json({ period: { id: updated.id, label: updated.label, status: updated.status } });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

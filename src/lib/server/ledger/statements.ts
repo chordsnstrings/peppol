@@ -181,6 +181,52 @@ function roundedBps(numerator: bigint, denominator: bigint): bigint {
 /** Cost of sales is the 5xxx block; other expenses are 6xxx. */
 const isCostOfSales = (r: Bal) => r.code.startsWith("5");
 
+/**
+ * Take the year-end close back out of a profit and loss.
+ *
+ * Closing a year debits every income account and credits every expense account
+ * to nothing, and moves the result to retained earnings. That is a
+ * reclassification into equity, not trading — but it is a posting like any
+ * other, dated on the last day of the year, so any range covering the year
+ * picks it up and every income and expense account reads nil.
+ *
+ * The consequence is not cosmetic. A corporate tax computation run after the
+ * year was closed read accounting profit of nothing, and therefore tax of
+ * nothing, with no indication that anything was wrong. A profit and loss is a
+ * statement about trading; the close belongs in the statement of changes in
+ * equity, where it is what moved retained earnings.
+ *
+ * The balance sheet is deliberately left alone: there the close is exactly
+ * right, and taking it out would count the year's result twice.
+ */
+async function removeYearEndClose(opts: {
+  orgId: string; entityId: string; from: Date; to: Date; rows: Bal[];
+}) {
+  const lines = await prisma.journalLine.findMany({
+    where: {
+      orgId: opts.orgId,
+      account: { entityId: opts.entityId, type: { in: ["INCOME", "EXPENSE"] } },
+      entry: {
+        entityId: opts.entityId,
+        source: "close",
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: opts.from, lte: opts.to },
+      },
+    },
+    select: { functionalAmountMinor: true, account: { select: { code: true } } },
+  });
+  if (!lines.length) return;
+
+  const byCode = new Map<string, bigint>();
+  for (const l of lines) {
+    byCode.set(l.account.code, (byCode.get(l.account.code) ?? 0n) + l.functionalAmountMinor);
+  }
+  for (const r of opts.rows) {
+    const adj = byCode.get(r.code);
+    if (adj) r.balance -= adj;
+  }
+}
+
 export async function profitAndLoss(opts: {
   orgId: string; entityId: string; from: string; to: string;
 }): Promise<ProfitAndLoss> {
@@ -189,6 +235,7 @@ export async function profitAndLoss(opts: {
   if (to < from) throw new LedgerError("The period ends before it starts.");
 
   const { rows, currency } = await balances({ orgId: opts.orgId, entityId: opts.entityId, from, to });
+  await removeYearEndClose({ orgId: opts.orgId, entityId: opts.entityId, from, to, rows });
 
   const revenue = section("revenue", "Revenue", rows.filter((r) => r.type === "INCOME"), "credit");
   const cos = section("cost_of_sales", "Cost of sales", rows.filter((r) => r.type === "EXPENSE" && isCostOfSales(r)), "debit");

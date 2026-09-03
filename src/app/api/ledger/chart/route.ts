@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import {
   addAccount, updateAccount, renumberAccount, archiveAccount, restoreAccount,
   deleteAccount, chartWithUsage, type NewAccount, type AccountChange,
@@ -17,6 +18,7 @@ export async function GET(req: Request) {
     if (!entityId) return json({ error: "entityId required" }, 400);
     return json({ accounts: await chartWithUsage({ orgId, entityId }) });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -25,7 +27,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "add" | "update" | "renumber" | "archive" | "restore" | "delete";
       entityId?: string;
@@ -35,6 +37,7 @@ export async function POST(req: Request) {
       change?: AccountChange;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "chart.edit" });
     const scope = { orgId, entityId: b.entityId };
 
     switch (b.action) {
@@ -66,6 +69,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -204,7 +204,7 @@ d("receivables subledger", () => {
   it("ages the receivable and drops what has been settled", async () => {
     const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-03-31") });
     // Every invoice above is dated 2026-03-10 — 21 days old, so current.
-    expect(ageing.buckets.d90plus).toBe("0");
+    expect(ageing.buckets.over120).toBe("0");
     expect(ageing.buckets.current).not.toBe("0");
     // Settled invoices net to zero and must not appear as open items.
     const settled = ageing.open.find((o) => o.memo.includes("INV-PAY"));
@@ -223,7 +223,7 @@ d("receivables subledger", () => {
     const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-05-20") });
     const row = ageing.open.find((o) => o.sourceId === old.id);
     expect(row?.daysOld).toBe(135);
-    expect(BigInt(ageing.buckets.d90plus)).toBeGreaterThanOrEqual(105_000n);
+    expect(BigInt(ageing.buckets.over120)).toBeGreaterThanOrEqual(105_000n);
   });
 
   it("keeps the trial balance tied after everything above", async () => {

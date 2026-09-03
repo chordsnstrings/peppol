@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/server/session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { previewClose, closeYear, openNextYear } from "@/lib/server/ledger/close";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 
@@ -17,6 +18,7 @@ export async function GET(req: Request) {
     if (!entityId || !fiscalYear) return json({ error: "entityId and fiscalYear are required." }, 400);
     return json(ledgerJson(await previewClose({ orgId, entityId, fiscalYear })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -34,6 +36,7 @@ export async function POST(req: Request) {
       lockPeriods?: boolean;
     };
     if (!b.entityId || !b.fiscalYear) return json({ error: "entityId and fiscalYear are required." }, 400);
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "year.close" });
 
     if (b.action === "open-next") {
       return json(await openNextYear({ orgId, entityId: b.entityId, afterFiscalYear: b.fiscalYear }));
@@ -43,6 +46,7 @@ export async function POST(req: Request) {
       lockPeriods: b.lockPeriods === true, actorId: userId,
     }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

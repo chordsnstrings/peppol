@@ -88,12 +88,20 @@ d("year-end close", () => {
     expect(entry?.period.isAdjustment).toBe(true);
   });
 
-  it("leaves the profit and loss at zero for the closed year", async () => {
+  it("still reports the year's trading after it has been closed", async () => {
+    // Closing a year debits income and credits expenses to nothing. That is a
+    // transfer into equity, not trading, so it is taken back out of the profit
+    // and loss — otherwise every closed year reads nil, and a corporate tax
+    // computation run after the close finds no profit and charges no tax.
     const pl = await profitAndLoss({ orgId: ORG, entityId: ENT, from: "2026-01-01", to: "2026-12-31" });
-    expect(pl.revenue.totalMinor).toBe("0");
-    expect(pl.expenses.totalMinor).toBe("0");
-    expect(pl.costOfSales.totalMinor).toBe("0");
-    expect(pl.netProfitMinor).toBe("0");
+    expect(pl.revenue.totalMinor).not.toBe("0");
+    expect(pl.netProfitMinor).not.toBe("0");
+
+    // And the result has not been double counted: the balance sheet carries it
+    // in retained earnings, with nothing left in current-year earnings.
+    const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: "2026-12-31" });
+    expect(bs.currentYearEarningsMinor).toBe("0");
+    expect(bs.balanced).toBe(true);
   });
 
   it("carries the result into equity, so the balance sheet still balances", async () => {

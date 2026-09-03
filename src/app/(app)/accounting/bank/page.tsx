@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
-import { fmtMinor, parseAmount } from "@/lib/ledger/format";
+import { fmtMinor, toInput } from "@/lib/ledger/format";
 
 interface Statement {
   accountCode: string; accountName: string; asOf: string; currency: string;
@@ -26,70 +26,6 @@ interface Suggestion {
  * layout this reads the header row and finds the columns by name. What it
  * cannot identify it reports, instead of importing a column of zeroes.
  */
-function parseStatement(text: string): { lines: { postedOn: string; description: string; reference?: string; amountMinor: string; balanceMinor?: string }[]; problems: string[] } {
-  const rows = text.trim().split(/\r?\n/).filter((r) => r.trim());
-  if (rows.length < 2) return { lines: [], problems: ["Paste the header row and at least one transaction."] };
-
-  const split = (r: string) => (r.includes("\t") ? r.split("\t") : r.split(",")).map((c) => c.trim().replace(/^"|"$/g, ""));
-  const header = split(rows[0]).map((h) => h.toLowerCase());
-  const find = (...names: string[]) => header.findIndex((h) => names.some((n) => h.includes(n)));
-
-  const iDate = find("date", "posted", "value");
-  const iDesc = find("description", "narrative", "details", "particulars", "remarks");
-  const iAmount = find("amount", "value");
-  const iDebit = find("debit", "withdraw", "paid out");
-  const iCredit = find("credit", "deposit", "paid in");
-  const iRef = find("reference", "ref", "cheque");
-  const iBalance = find("balance");
-
-  const problems: string[] = [];
-  if (iDate < 0) problems.push("No date column — the header needs one containing “date”.");
-  if (iDesc < 0) problems.push("No description column — the header needs one containing “description” or “narrative”.");
-  if (iAmount < 0 && (iDebit < 0 || iCredit < 0)) {
-    problems.push("No amount column, and no debit/credit pair either.");
-  }
-  if (problems.length) return { lines: [], problems };
-
-  const lines: { postedOn: string; description: string; reference?: string; amountMinor: string; balanceMinor?: string }[] = [];
-  rows.slice(1).forEach((r, i) => {
-    const c = split(r);
-    const raw = c[iDate] ?? "";
-    // Accept ISO, and dd/mm/yyyy which is what UAE banks export.
-    const iso = /^\d{4}-\d{2}-\d{2}/.test(raw)
-      ? raw.slice(0, 10)
-      : (() => {
-          const m = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/.exec(raw);
-          if (!m) return null;
-          const y = m[3].length === 2 ? `20${m[3]}` : m[3];
-          return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-        })();
-    if (!iso) { problems.push(`Row ${i + 2}: could not read the date "${raw}".`); return; }
-
-    let amount: bigint | null;
-    if (iAmount >= 0) {
-      amount = parseAmount(c[iAmount] ?? "");
-    } else {
-      const dr = parseAmount(c[iDebit] ?? "") ?? 0n;
-      const cr = parseAmount(c[iCredit] ?? "") ?? 0n;
-      // A debit column on a bank statement is money leaving the account.
-      amount = cr - dr;
-    }
-    if (amount === null) { problems.push(`Row ${i + 2}: could not read the amount.`); return; }
-    if (amount === 0n) return; // nothing to reconcile
-
-    const bal = iBalance >= 0 ? parseAmount(c[iBalance] ?? "") : null;
-    lines.push({
-      postedOn: iso,
-      description: c[iDesc] ?? "",
-      reference: iRef >= 0 ? c[iRef] || undefined : undefined,
-      amountMinor: amount.toString(),
-      balanceMinor: bal === null ? undefined : bal.toString(),
-    });
-  });
-
-  return { lines, problems };
-}
-
 export default function BankPage() {
   const entityId = useEntityId();
   const [account] = React.useState("1010");
@@ -118,17 +54,56 @@ export default function BankPage() {
     }
   };
 
+  /**
+   * Parsing happens on the server, in the module that knows every format a
+   * bank actually hands out — and, more to the point, knows what it cannot
+   * read. The version that used to live in this file assumed day-first dates,
+   * so a month-first export landed every line in the wrong month without a
+   * word; it matched a "Value Date" column as the amount when there was no
+   * column called "Amount"; and it read money through a float. None of those
+   * announced themselves.
+   */
   const doImport = async () => {
-    const { lines, problems } = parseStatement(paste);
-    if (problems.length && lines.length === 0) { setError(problems.join(" ")); return; }
-    const r = await act("import", { action: "import", lines });
-    if (r) {
-      setPaste("");
-      setNote(
-        `Imported ${r.imported} line${r.imported === 1 ? "" : "s"}` +
-          (Number(r.duplicates) > 0 ? `, skipping ${r.duplicates} already on file` : "") +
-          (problems.length ? `. ${problems.length} row${problems.length === 1 ? "" : "s"} could not be read: ${problems[0]}` : "."),
-      );
+    setBusy("import"); setError(null); setNote(null);
+    try {
+      const parsed = await api<{
+        statement: {
+          format: string;
+          lines: { postedOn: string; description: string; reference?: string; amountMinor: string; balanceMinor?: string }[];
+          proof: { provable: boolean; agrees: boolean; differenceMinor: string };
+          warnings: string[];
+        };
+      }>("/api/ledger/bank-import", { method: "POST", body: JSON.stringify({ text: paste }) });
+
+      const st = parsed.statement;
+      if (!st.lines.length) { setError("Nothing in that statement could be read as a transaction."); return; }
+
+      // A file whose own lines do not add up to its own closing balance was
+      // truncated somewhere between the bank and here. Importing it anyway
+      // would put a reconciliation difference into the books that nobody could
+      // later explain, so it stops at the door.
+      if (st.proof.provable && !st.proof.agrees) {
+        setError(
+          `That statement does not foot: its lines and its own opening and closing balances differ by ` +
+            `${toInput(st.proof.differenceMinor.replace("-", ""))}. It has probably been truncated — ` +
+            `re-export it, or open it on the import screen where the difference can be seen line by line.`,
+        );
+        return;
+      }
+
+      const r = await act("import", { action: "import", lines: st.lines });
+      if (r) {
+        setPaste("");
+        setNote(
+          `Read ${st.lines.length} line${st.lines.length === 1 ? "" : "s"} as ${st.format} and imported ${r.imported}` +
+            (Number(r.duplicates) > 0 ? `, skipping ${r.duplicates} already on file` : "") +
+            (st.warnings.length ? `. ${st.warnings[0]}` : "."),
+        );
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "That statement could not be read.");
+    } finally {
+      setBusy(null);
     }
   };
 

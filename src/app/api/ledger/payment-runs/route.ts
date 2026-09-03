@@ -3,6 +3,7 @@ import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import { LedgerError } from "@/lib/server/ledger/post";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import {
   proposeRun, excludeItem, includeItem, approveRun, releaseRun, cancelRun,
   bankFile, runList, runDetail,
@@ -25,6 +26,7 @@ export async function GET(req: Request) {
     const status = (q.get("status") as RunStatus | null) ?? undefined;
     return json(ledgerJson(await runList({ orgId, entityId, status })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -78,6 +80,22 @@ export async function POST(req: Request) {
       beneficiaries?: Beneficiary[];
     };
 
+    // Proposing, approving and releasing are three permissions on purpose:
+    // they are the three hands a payment is meant to pass through, and the
+    // roles this product ships put them in different ones.
+    const NEEDS: Record<string, string> = {
+      propose: "payment_run.propose",
+      exclude: "payment_run.propose",
+      include: "payment_run.propose",
+      cancel: "payment_run.propose",
+      approve: "payment_run.approve",
+      release: "payment_run.release",
+      "bank-file": "payment_run.release",
+    };
+    if (b.action && NEEDS[b.action]) {
+      await requirePermission({ orgId, userId, entityId: b.entityId, permission: NEEDS[b.action] });
+    }
+
     switch (b.action) {
       case "propose": {
         if (!b.entityId) return json({ error: "entityId required" }, 400);
@@ -129,6 +147,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

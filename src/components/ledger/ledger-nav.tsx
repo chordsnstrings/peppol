@@ -45,6 +45,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/chart", label: "Edit the chart" },
       { href: "/accounting/recurring", label: "Recurring" },
       { href: "/accounting/opening", label: "Opening balances" },
+      { href: "/accounting/roles", label: "Who may do what" },
     ],
   },
   {
@@ -73,6 +74,7 @@ export const LEDGER_NAV: NavGroup[] = [
     label: "Cash and pay",
     items: [
       { href: "/accounting/bank", label: "Bank" },
+      { href: "/accounting/bank-import", label: "Import a statement" },
       { href: "/accounting/petty-cash", label: "Petty cash" },
       { href: "/accounting/payroll", label: "Payroll" },
     ],
@@ -101,6 +103,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/projects", label: "Projects" },
       { href: "/accounting/insights", label: "Insights" },
       { href: "/accounting/consolidation", label: "Consolidation" },
+      { href: "/accounting/equity", label: "Equity and notes" },
       { href: "/accounting/audit", label: "Audit trail" },
     ],
   },
@@ -110,6 +113,7 @@ export const LEDGER_NAV: NavGroup[] = [
     items: [
       { href: "/accounting/vat", label: "VAT return" },
       { href: "/accounting/corporate-tax", label: "Corporate tax" },
+      { href: "/accounting/deferred-tax", label: "Deferred tax" },
       { href: "/accounting/periods", label: "Periods" },
       { href: "/accounting/year-end", label: "Year end" },
     ],

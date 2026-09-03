@@ -325,13 +325,17 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
     }
   }
 
-  const buckets = { current: 0n, d30: 0n, d60: 0n, d90: 0n, d90plus: 0n };
+  // The keys name the band they hold. They used to be d30/d60/d90/d90plus,
+  // which read as though d90 were "90 days and over" when it is the 91 to
+  // 120 band — a name that quietly understates the oldest debt to anybody
+  // reading the figures rather than the code that cut them.
+  const buckets = { current: 0n, d31_60: 0n, d61_90: 0n, d91_120: 0n, over120: 0n };
   const open: OpenItem[] = [];
   let overdue = 0n;
   for (const [sourceId, row] of byDoc) {
     if (row.outstanding === 0n) continue;
     const days = daysBetween(row.date, asOf);
-    const bucket = days <= 30 ? "current" : days <= 60 ? "d30" : days <= 90 ? "d60" : days <= 120 ? "d90" : "d90plus";
+    const bucket = days <= 30 ? "current" : days <= 60 ? "d31_60" : days <= 90 ? "d61_90" : days <= 120 ? "d91_120" : "over120";
     // Payables sit on the credit side, so the ledger holds them negative.
     // The report shows what is owed as a positive figure.
     buckets[bucket] += -row.outstanding;

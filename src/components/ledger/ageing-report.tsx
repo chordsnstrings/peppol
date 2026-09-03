@@ -14,10 +14,10 @@ export interface Ageing {
 
 const BUCKETS: { key: string; label: string; hint: string }[] = [
   { key: "current", label: "Current", hint: "0–30 days" },
-  { key: "d30", label: "31–60", hint: "one month late" },
-  { key: "d60", label: "61–90", hint: "two months late" },
-  { key: "d90", label: "91–120", hint: "three months late" },
-  { key: "d90plus", label: "120+", hint: "provision territory" },
+  { key: "d31_60", label: "31–60", hint: "one month late" },
+  { key: "d61_90", label: "61–90", hint: "two months late" },
+  { key: "d91_120", label: "91–120", hint: "three months late" },
+  { key: "over120", label: "120+", hint: "provision territory" },
 ];
 
 /**
