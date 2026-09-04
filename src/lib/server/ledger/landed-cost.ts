@@ -1218,7 +1218,7 @@ export async function landedCostReport(opts: {
       s.inventoryMinor += v.lines.reduce((a, l) => a + (l.inventoryMinor ?? 0n), 0n);
       s.cogsMinor += v.lines.reduce((a, l) => a + (l.cogsMinor ?? 0n), 0n);
       for (const l of v.lines) {
-        const key = `${l.sku} ${l.receiptRef}`;
+        const key = `${l.sku}\u0000${l.receiptRef}`;
         const row = s.items.get(key) ?? {
           sku: l.sku, receiptRef: l.receiptRef,
           quantityMilli: l.quantityMilli, valueMinor: l.valueMinor, allocatedMinor: 0n,
