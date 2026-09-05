@@ -38,6 +38,8 @@ import {
   saveEntity,
   sendInvoice,
 } from "@/lib/db/repo";
+import { useGatewayMode } from "@/lib/gateway/mode";
+import { SIMULATED_PREFLIGHT_NOTE, SIMULATED_SEND_NOTE, SIMULATED_SEND_WARNING } from "@/lib/gateway/disclosure";
 import { taxAdvisories } from "@/lib/domain/advice";
 import { CREDIT_REASONS } from "@/lib/domain/tax";
 import { Lightbulb } from "lucide-react";
@@ -128,6 +130,7 @@ export default function InvoiceEditorPage() {
   const live = React.useMemo(() => (inv ? recalc(inv) : null), [inv]);
   const validation = React.useMemo(() => (live ? validateInvoice(live) : null), [live]);
   const advisories = React.useMemo(() => (live ? taxAdvisories(live) : []), [live]);
+  const gateway = useGatewayMode();
 
   if (!inv || !live || !currentEntity) {
     return (
@@ -169,15 +172,38 @@ export default function InvoiceEditorPage() {
       await bumpSeqIfNew();
       const sent = await sendInvoice(live, currentEntity);
       setConfirmSend(false);
-      toast.success(
-        currentEntity.einvoicingStatus === "LIVE" ? "Queued for the gateway" : "Sent, delivered & reported",
-        { description: `${sent.number} is on its way.` },
-      );
+      /*
+       * Three different things can have happened and the toast is the only one
+       * of them the user reads, so it says which. It used to congratulate them
+       * with "Sent, delivered & reported" for a send the simulator completed in
+       * memory — the entity's own sandbox flag was the only thing consulted,
+       * and that flag says nothing about whether a document left the machine.
+       */
+      if (sent.exchangeStatus === "UNDELIVERABLE_NO_PARTICIPANT") {
+        toast.warning(`${sent.number} can't be delivered yet`, {
+          description: gateway.simulated
+            ? SIMULATED_PREFLIGHT_NOTE
+            : "The buyer isn't registered on the Peppol network. Confirm their Peppol ID.",
+        });
+      } else if (gateway.simulated) {
+        toast.warning("Simulated — nothing was transmitted", { description: SIMULATED_SEND_NOTE });
+      } else {
+        toast.success("Queued for the gateway", { description: `${sent.number} is on its way.` });
+      }
       router.push(`/invoices/${sent.id}`);
-    } catch {
+    } catch (e) {
       setSending(false);
       setConfirmSend(false);
-      toast.error("Can't send yet", { description: "Resolve the blocking issues first." });
+      /*
+       * A refusal that carries no validation issues came from the pipeline
+       * rather than from the document — a live entity on a simulated gateway is
+       * one, and it explains itself. Printing "resolve the blocking issues"
+       * over it would send somebody hunting through a valid invoice for a fault
+       * that is in the deployment.
+       */
+      const issues = (e as { issues?: unknown }).issues;
+      const reason = !issues && e instanceof Error ? e.message : "";
+      toast.error("Can't send yet", { description: reason || "Resolve the blocking issues first." });
     }
   };
 
@@ -473,16 +499,33 @@ export default function InvoiceEditorPage() {
         <div className="p-5 sm:p-6">
           <p className="text-sm text-muted-foreground">Here's exactly what happens when you send:</p>
           <div className="mt-4 space-y-3">
-            <FlowStep
-              icon={<Send className="text-info" />}
-              title="Deliver to the buyer"
-              desc={`Transmitted to ${live.buyer.nameEn || "the buyer"} across the Peppol network.`}
-            />
-            <FlowStep
-              icon={<CheckCircle2 className="text-success" />}
-              title="Report to the FTA"
-              desc="A Tax Data Document is filed for the reporting leg, in near-real-time."
-            />
+            {gateway.simulated ? (
+              <>
+                <FlowStep
+                  icon={<AlertTriangle className="text-[hsl(var(--warning))]" />}
+                  title="Nothing is delivered to the buyer"
+                  desc={`${live.buyer.nameEn || "The buyer"} receives nothing. The simulator records a delivery it did not make.`}
+                />
+                <FlowStep
+                  icon={<AlertTriangle className="text-[hsl(var(--warning))]" />}
+                  title="Nothing is reported to the FTA"
+                  desc="The Tax Data Document is built and archived, then the simulator records an acceptance the FTA never gave."
+                />
+              </>
+            ) : (
+              <>
+                <FlowStep
+                  icon={<Send className="text-info" />}
+                  title="Deliver to the buyer"
+                  desc={`Transmitted to ${live.buyer.nameEn || "the buyer"} across the Peppol network.`}
+                />
+                <FlowStep
+                  icon={<CheckCircle2 className="text-success" />}
+                  title="Report to the FTA"
+                  desc="A Tax Data Document is filed for the reporting leg, in near-real-time."
+                />
+              </>
+            )}
           </div>
           <div className="mt-4 flex items-center justify-between rounded-xl bg-muted/60 p-3.5">
             <span className="text-sm text-muted-foreground">Total</span>
@@ -490,10 +533,20 @@ export default function InvoiceEditorPage() {
               {formatMoney(live.totals.taxInclusiveMinor, live.currency)}
             </span>
           </div>
-          {currentEntity.einvoicingStatus === "SANDBOX" && (
-            <p className="mt-3 flex items-center gap-1.5 text-xs text-[hsl(var(--gold))]">
-              <Sparkles className="size-3.5" /> Sandbox mode — this is a safe test transmission.
-            </p>
+          {/*
+            * Keyed on the driver, not on the entity's sandbox flag. The flag is
+            * a claim about this business's activation; the driver is the fact
+            * about whether anything can leave the machine, and only the second
+            * one decides whether the send about to happen is real.
+            */}
+          {gateway.simulated && (
+            <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-warning/30 bg-warning/[0.06] p-3 text-sm">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[hsl(var(--warning))]" />
+              <span className="text-muted-foreground">
+                <span className="font-medium text-foreground">This send is a rehearsal.</span>{" "}
+                {SIMULATED_SEND_WARNING}
+              </span>
+            </div>
           )}
           <div className="mt-6 flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmSend(false)}>

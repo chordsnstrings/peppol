@@ -34,6 +34,14 @@ export const SIMULATED_SEND_WARNING =
 export const SIMULATED_SEND_NOTE =
   "This deployment's gateway driver is a simulator: it produced this outcome itself. Nothing was transmitted to the Peppol network and nothing was reported to the FTA.";
 
+/**
+ * Said when the network preflight came back negative on a simulated gateway.
+ * "Not registered on the network" is a claim about the SMP directory, and the
+ * mock answers it from a regular expression without asking any directory.
+ */
+export const SIMULATED_PREFLIGHT_NOTE =
+  "The simulated gateway found no registration for this buyer. Nothing was looked up on the real Peppol network.";
+
 /** Why the activation control is refused, and what would lift the refusal. */
 export const SIMULATED_ACTIVATION_BLOCK = `The gateway driver in this deployment is a simulator, so nothing can reach the Peppol network from here. ${LIVE_GATEWAY_SETUP}`;
 

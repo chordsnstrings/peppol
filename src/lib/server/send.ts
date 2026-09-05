@@ -5,7 +5,7 @@ import { validateInvoice } from "@/lib/domain/validation";
 import { generateUBL } from "@/lib/domain/ubl";
 import { buildTDD } from "@/lib/gateway/tdd";
 import { getGateway, isSimulatedTransmission } from "@/lib/gateway/registry";
-import { LIVE_ENTITY_ON_SIMULATOR, SIMULATED_SEND_NOTE } from "@/lib/gateway/disclosure";
+import { LIVE_ENTITY_ON_SIMULATOR, SIMULATED_PREFLIGHT_NOTE, SIMULATED_SEND_NOTE } from "@/lib/gateway/disclosure";
 import { PINT_AE } from "@/lib/gateway/port";
 import { applyGatewayEvents, eventNarratives } from "@/lib/gateway/apply";
 import { recordExchange } from "@/lib/server/billing";
@@ -120,7 +120,7 @@ export async function runSendPipeline(orgId: string, invoiceId: string): Promise
       type: "invoice.blocked",
       title: `${invoice.number} can't be delivered yet`,
       body: simulated
-        ? "The simulated gateway found no registration for this buyer. Nothing was looked up on the real Peppol network."
+        ? SIMULATED_PREFLIGHT_NOTE
         : "The buyer isn't registered on the network. We'll retry, or you can confirm their Peppol ID.",
       href: `/invoices/${invoice.id}`,
       tone: "warning",
