@@ -299,6 +299,38 @@ d("delivery notes", () => {
     expect(r.summary.unsigned).not.toContain("DN-2");
   });
 
+  it("counts every note in the period, not the ones that fit on the page", async () => {
+    // The four counts are a groupBy over the period. The page is a page: the
+    // two are allowed to differ, and `truncated` is what says they do.
+    const r = await deliveryRegister({ ...S, from: "2026-01-01", to: "2026-12-31" });
+    const inPeriod = await db.deliveryNote.count({
+      where: {
+        orgId: ORG, entityId: ENT,
+        deliveredOn: { gte: new Date("2026-01-01T00:00:00.000Z"), lte: new Date("2026-12-31T00:00:00.000Z") },
+      },
+    });
+    expect(r.summary.total).toBe(inPeriod);
+    expect(r.summary.draft + r.summary.dispatched + r.summary.delivered + r.summary.cancelled)
+      .toBe(r.summary.total);
+    expect(r.truncated).toBe(false);
+    expect(r.listed).toBe(r.notes.length);
+  });
+
+  it("counts the filtered set when a status is asked for, and nothing else", async () => {
+    const drafts = await deliveryRegister({ ...S, from: "2026-01-01", to: "2026-12-31", status: "draft" });
+    expect(drafts.notes.every((n) => n.status === "draft")).toBe(true);
+    expect(drafts.summary.total).toBe(drafts.summary.draft);
+    expect(drafts.summary.dispatched).toBe(0);
+    // A register narrowed to drafts must not answer a question about
+    // dispatched notes: nothing here has gone out at all.
+    expect(drafts.summary.unsigned).toEqual([]);
+  });
+
+  it("refuses a period that ends before it starts", async () => {
+    await expect(deliveryRegister({ ...S, from: "2026-12-31", to: "2026-01-01" }))
+      .rejects.toThrow(/ends before it starts/);
+  });
+
   it("keeps the trial balance tied after everything above", async () => {
     const tb = await trialBalance({ ...S, periodLabel: "2026-04" });
     expect(tb.balanced).toBe(true);

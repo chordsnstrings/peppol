@@ -19,10 +19,24 @@ interface PriceRow {
 interface PartyRow { partyKey: string; listCode: string; kind: string }
 interface Register {
   on: string;
+  truncated: boolean;
+  listed: number;
   lists: ListRow[];
   prices: PriceRow[];
   parties: PartyRow[];
   findings: string[];
+}
+
+interface VarianceRow {
+  itemCode: string; quantityMilli: string; chargedMinor: string;
+  listMinor: string | null; varianceMinor: string; varianceBps: number | null; why: string;
+}
+interface Variance {
+  lines: VarianceRow[];
+  totals: {
+    pricedLines: number; unpricedLines: number;
+    chargedMinor: string; listMinor: string; varianceMinor: string; varianceBps: number | null;
+  };
 }
 
 interface Quote {
@@ -37,6 +51,19 @@ interface Quote {
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+/** The day before a date, which is where a price being superseded has to end. */
+const dayBefore = (iso: string) => new Date(new Date(`${iso}T00:00:00.000Z`).getTime() - 86_400_000)
+  .toISOString().slice(0, 10);
+
+/** A quantity as it is typed — "1.5" — into the thousandths that are stored. */
+function toMilli(text: string): bigint | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (!/^\d+(\.\d{1,3})?$/.test(t)) return null;
+  const [whole, frac = ""] = t.split(".");
+  return BigInt(whole) * 1000n + BigInt(frac.padEnd(3, "0"));
+}
 
 /** Thousandths as a quantity somebody would write. */
 const qty = (milli: string) => {
@@ -63,6 +90,7 @@ export default function PricingPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [adding, setAdding] = React.useState(false);
   const [quote, setQuote] = React.useState<Quote | null>(null);
+  const [variance, setVariance] = React.useState<Variance | null>(null);
 
   const act = async (label: string, body: Record<string, unknown>) => {
     setBusy(label); setErr(null); setMsg(null);
@@ -213,11 +241,12 @@ export default function PricingPage() {
                     <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Unit price</th>
                     <th className="sw-num" style={{ width: "6rem" }}>Off</th>
                     <th style={{ width: "13rem" }}>Applies</th>
+                    <th style={{ width: "15rem" }}>Close it on</th>
                   </tr>
                 </thead>
                 <tbody data-testid="price-rows">
                   {data.prices.length === 0 && (
-                    <tr><td colSpan={6} className="sw-sub">No prices yet.</td></tr>
+                    <tr><td colSpan={7} className="sw-sub">No prices yet.</td></tr>
                   )}
                   {data.prices.map((p) => (
                     <tr key={p.id} style={p.inForce ? undefined : { opacity: 0.55 }}>
@@ -229,6 +258,28 @@ export default function PricingPage() {
                       <td className="sw-sub">
                         {p.validFrom} to {p.validTo ?? "further notice"}
                         {!p.inForce && <span className="sw-chip ml-1.5">closed</span>}
+                      </td>
+                      <td>
+                        {p.validTo === null ? (
+                          <ClosePrice
+                            price={p}
+                            suggested={dayBefore(on) < p.validFrom ? p.validFrom : dayBefore(on)}
+                            busy={busy === `close:${p.id}`}
+                            onClose={async (validTo) => {
+                              const r = await act(`close:${p.id}`, {
+                                action: "closePrice", entryId: p.id, validTo,
+                              });
+                              if (r) {
+                                setMsg(
+                                  `${p.itemCode} on ${p.listCode} now runs to ${validTo}. A price from the day after ` +
+                                  `will go on without tripping the overlap.`,
+                                );
+                              }
+                            }}
+                          />
+                        ) : (
+                          <span className="sw-sub">already closed</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -275,6 +326,23 @@ export default function PricingPage() {
               </div>
             </Panel>
           )}
+
+          {data.truncated && (
+            <p className="sw-sub mb-4 max-w-[75ch]" role="status" data-testid="pricing-truncated">
+              The first {data.listed} prices are listed, by item code. Narrow to one list to see all of its own —
+              the counts in the table above are whole counts either way.
+            </p>
+          )}
+
+          <PriceVariance
+            busy={busy === "variance"}
+            on={on}
+            result={variance}
+            onMeasure={async (body) => {
+              const r = await act("variance", { action: "variance", ...body });
+              setVariance(r ? (r as unknown as Variance) : null);
+            }}
+          />
 
           <AddPrice
             lists={data.lists}
@@ -396,6 +464,7 @@ function NewList({ busy, onCreate }: {
   onCreate: (l: {
     code: string; name: string; currency: string; kind: string;
     isDefault: boolean; validFrom: string; validTo?: string; notes?: string;
+    supersedeDefault?: boolean;
   }) => void;
 }) {
   const [code, setCode] = React.useState("");
@@ -403,6 +472,7 @@ function NewList({ busy, onCreate }: {
   const [currency, setCurrency] = React.useState("AED");
   const [kind, setKind] = React.useState("SELL");
   const [isDefault, setIsDefault] = React.useState(false);
+  const [supersede, setSupersede] = React.useState(false);
   const [validFrom, setValidFrom] = React.useState(today);
   const [validTo, setValidTo] = React.useState("");
   const [notes, setNotes] = React.useState("");
@@ -455,6 +525,18 @@ function NewList({ busy, onCreate }: {
         </span>
       </label>
 
+      {isDefault && (
+        <label className="mt-2 flex items-center gap-2">
+          <input type="checkbox" className="sw-check" checked={supersede} data-testid="supersede-default"
+            onChange={(e) => setSupersede(e.target.checked)} />
+          <span>
+            This one replaces the default in force, so close that one the day before this starts. Without it the
+            database refuses the second default and the changeover cannot be entered at all — and closing the old
+            list first would leave a day on which nothing is priced.
+          </span>
+        </label>
+      )}
+
       {err && <div className="sw-error mt-2" role="alert">{err}</div>}
 
       <div className="mt-3">
@@ -465,6 +547,7 @@ function NewList({ busy, onCreate }: {
             onCreate({
               code: code.trim(), name: name.trim(), currency, kind, isDefault, validFrom,
               validTo: validTo || undefined, notes: notes.trim() || undefined,
+              supersedeDefault: isDefault && supersede ? true : undefined,
             });
           }}>
           {busy ? "Saving…" : "Record the list"}
@@ -563,6 +646,248 @@ function AddPrice({ lists, busy, onAdd, onAssign }: {
           </button>
         </div>
       </div>
+    </Panel>
+  );
+}
+
+/* ---------------------------------------------------------- closing a price */
+
+/**
+ * A price is ended, never overwritten.
+ *
+ * The exclusion constraint refuses a second price for the same item and break
+ * over the same days, so a price rise is two acts: close the old row to the
+ * day before the new one starts, then put the new one on. The date offered is
+ * the day before the date the screen is priced at, which is the ordinary case
+ * — a rise taking effect today — and it can be changed to anything on or
+ * after the day the price started.
+ */
+function ClosePrice({ price, suggested, busy, onClose }: {
+  price: PriceRow;
+  suggested: string;
+  busy: boolean;
+  onClose: (validTo: string) => void;
+}) {
+  const [validTo, setValidTo] = React.useState(suggested);
+  const tooEarly = validTo !== "" && validTo < price.validFrom;
+
+  return (
+    <div className="flex items-center gap-2">
+      <input type="date" className={`sw-input sw-input-sm ${tooEarly ? "sw-cell-invalid" : ""}`}
+        style={{ width: "9rem" }} value={validTo}
+        aria-label={`Last day ${price.itemCode} on ${price.listCode} applies`}
+        onChange={(e) => setValidTo(e.target.value)} />
+      <button type="button" className="sw-btn sw-btn-sm" disabled={busy || !validTo || tooEarly}
+        onClick={() => onClose(validTo)}>
+        {busy ? "Closing…" : "close"}
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- the variance */
+
+/**
+ * What was charged against what the list says.
+ *
+ * The comparison is typed rather than swept, because what was charged lives on
+ * a document and a document can be right to depart from the list — a haggle, a
+ * goodwill line, a price agreed before the list changed. The report says how
+ * far the departure went; whether it was justified is a conversation.
+ */
+function PriceVariance({ busy, on, result, onMeasure }: {
+  busy: boolean;
+  on: string;
+  result: Variance | null;
+  onMeasure: (b: {
+    partyKey?: string; on: string; currency: string; kind: string;
+    lines: { itemCode: string; quantityMilli: string; chargedMinor: string }[];
+  }) => void;
+}) {
+  const [rows, setRows] = React.useState([{ item: "", quantity: "1", charged: "" }]);
+  const [party, setParty] = React.useState("");
+  const [currency, setCurrency] = React.useState("AED");
+  const [kind, setKind] = React.useState("SELL");
+
+  const set = (i: number, field: "item" | "quantity" | "charged", text: string) =>
+    setRows((r) => r.map((x, j) => (j === i ? { ...x, [field]: text } : x)));
+
+  const parsed = rows.map((r) => ({
+    item: r.item.trim(),
+    quantityMilli: toMilli(r.quantity),
+    chargedMinor: r.charged.trim() === "" ? null : parseAmount(r.charged, currency),
+  }));
+  const usable = parsed.filter((p) => p.item !== "" && p.quantityMilli !== null && p.chargedMinor !== null);
+
+  const blocker =
+    parsed.some((p) => p.item !== "" && p.quantityMilli === null)
+      ? "A quantity reads in units, up to three decimal places." :
+    parsed.some((p) => p.item !== "" && p.chargedMinor === null)
+      ? "What was actually charged for the line, as an amount." :
+    usable.length === 0 ? "Name an item, a quantity and what was charged." :
+    null;
+
+  return (
+    <Panel className="mb-4 p-4">
+      <div className="sw-label">What was charged against what the list says</div>
+      <p className="sw-sub mt-1 max-w-[78ch]">
+        A discount nobody recorded as a discount is invisible in the accounts: it shows up months later as revenue
+        that was lower than expected, with no way of telling which customer or which salesperson it went to.
+        Measuring a document against the list turns that into a number. A line the list does not price has no
+        variance — it is not nought per cent off, it is a price nobody has an opinion about, so it is counted
+        separately rather than buried in a column of zeroes.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <label className="block">
+          <span className="sw-label">Party</span>
+          <input className="sw-input mt-1" value={party} placeholder="optional"
+            onChange={(e) => setParty(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Currency</span>
+          <input className="sw-input sw-code mt-1" value={currency}
+            onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
+        </label>
+        <label className="block">
+          <span className="sw-label">For</span>
+          <select className="sw-select mt-1" value={kind} onChange={(e) => setKind(e.target.value)}
+            aria-label="Which side of the trade to measure">
+            <option value="SELL">selling</option>
+            <option value="BUY">buying</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="sw-scroll mt-3">
+        <table className="sw-table sw-grid" style={{ maxWidth: "52rem" }}>
+          <caption className="sr-only">The lines to measure against the list</caption>
+          <thead>
+            <tr>
+              <th style={{ width: "12rem" }}>Item</th>
+              <th className="sw-num" style={{ width: "8rem" }}>Quantity</th>
+              <th className="sw-num" style={{ width: "10rem" }}>Charged</th>
+              <th style={{ width: "5rem" }} />
+            </tr>
+          </thead>
+          <tbody data-testid="variance-input-rows">
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td>
+                  <input className="sw-input sw-code w-full" value={r.item} placeholder="WIDGET"
+                    aria-label={`Item on line ${i + 1}`}
+                    onChange={(e) => set(i, "item", e.target.value)} />
+                </td>
+                <td>
+                  <input className={`sw-input sw-cell-num w-full ${r.quantity.trim() !== "" && toMilli(r.quantity) === null ? "sw-cell-invalid" : ""}`}
+                    inputMode="decimal" value={r.quantity}
+                    aria-label={`Quantity on line ${i + 1}`}
+                    onChange={(e) => set(i, "quantity", e.target.value)} />
+                </td>
+                <td>
+                  <input className={`sw-input sw-cell-num w-full ${r.charged.trim() !== "" && parseAmount(r.charged, currency) === null ? "sw-cell-invalid" : ""}`}
+                    inputMode="decimal" value={r.charged} placeholder="0.00"
+                    aria-label={`Charged on line ${i + 1}`}
+                    onChange={(e) => set(i, "charged", e.target.value)} />
+                </td>
+                <td>
+                  {rows.length > 1 && (
+                    <button type="button" className="sw-link-btn"
+                      onClick={() => setRows((x) => x.filter((_, j) => j !== i))}>
+                      remove
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button type="button" className="sw-btn sw-btn-sm"
+          onClick={() => setRows((r) => [...r, { item: "", quantity: "1", charged: "" }])}>
+          Another line
+        </button>
+        <button type="button" className="sw-btn sw-btn-primary" data-testid="measure-variance"
+          disabled={busy || blocker !== null}
+          aria-disabled={busy || blocker !== null || undefined}
+          onClick={() => {
+            if (blocker) return;
+            onMeasure({
+              partyKey: party.trim() || undefined,
+              on, currency, kind,
+              lines: usable.map((p) => ({
+                itemCode: p.item,
+                quantityMilli: (p.quantityMilli as bigint).toString(),
+                chargedMinor: (p.chargedMinor as bigint).toString(),
+              })),
+            });
+          }}>
+          {busy ? "Measuring…" : "Measure it"}
+        </button>
+        {blocker && <span className="sw-sub" role="status" data-testid="variance-blocker">{blocker}</span>}
+      </div>
+
+      {result && (
+        <div className="sw-scroll mt-3">
+          <table className="sw-table">
+            <caption className="sr-only">Charged against the list, line by line</caption>
+            <thead>
+              <tr>
+                <th style={{ width: "12rem" }}>Item</th>
+                <th className="sw-num" style={{ width: "7rem" }}>Quantity</th>
+                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Charged</th>
+                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>The list</th>
+                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Variance</th>
+                <th className="sw-num" style={{ width: "6rem" }}>Off</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody data-testid="variance-rows">
+              {result.lines.map((l, i) => (
+                <tr key={`${l.itemCode}:${i}`}>
+                  <td className="sw-code">{l.itemCode}</td>
+                  <td className="sw-num">{qty(l.quantityMilli)}</td>
+                  <td className="sw-num"><Figure minor={l.chargedMinor} currency={currency} colour={false} /></td>
+                  <td className="sw-num">
+                    {l.listMinor === null
+                      ? <span className="sw-sub">not priced</span>
+                      : <Figure minor={l.listMinor} currency={currency} colour={false} />}
+                  </td>
+                  <td className="sw-num">
+                    {l.listMinor === null
+                      ? <span className="sw-zero">–</span>
+                      : <Figure minor={l.varianceMinor} currency={currency} zero="zero" />}
+                  </td>
+                  <td className="sw-num">{l.varianceBps === null ? "—" : bps(l.varianceBps)}</td>
+                  <td className="sw-sub">{l.why}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={2}>
+                  Priced lines
+                  <span className="sw-sub"> — {result.totals.pricedLines} measured, {result.totals.unpricedLines} the
+                  list has no opinion about</span>
+                </td>
+                <td className="sw-num" data-testid="variance-charged">
+                  <Figure minor={result.totals.chargedMinor} currency={currency} zero="zero" colour={false} />
+                </td>
+                <td className="sw-num">
+                  <Figure minor={result.totals.listMinor} currency={currency} zero="zero" colour={false} />
+                </td>
+                <td className="sw-num" data-testid="variance-total">
+                  <Figure minor={result.totals.varianceMinor} currency={currency} zero="zero" />
+                </td>
+                <td className="sw-num">{result.totals.varianceBps === null ? "—" : bps(result.totals.varianceBps)}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
     </Panel>
   );
 }

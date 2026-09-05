@@ -524,19 +524,48 @@ export async function contingentLiabilities(opts: {
   };
 }
 
+/**
+ * The most facilities one read will list, and how far back a closed one is
+ * still worth listing.
+ *
+ * The old read took the first 500 ordered by status ascending, which sorts
+ * "cancelled" and "drawn" before "expired" and "issued" — so the live undrawn
+ * facilities, the only ones anybody can still act on, were the first to fall
+ * off as dead rows accumulated. Two changes fix that: everything still open is
+ * read whatever its age, and what is closed is bounded by date instead of by
+ * luck of the alphabet.
+ */
+const MAX_FACILITIES = 500;
+const CLOSED_MONTHS = 24;
+
+/** Lapsed references named on the screen. The panel says how many there are. */
+const MAX_LAPSED = 200;
+
 export async function facilityRegister(opts: {
   orgId: string; entityId: string; asOf?: Date | string; status?: FacilityStatus;
 }) {
   const asOf = opts.asOf ? asDate(opts.asOf, "The date") : new Date();
+  const since = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth() - CLOSED_MONTHS, asOf.getUTCDate()));
 
-  const facilities = await prisma.tradeFacility.findMany({
+  const page = await prisma.tradeFacility.findMany({
     where: {
       orgId: opts.orgId, entityId: opts.entityId,
       ...(opts.status ? { status: opts.status } : {}),
+      OR: [
+        // Still open, however long ago it was issued: the bank is holding
+        // margin against it and somebody has to act on it.
+        { status: { in: ["issued", "drawn"] } },
+        // Closed, but recent enough that a reader is still reconciling it.
+        { expiresOn: { gte: since } },
+      ],
     },
-    orderBy: [{ status: "asc" }, { expiresOn: "asc" }],
-    take: 500,
+    // Soonest expiry first, so what has lapsed and what is about to lapse are
+    // at the top rather than behind a decade of settled paper.
+    orderBy: [{ expiresOn: "asc" }, { reference: "asc" }],
+    take: MAX_FACILITIES + 1,
   });
+  const truncated = page.length > MAX_FACILITIES;
+  const facilities = truncated ? page.slice(0, MAX_FACILITIES) : page;
 
   const events = facilities.length
     ? await prisma.tradeFacilityEvent.findMany({
@@ -548,8 +577,49 @@ export async function facilityRegister(opts: {
   const byFacility = new Map<string, typeof events>();
   for (const e of events) byFacility.set(e.facilityId, [...(byFacility.get(e.facilityId) ?? []), e]);
 
+  /**
+   * A facility past its expiry that nobody has closed. The bank is still
+   * holding the margin and the register still shows a facility that has
+   * lapsed — the first overstates cash, the second leaves a line on a
+   * screen that no longer means anything.
+   *
+   * A drawn facility counts. Drawing against a credit does not close it:
+   * the balance may be settled, the margin is still with the bank, and
+   * "drawn" is exactly the state a forgotten facility sits in.
+   *
+   * Asked of the database rather than read off the page above, and without
+   * the status filter: whether the bank is still holding margin against a
+   * dead facility does not change because somebody is looking at the
+   * cancelled ones.
+   */
+  const lapsedRows = await prisma.tradeFacility.findMany({
+    where: {
+      orgId: opts.orgId, entityId: opts.entityId,
+      status: { in: ["issued", "drawn"] },
+      expiresOn: { lt: asOf },
+    },
+    orderBy: { expiresOn: "asc" },
+    take: MAX_LAPSED + 1,
+    select: { reference: true },
+  });
+  const lapsedTruncated = lapsedRows.length > MAX_LAPSED;
+
+  const lapsedCount = lapsedTruncated
+    ? await prisma.tradeFacility.count({
+        where: {
+          orgId: opts.orgId, entityId: opts.entityId,
+          status: { in: ["issued", "drawn"] },
+          expiresOn: { lt: asOf },
+        },
+      })
+    : lapsedRows.length;
+
   return {
     asOf: iso(asOf),
+    since: iso(since),
+    /** True when more facilities matched than were listed. */
+    truncated,
+    listed: facilities.length,
     facilities: facilities.map((f) => {
       const mine = byFacility.get(f.id) ?? [];
       const outstanding = mine.reduce(
@@ -582,18 +652,7 @@ export async function facilityRegister(opts: {
         })),
       };
     }),
-    /**
-     * A facility past its expiry that nobody has closed. The bank is still
-     * holding the margin and the register still shows a facility that has
-     * lapsed — the first overstates cash, the second leaves a line on a
-     * screen that no longer means anything.
-     *
-     * A drawn facility counts. Drawing against a credit does not close it:
-     * the balance may be settled, the margin is still with the bank, and
-     * "drawn" is exactly the state a forgotten facility sits in.
-     */
-    lapsed: facilities
-      .filter((f) => (f.status === "issued" || f.status === "drawn") && f.expiresOn < asOf)
-      .map((f) => f.reference),
+    lapsed: lapsedRows.slice(0, MAX_LAPSED).map((f) => f.reference),
+    lapsedCount,
   };
 }

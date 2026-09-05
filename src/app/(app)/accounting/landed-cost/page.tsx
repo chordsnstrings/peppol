@@ -839,6 +839,15 @@ function MeasureTable({
       },
     }));
 
+  if (data.items.length === 0) {
+    return (
+      <Empty>
+        No stock item has been set up, so there is nothing to weigh or measure. Add items on the inventory screen
+        and they appear here — a freight bill cannot be spread by weight until something has one.
+      </Empty>
+    );
+  }
+
   return (
     <>
       <Panel className="overflow-hidden">

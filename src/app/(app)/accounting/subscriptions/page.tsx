@@ -185,6 +185,24 @@ export default function SubscriptionsPage() {
                                 </button>
                               </>
                             )}
+                            {(s.status === "active" || s.status === "paused") && (
+                              <>
+                                {" "}
+                                <button type="button" className="sw-link-btn" disabled={busy === `end:${s.code}`}
+                                  data-testid={`end-${s.code}`}
+                                  onClick={async () => {
+                                    const r = await act(`end:${s.code}`, { action: "end", code: s.code, on: asOf });
+                                    if (r) {
+                                      setMsg(
+                                        `${s.code} ends on ${asOf} and raises nothing after it. The invoices it has ` +
+                                        `already raised are documents in their own right and are untouched.`,
+                                      );
+                                    }
+                                  }}>
+                                  end
+                                </button>
+                              </>
+                            )}
                             {s.status === "paused" && (
                               <button type="button" className="sw-link-btn" disabled={busy === `resume:${s.code}`}
                                 onClick={async () => {
@@ -247,6 +265,12 @@ export default function SubscriptionsPage() {
             resuming would send one customer several invoices on one day. Whether an invoice raised in advance is
             revenue of the day it was raised is a separate question, and it is answered on the revenue recognition
             screen rather than assumed here.
+          </p>
+          <p className="sw-sub mt-2 max-w-[75ch]">
+            Ending is not pausing. A subscription that has run its term ends itself on the date it was given; ending
+            one here is the mid-term case — the customer has cancelled — and it stops the template raising anything
+            from the date shown above. The invoices it has already raised are documents in their own right and are
+            not touched, so the ledger keeps saying what was billed.
           </p>
         </>
       )}

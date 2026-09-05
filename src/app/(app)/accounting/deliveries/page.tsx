@@ -17,11 +17,24 @@ interface Note {
 }
 interface Register {
   from: string; to: string;
+  truncated: boolean;
+  listed: number;
   notes: Note[];
   summary: {
-    total: number; draft: number; dispatched: number; delivered: number;
+    total: number; draft: number; dispatched: number; delivered: number; cancelled: number;
     unsigned: string[];
   };
+}
+
+interface OrderRow { id: string; number: string; customerName: string; status: string; kind: string }
+interface OrderList { orders: OrderRow[] }
+
+interface OutstandingLine {
+  orderLineId: string; lineNo: number; sku: string | null; description: string;
+  orderedMilli: string; deliveredMilli: string; outstandingMilli: string;
+}
+interface Outstanding {
+  orderId: string; number: string; customerName: string; lines: OutstandingLine[];
 }
 interface UnbilledRow {
   number: string; deliveredOn: string; customerName: string; orderNumber: string;
@@ -43,6 +56,15 @@ const monthsBack = (n: number) => {
   return d.toISOString().slice(0, 10);
 };
 
+/** A quantity as it is typed — "1.5" — into the thousandths that are stored. */
+function toMilli(text: string): bigint | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (!/^\d+(\.\d{1,3})?$/.test(t)) return null;
+  const [whole, frac = ""] = t.split(".");
+  return BigInt(whole) * 1000n + BigInt(frac.padEnd(3, "0"));
+}
+
 /** Thousandths as a number somebody would write. */
 function qty(milli: string): string {
   const neg = milli.startsWith("-");
@@ -58,6 +80,7 @@ export default function DeliveriesPage() {
   const [status, setStatus] = React.useState("");
   const [tab, setTab] = React.useState<"register" | "unbilled">("register");
   const [open, setOpen] = React.useState<string | null>(null);
+  const [raising, setRaising] = React.useState(false);
 
   const q = new URLSearchParams({ entityId: entityId ?? "", from, to });
   if (status) q.set("status", status);
@@ -116,6 +139,10 @@ export default function DeliveriesPage() {
               <input type="date" className="sw-input" style={{ width: "10rem" }} value={to}
                 onChange={(e) => setTo(e.target.value)} aria-label="Deliveries to" />
             </label>
+            <button type="button" className="sw-btn" data-testid="toggle-new-note"
+              onClick={() => setRaising((v) => !v)}>
+              {raising ? "Cancel" : "Raise a delivery note"}
+            </button>
           </>
         }
       />
@@ -123,6 +150,23 @@ export default function DeliveriesPage() {
       {err && <ErrorNote>{err}</ErrorNote>}
       {msg && <div className="sw-note mb-3" role="status" data-testid="delivery-result">{msg}</div>}
       {error && <ErrorNote>{error}</ErrorNote>}
+
+      {raising && (
+        <NewNote
+          entityId={entityId}
+          busy={busy === "create"}
+          onCreate={async (note) => {
+            const r = await act("create", { action: "create", note });
+            if (r) {
+              setRaising(false);
+              setMsg(
+                `${note.number} is raised as a draft. Nothing has left inventory yet — dispatching it is what ` +
+                `moves the cost out.`,
+              );
+            }
+          }}
+        />
+      )}
 
       <nav className="sw-tabs mb-4" aria-label="What to show">
         <button type="button" className="sw-tab" aria-current={tab === "register" ? "page" : undefined}
@@ -137,7 +181,7 @@ export default function DeliveriesPage() {
           {data && (
             <>
               <Panel className="mb-4 p-4">
-                <dl className="grid gap-4 sm:grid-cols-4">
+                <dl className="grid gap-4 sm:grid-cols-5">
                   <div>
                     <dt className="sw-label">Notes</dt>
                     <dd className="sw-num mt-1 text-lg">{data.summary.total}</dd>
@@ -159,6 +203,13 @@ export default function DeliveriesPage() {
                     <dt className="sw-label">Signed for</dt>
                     <dd className="sw-num mt-1 text-lg">{data.summary.delivered}</dd>
                   </div>
+                  <div>
+                    <dt className="sw-label">Cancelled</dt>
+                    <dd className="sw-num mt-1 text-lg">{data.summary.cancelled}</dd>
+                    <p className="sw-sub mt-0.5">
+                      Only a draft can be cancelled. Once the goods have gone the document is a return.
+                    </p>
+                  </div>
                 </dl>
               </Panel>
 
@@ -176,8 +227,18 @@ export default function DeliveriesPage() {
                 </label>
               </div>
 
+              {data.truncated && (
+                <p className="sw-sub mb-3 max-w-[75ch]" role="status" data-testid="delivery-truncated">
+                  The newest {data.listed} of {data.summary.total} notes in the period are listed. The counts above
+                  are over the whole period — narrow the dates to see the rest.
+                </p>
+              )}
+
               {data.notes.length === 0 ? (
-                <Empty>No delivery note between {data.from} and {data.to}.</Empty>
+                <Empty>
+                  No delivery note between {data.from} and {data.to}. Raise one from an accepted sales order and its
+                  outstanding lines come with it.
+                </Empty>
               ) : (
                 <Panel className="overflow-hidden">
                   <div className="sw-scroll">
@@ -401,5 +462,282 @@ export default function DeliveriesPage() {
         </>
       )}
     </>
+  );
+}
+
+/* ------------------------------------------------------------- a new note */
+
+/**
+ * A delivery note is raised here rather than on the order screen because a
+ * lorry does not always carry one order's worth: a note can be raised against
+ * an order, which brings that order's outstanding lines with it, or against
+ * nothing at all, which is what a sample, a replacement or a hand-delivery is.
+ *
+ * It is raised as a draft and posts nothing. Dispatching is what moves cost
+ * out of inventory, and it is a separate act by somebody who has watched the
+ * goods go.
+ */
+function NewNote({ entityId, busy, onCreate }: {
+  entityId: string;
+  busy: boolean;
+  onCreate: (note: {
+    number: string; orderId?: string; customerName?: string; deliveredOn: string;
+    carrier?: string; trackingRef?: string; notes?: string;
+    lines: { orderLineId?: string; sku?: string; description: string; quantityMilli: string }[];
+  }) => void;
+}) {
+  const [number, setNumber] = React.useState("");
+  const [orderId, setOrderId] = React.useState("");
+  const [customerName, setCustomerName] = React.useState("");
+  const [deliveredOn, setDeliveredOn] = React.useState(today);
+  const [carrier, setCarrier] = React.useState("");
+  const [trackingRef, setTrackingRef] = React.useState("");
+  const [notes, setNotes] = React.useState("");
+  const [qtys, setQtys] = React.useState<Record<string, string>>({});
+  const [direct, setDirect] = React.useState([{ sku: "", description: "", quantity: "" }]);
+
+  const orders = useLedgerQuery<OrderList>(
+    `/api/ledger/sales-orders?entityId=${entityId}&kind=ORDER`, [entityId],
+  );
+  const outstanding = useLedgerQuery<Outstanding>(
+    orderId ? `/api/ledger/deliveries?entityId=${entityId}&view=order&orderId=${orderId}` : null,
+    [orderId],
+  );
+
+  // Only an order the customer has agreed to can have goods sent against it.
+  const deliverable = (orders.data?.orders ?? []).filter(
+    (o) => o.status === "accepted" || o.status === "part_invoiced",
+  );
+
+  // Picking an order fills the note in from it: the whole of what is still to
+  // go, which is what a lorry usually carries, and the customer's name, which
+  // is not a thing anybody should have to retype.
+  const loaded = outstanding.data;
+  React.useEffect(() => {
+    if (!loaded) return;
+    const next: Record<string, string> = {};
+    for (const l of loaded.lines) {
+      next[l.orderLineId] = BigInt(l.outstandingMilli) > 0n ? qty(l.outstandingMilli) : "";
+    }
+    setQtys(next);
+    setCustomerName(loaded.customerName);
+  }, [loaded]);
+
+  const orderLines = (loaded?.lines ?? []).map((l) => ({
+    line: l,
+    typed: qtys[l.orderLineId] ?? "",
+    milli: toMilli(qtys[l.orderLineId] ?? ""),
+  }));
+  const badOrderQty = orderLines.some((r) => r.typed.trim() !== "" && r.milli === null);
+  const overDelivered = orderLines.find((r) => r.milli !== null && r.milli > BigInt(r.line.outstandingMilli));
+
+  const directRows = direct.map((r) => ({ ...r, milli: toMilli(r.quantity) }));
+  const badDirectQty = directRows.some((r) => r.quantity.trim() !== "" && r.milli === null);
+
+  const lines = orderId
+    ? orderLines
+        .filter((r) => r.milli !== null && r.milli > 0n)
+        .map((r) => ({
+          orderLineId: r.line.orderLineId,
+          sku: r.line.sku ?? undefined,
+          description: r.line.description,
+          quantityMilli: (r.milli as bigint).toString(),
+        }))
+    : directRows
+        .filter((r) => r.milli !== null && r.milli > 0n)
+        .map((r) => ({
+          sku: r.sku.trim() || undefined,
+          description: r.description.trim() || r.sku.trim() || "Goods",
+          quantityMilli: (r.milli as bigint).toString(),
+        }));
+
+  const blocker =
+    !number.trim() ? "A delivery note needs a number." :
+    badOrderQty || badDirectQty ? "A quantity reads in units, up to three decimal places." :
+    overDelivered
+      ? `Line ${overDelivered.line.lineNo} has ${qty(overDelivered.line.outstandingMilli)} still to go. ` +
+        "Change the order if the customer wants more."
+      : lines.length === 0 ? "Nothing on the note has a quantity." :
+    !orderId && !customerName.trim() ? "A delivery note has to say who it went to." :
+    null;
+
+  return (
+    <Panel className="mb-4 p-4">
+      <div className="sw-label">A new delivery note</div>
+      <p className="sw-sub mt-1 max-w-[78ch]">
+        It is raised as a draft and posts nothing. Dispatching it is what moves the cost out of inventory — the
+        revenue stays on the invoice, which is raised on the sales order screen by somebody who has looked at it.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="block">
+          <span className="sw-label">Note number</span>
+          <input className="sw-input sw-code mt-1" value={number} placeholder="DN-1"
+            onChange={(e) => setNumber(e.target.value)} />
+        </label>
+        <label className="block lg:col-span-2">
+          <span className="sw-label">Against order</span>
+          <select className="sw-select mt-1" value={orderId} data-testid="note-order"
+            onChange={(e) => { setOrderId(e.target.value); if (!e.target.value) setQtys({}); }}>
+            <option value="">nothing — a direct delivery</option>
+            {deliverable.map((o) => (
+              <option key={o.id} value={o.id}>{o.number} — {o.customerName}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="sw-label">Delivered on</span>
+          <input type="date" className="sw-input mt-1" value={deliveredOn}
+            onChange={(e) => setDeliveredOn(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Customer</span>
+          <input className="sw-input mt-1" value={customerName} placeholder="Marri Trading LLC"
+            onChange={(e) => setCustomerName(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Carrier</span>
+          <input className="sw-input mt-1" value={carrier} placeholder="optional"
+            onChange={(e) => setCarrier(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Tracking</span>
+          <input className="sw-input mt-1" value={trackingRef} placeholder="optional"
+            onChange={(e) => setTrackingRef(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Note</span>
+          <input className="sw-input mt-1" value={notes} placeholder="optional"
+            onChange={(e) => setNotes(e.target.value)} />
+        </label>
+      </div>
+
+      {orders.error && <div className="sw-error mt-3" role="alert">{orders.error}</div>}
+      {orderId && outstanding.error && <div className="sw-error mt-3" role="alert">{outstanding.error}</div>}
+
+      {orderId && outstanding.loading && !loaded && <Loading label="Reading what that order still owes…" />}
+
+      {orderId && loaded && (
+        <div className="sw-scroll mt-3">
+          <table className="sw-table sw-grid">
+            <caption className="sr-only">What {loaded.number} still has to go, and how much is going now</caption>
+            <thead>
+              <tr>
+                <th style={{ width: "3rem" }}>#</th>
+                <th style={{ width: "8rem" }}>SKU</th>
+                <th>Description</th>
+                <th className="sw-num" style={{ width: "6rem" }}>Ordered</th>
+                <th className="sw-num" style={{ width: "6rem" }}>Gone</th>
+                <th className="sw-num" style={{ width: "6rem" }}>Still to go</th>
+                <th className="sw-num" style={{ width: "8rem" }}>Going now</th>
+              </tr>
+            </thead>
+            <tbody data-testid="note-order-lines">
+              {loaded.lines.map((l) => {
+                const typed = qtys[l.orderLineId] ?? "";
+                const parsed = toMilli(typed);
+                const bad = typed.trim() !== "" &&
+                  (parsed === null || parsed > BigInt(l.outstandingMilli));
+                return (
+                  <tr key={l.orderLineId}>
+                    <td className="sw-num">{l.lineNo}</td>
+                    <td className="sw-code">{l.sku ?? "—"}</td>
+                    <td className="max-w-0 truncate">{l.description}</td>
+                    <td className="sw-num">{qty(l.orderedMilli)}</td>
+                    <td className="sw-num">{qty(l.deliveredMilli)}</td>
+                    <td className="sw-num">{qty(l.outstandingMilli)}</td>
+                    <td>
+                      <input
+                        className={`sw-input sw-cell-num w-full ${bad ? "sw-cell-invalid" : ""}`}
+                        inputMode="decimal" value={typed} placeholder="0"
+                        aria-label={`Quantity of line ${l.lineNo} going now`}
+                        onChange={(e) => setQtys((x) => ({ ...x, [l.orderLineId]: e.target.value }))} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!orderId && (
+        <div className="sw-scroll mt-3">
+          <table className="sw-table sw-grid" style={{ maxWidth: "48rem" }}>
+            <caption className="sr-only">What is on the note</caption>
+            <thead>
+              <tr>
+                <th style={{ width: "10rem" }}>SKU</th>
+                <th>Description</th>
+                <th className="sw-num" style={{ width: "8rem" }}>Quantity</th>
+                <th style={{ width: "5rem" }} />
+              </tr>
+            </thead>
+            <tbody data-testid="note-direct-lines">
+              {direct.map((r, i) => (
+                <tr key={i}>
+                  <td>
+                    <input className="sw-input sw-code w-full" value={r.sku} placeholder="WIDGET"
+                      aria-label={`SKU of line ${i + 1}`}
+                      onChange={(e) => setDirect((d) => d.map((x, j) => j === i ? { ...x, sku: e.target.value } : x))} />
+                  </td>
+                  <td>
+                    <input className="sw-input w-full" value={r.description} placeholder="Widget"
+                      aria-label={`Description of line ${i + 1}`}
+                      onChange={(e) => setDirect((d) => d.map((x, j) => j === i ? { ...x, description: e.target.value } : x))} />
+                  </td>
+                  <td>
+                    <input
+                      className={`sw-input sw-cell-num w-full ${r.quantity.trim() !== "" && toMilli(r.quantity) === null ? "sw-cell-invalid" : ""}`}
+                      inputMode="decimal" value={r.quantity} placeholder="0"
+                      aria-label={`Quantity of line ${i + 1}`}
+                      onChange={(e) => setDirect((d) => d.map((x, j) => j === i ? { ...x, quantity: e.target.value } : x))} />
+                  </td>
+                  <td>
+                    {direct.length > 1 && (
+                      <button type="button" className="sw-link-btn"
+                        onClick={() => setDirect((d) => d.filter((_, j) => j !== i))}>
+                        remove
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!orderId && (
+        <button type="button" className="sw-btn sw-btn-sm mt-2"
+          onClick={() => setDirect((d) => [...d, { sku: "", description: "", quantity: "" }])}>
+          Another line
+        </button>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button type="button" className="sw-btn sw-btn-primary" data-testid="save-note"
+          disabled={blocker !== null || busy}
+          aria-disabled={blocker !== null || busy || undefined}
+          onClick={() => {
+            if (blocker) return;
+            onCreate({
+              number: number.trim(),
+              orderId: orderId || undefined,
+              customerName: customerName.trim() || undefined,
+              deliveredOn,
+              carrier: carrier.trim() || undefined,
+              trackingRef: trackingRef.trim() || undefined,
+              notes: notes.trim() || undefined,
+              lines,
+            });
+          }}>
+          {busy ? "Raising…" : "Raise the note"}
+        </button>
+        {blocker
+          ? <span className="sw-sub" role="status" data-testid="note-blocker">{blocker}</span>
+          : <span className="sw-sub">Nothing is posted. A note is a document until it is dispatched.</span>}
+      </div>
+    </Panel>
   );
 }

@@ -487,6 +487,24 @@ export async function deliveredNotInvoiced(opts: {
   };
 }
 
+/**
+ * The most notes one read will list. Past this the oldest in the period are
+ * not listed and `truncated` says so.
+ *
+ * The four headline counts are never derived from that page. `analytics.ts`
+ * and `projects.ts` both refuse to total a set they only partly read, for the
+ * reason that applies here too: a breakdown of an arbitrary slice presented as
+ * the period's totals is worse than no breakdown, because nothing on the
+ * screen says it is a slice.
+ */
+const MAX_NOTES = 500;
+
+/**
+ * Names listed under the unsigned list. It is a list to reach for, not a
+ * total: `dispatched` beside it is the true count however long the list runs.
+ */
+const MAX_UNSIGNED = 200;
+
 export async function deliveryRegister(opts: {
   orgId: string; entityId: string; from?: Date | string; to?: Date | string; status?: NoteStatus;
 }) {
@@ -494,16 +512,44 @@ export async function deliveryRegister(opts: {
   const from = opts.from ? asDate(opts.from, "The start date") : new Date(to.getTime() - 90 * 86_400_000);
   if (to < from) throw new LedgerError("The period ends before it starts.");
 
-  const notes = await prisma.deliveryNote.findMany({
-    where: {
-      orgId: opts.orgId, entityId: opts.entityId,
-      deliveredOn: { gte: from, lte: to },
-      ...(opts.status ? { status: opts.status } : {}),
-    },
+  const where = {
+    orgId: opts.orgId, entityId: opts.entityId,
+    deliveredOn: { gte: from, lte: to },
+    ...(opts.status ? { status: opts.status } : {}),
+  };
+
+  const page = await prisma.deliveryNote.findMany({
+    where,
     include: { lines: { orderBy: { lineNo: "asc" } } },
     orderBy: [{ deliveredOn: "desc" }, { number: "desc" }],
-    take: 500,
+    take: MAX_NOTES + 1,
   });
+  const truncated = page.length > MAX_NOTES;
+  const notes = truncated ? page.slice(0, MAX_NOTES) : page;
+
+  // Counted at the database over the whole period, not by filtering the page.
+  const grouped = await prisma.deliveryNote.groupBy({
+    by: ["status"],
+    where,
+    _count: { _all: true },
+  });
+  const countOf = (status: NoteStatus) =>
+    grouped.find((g) => g.status === status)?._count._all ?? 0;
+  const total = grouped.reduce((a, g) => a + g._count._all, 0);
+
+  // Dispatched and never signed for, asked of the database rather than read off
+  // the page, so the list is not a fact about which notes happened to fit on
+  // it. It carries the same filter as everything else here: a register narrowed
+  // to cancelled notes must not answer a question about dispatched ones.
+  const unsignedRows =
+    opts.status && opts.status !== "dispatched"
+      ? []
+      : await prisma.deliveryNote.findMany({
+          where: { ...where, status: "dispatched" },
+          orderBy: [{ deliveredOn: "desc" }, { number: "desc" }],
+          take: MAX_UNSIGNED,
+          select: { number: true },
+        });
 
   const orderIds = [...new Set(notes.map((n) => n.orderId).filter(Boolean) as string[])];
   const orders = orderIds.length
@@ -513,6 +559,9 @@ export async function deliveryRegister(opts: {
 
   return {
     from: iso(from), to: iso(to),
+    /** True when the period holds more notes than were listed. The counts below are still whole-period. */
+    truncated,
+    listed: notes.length,
     notes: notes.map((n) => ({
       number: n.number,
       orderNumber: n.orderId ? byOrder.get(n.orderId) ?? null : null,
@@ -532,16 +581,17 @@ export async function deliveryRegister(opts: {
       })),
     })),
     summary: {
-      total: notes.length,
-      draft: notes.filter((n) => n.status === "draft").length,
-      dispatched: notes.filter((n) => n.status === "dispatched").length,
-      delivered: notes.filter((n) => n.status === "delivered").length,
+      total,
+      draft: countOf("draft"),
+      dispatched: countOf("dispatched"),
+      delivered: countOf("delivered"),
+      cancelled: countOf("cancelled"),
       /**
        * Dispatched and never signed for. Not a finding in itself — plenty of
        * deliveries are never signed — but it is the list somebody reaches for
        * the day a customer says the goods never arrived.
        */
-      unsigned: notes.filter((n) => n.status === "dispatched").map((n) => n.number),
+      unsigned: unsignedRows.map((n) => n.number),
     },
   };
 }

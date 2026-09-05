@@ -247,6 +247,42 @@ d("trade finance", () => {
   it("names a facility past its expiry that nobody has closed", async () => {
     const reg = await facilityRegister({ ...S, asOf: "2026-10-01" });
     expect(reg.lapsed).toContain("BG-1");
+    expect(reg.lapsedCount).toBe(reg.lapsed.length);
+  });
+
+  it("still names the lapsed one when the register is narrowed to another state", async () => {
+    // The panel is about facilities the bank is still holding margin against.
+    // It used to be filtered out of a page ordered by status, which is how a
+    // live undrawn facility fell off first as expired rows accumulated.
+    const reg = await facilityRegister({ ...S, asOf: "2026-10-01", status: "expired" });
+    expect(reg.facilities.every((f) => f.status === "expired")).toBe(true);
+    expect(reg.facilities.some((f) => f.reference === "BG-1")).toBe(false);
+    expect(reg.lapsed).toContain("BG-1");
+  });
+
+  it("shows only what was asked for when a status is sent", async () => {
+    const drawn = await facilityRegister({ ...S, asOf: "2026-10-01", status: "drawn" });
+    expect(drawn.facilities.map((f) => f.reference)).toEqual(["BG-1"]);
+    expect(drawn.facilities.every((f) => f.status === "drawn")).toBe(true);
+  });
+
+  it("keeps an open facility on the register however old it is, and bounds the closed ones", async () => {
+    // LC-1 was closed on 31 August 2026 and BG-1 is still open with an expiry
+    // of 30 September 2026. Read four years later, the closed one is outside
+    // the window and the open one is not — the bank is still holding margin
+    // against it and no amount of age makes that stop mattering.
+    const far = await facilityRegister({ ...S, asOf: "2030-10-01" });
+    const refs = far.facilities.map((f) => f.reference);
+    expect(refs).toContain("BG-1");
+    expect(refs).not.toContain("LC-1");
+    expect(far.since).toBe("2028-10-01");
+
+    // Read close to the events, both are inside the window.
+    const near = await facilityRegister({ ...S, asOf: "2026-10-01" });
+    expect(near.since).toBe("2024-10-01");
+    expect(near.facilities.map((f) => f.reference)).toContain("LC-1");
+    expect(near.truncated).toBe(false);
+    expect(near.listed).toBe(near.facilities.length);
   });
 
   it("keeps an export credit out of the entity's own exposure", async () => {
@@ -266,6 +302,36 @@ d("trade finance", () => {
     await expect(drawFacility({
       ...S, reference: "LC-EXP-1", amountMinor: 1_000n, drawnOn: "2026-11-01",
     })).rejects.toThrow(/belongs on the receivables screen/);
+  });
+
+  it("records a facility cancelled early as cancelled, not as expired", async () => {
+    // A guarantee good until 2027 that the entity walks away from in 2026.
+    // Without a reason "expire" wins, and the register would then show status
+    // "expired" against an expiry date still in the future — which is not an
+    // untidiness but the difference between the bank letting it run out and
+    // the entity ending it.
+    await issueFacility({
+      ...S,
+      facility: {
+        reference: "BG-3", kind: "BANK_GUARANTEE", bank: "Mashreq", beneficiary: "Municipality",
+        amountMinor: 4_000_000n, marginMinor: 400_000n,
+        issuedOn: "2026-11-01", expiresOn: "2027-10-31",
+      },
+    });
+    const r = await closeFacility({ ...S, reference: "BG-3", closedOn: "2026-11-20", reason: "cancel" });
+    expect(r.status).toBe("cancelled");
+    expect(r.marginReleasedMinor).toBe(400_000n);
+
+    const reg = await facilityRegister({ ...S, asOf: "2026-12-01", status: "cancelled" });
+    const row = reg.facilities.find((f) => f.reference === "BG-3")!;
+    expect(row.status).toBe("cancelled");
+    // It has not lapsed: its expiry is still ahead of the date it was closed.
+    expect(reg.lapsed).not.toContain("BG-3");
+
+    const events = await db.tradeFacilityEvent.findMany({
+      where: { orgId: ORG, kind: "cancel" },
+    });
+    expect(events).toHaveLength(1);
   });
 
   it("warns about what expires within ninety days", async () => {

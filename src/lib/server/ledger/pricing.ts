@@ -100,6 +100,17 @@ export interface NewPriceList {
   validFrom: Date | string;
   validTo?: Date | string | null;
   notes?: string;
+  /**
+   * Close the outgoing default of the same kind to the day before this one
+   * starts, as part of recording it.
+   *
+   * A price rise on a whole list is one event, and without this it cannot be
+   * entered at all: the exclusion constraint refuses a second default over the
+   * same days, and the only remedy — end the old list first — leaves a gap in
+   * which nothing is priced if the new list is then not created. Asked for
+   * explicitly, never assumed, because it edits a list somebody else set up.
+   */
+  supersedeDefault?: boolean;
 }
 
 export async function createPriceList(opts: {
@@ -123,20 +134,58 @@ export async function createPriceList(opts: {
   });
   if (existing) throw new LedgerError(`There is already a price list ${code}.`);
 
-  try {
-    return await prisma.priceList.create({
-      data: {
-        orgId: opts.orgId, entityId: opts.entityId, code, name: l.name.trim(),
-        currency, kind: l.kind ?? "SELL", isDefault: l.isDefault ?? false,
-        validFrom, validTo, notes: l.notes?.trim() || null,
+  const kind: ListKind = l.kind ?? "SELL";
+  const isDefault = l.isDefault ?? false;
+
+  // The outgoing default, where this one is asked to supersede it. Found
+  // before anything is written so a list that cannot be closed refuses the
+  // whole thing rather than closing one and failing to open the other.
+  let outgoing: { id: string; code: string; validFrom: Date } | null = null;
+  if (isDefault && l.supersedeDefault) {
+    const current = await prisma.priceList.findFirst({
+      where: {
+        orgId: opts.orgId, entityId: opts.entityId, kind, isDefault: true,
+        // Including one that starts on the same day, so the refusal below can
+        // say what is actually wrong rather than leaving the database to
+        // report an overlap to somebody who has already asked for it to be
+        // closed.
+        validFrom: { lte: validFrom },
+        OR: [{ validTo: null }, { validTo: { gte: validFrom } }],
       },
+      orderBy: { validFrom: "desc" },
+    });
+    if (current) outgoing = { id: current.id, code: current.code, validFrom: current.validFrom };
+  }
+
+  // The day before the new list starts. Ends are inclusive here, so this is
+  // the last day the old list prices anything and the two never overlap.
+  const closeOn = new Date(validFrom.getTime() - 86_400_000);
+  if (outgoing && closeOn < outgoing.validFrom) {
+    throw new LedgerError(
+      `${outgoing.code} starts on ${iso(outgoing.validFrom)} and would have to be closed on ${iso(closeOn)} to make ` +
+      `room for this one. A list cannot end before it starts — the new list has to start after the old one did.`,
+    );
+  }
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      if (outgoing) {
+        await tx.priceList.update({ where: { id: outgoing.id }, data: { validTo: closeOn } });
+      }
+      return tx.priceList.create({
+        data: {
+          orgId: opts.orgId, entityId: opts.entityId, code, name: l.name.trim(),
+          currency, kind, isDefault,
+          validFrom, validTo, notes: l.notes?.trim() || null,
+        },
+      });
     });
   } catch (e) {
     if (isOverlap(e)) {
       throw new LedgerError(
-        `There is already a default ${l.kind ?? "SELL"} list in force over those dates. ` +
+        `There is already a default ${kind} list in force over those dates. ` +
         `Two defaults at once would make "the list used when a party has no list" a question with two answers — ` +
-        `close the old one first.`,
+        `close the old one first, or tick the box that closes it the day before this one starts.`,
       );
     }
     throw e;
@@ -549,6 +598,16 @@ export async function priceVariance(opts: {
 
 /* ----------------------------------------------------------------- the screen */
 
+/**
+ * The most prices one read will list.
+ *
+ * The filter is pushed into the query rather than applied to the page after
+ * it: filtering in memory means the rows shown for a list are whichever of its
+ * rows happened to fall inside the first page of every list's rows, sorted by
+ * item code, which is nobody's idea of "the prices on this list".
+ */
+const MAX_PRICES = 2000;
+
 export async function priceListRegister(opts: {
   orgId: string; entityId: string; on?: Date | string; listCode?: string;
 }) {
@@ -558,22 +617,60 @@ export async function priceListRegister(opts: {
     where: { orgId: opts.orgId, entityId: opts.entityId },
     orderBy: [{ kind: "asc" }, { code: "asc" }],
   });
-  const entries = await prisma.priceListEntry.findMany({
-    where: { orgId: opts.orgId, priceListId: { in: lists.map((l) => l.id) } },
-    orderBy: [{ itemCode: "asc" }, { minQuantityMilli: "asc" }, { validFrom: "asc" }],
-    take: 2000,
-  });
+  const listIds = lists.map((l) => l.id);
+
+  const wanted = opts.listCode ? opts.listCode.trim().toUpperCase() : null;
+  const chosen = wanted ? lists.find((l) => l.code === wanted) ?? null : null;
+
+  // In force on the day, expressed as a where clause so the count is the
+  // database's rather than a filter over whatever was read.
+  const liveOn = { validFrom: { lte: on }, OR: [{ validTo: null }, { validTo: { gte: on } }] };
+
+  const [totalCounts, liveCounts, partyCounts] = await Promise.all([
+    prisma.priceListEntry.groupBy({
+      by: ["priceListId"],
+      where: { orgId: opts.orgId, priceListId: { in: listIds } },
+      _count: { _all: true },
+    }),
+    prisma.priceListEntry.groupBy({
+      by: ["priceListId"],
+      where: { orgId: opts.orgId, priceListId: { in: listIds }, ...liveOn },
+      _count: { _all: true },
+    }),
+    prisma.priceListAssignment.groupBy({
+      by: ["priceListId"],
+      where: { orgId: opts.orgId, entityId: opts.entityId },
+      _count: { _all: true },
+    }),
+  ]);
+  const countIn = (rows: { priceListId: string; _count: { _all: number } }[], id: string) =>
+    rows.find((r) => r.priceListId === id)?._count._all ?? 0;
+
+  const page = listIds.length
+    ? await prisma.priceListEntry.findMany({
+        where: {
+          orgId: opts.orgId,
+          priceListId: chosen ? chosen.id : { in: listIds },
+        },
+        orderBy: [{ itemCode: "asc" }, { minQuantityMilli: "asc" }, { validFrom: "asc" }],
+        take: MAX_PRICES + 1,
+      })
+    : [];
+  const truncated = page.length > MAX_PRICES;
+  const entries = truncated ? page.slice(0, MAX_PRICES) : page;
+
   const assignments = await prisma.priceListAssignment.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId },
     orderBy: { partyKey: "asc" },
   });
 
   const byList = new Map(lists.map((l) => [l.id, l]));
-  const wanted = opts.listCode ? opts.listCode.trim().toUpperCase() : null;
-  const chosen = wanted ? lists.find((l) => l.code === wanted) ?? null : null;
 
   return {
     on: iso(on),
+    /** True when more prices matched than were listed. Every count below is still the whole count. */
+    truncated,
+    listed: entries.length,
     lists: lists.map((l) => ({
       code: l.code, name: l.name, currency: l.currency, kind: l.kind,
       isDefault: l.isDefault,
@@ -581,24 +678,22 @@ export async function priceListRegister(opts: {
       validTo: l.validTo ? iso(l.validTo) : null,
       inForce: inForce(l.validFrom, l.validTo, on),
       notes: l.notes,
-      priceCount: entries.filter((e) => e.priceListId === l.id).length,
-      livePriceCount: entries.filter((e) => e.priceListId === l.id && inForce(e.validFrom, e.validTo, on)).length,
-      partyCount: assignments.filter((a) => a.priceListId === l.id).length,
+      priceCount: countIn(totalCounts, l.id),
+      livePriceCount: countIn(liveCounts, l.id),
+      partyCount: countIn(partyCounts, l.id),
     })),
-    prices: entries
-      .filter((e) => (chosen ? e.priceListId === chosen.id : true))
-      .map((e) => ({
-        id: e.id,
-        listCode: byList.get(e.priceListId)?.code ?? "",
-        currency: byList.get(e.priceListId)?.currency ?? "AED",
-        itemCode: e.itemCode,
-        minQuantityMilli: e.minQuantityMilli,
-        unitPriceMinor: e.unitPriceMinor,
-        discountBps: e.discountBps,
-        validFrom: iso(e.validFrom),
-        validTo: e.validTo ? iso(e.validTo) : null,
-        inForce: inForce(e.validFrom, e.validTo, on),
-      })),
+    prices: entries.map((e) => ({
+      id: e.id,
+      listCode: byList.get(e.priceListId)?.code ?? "",
+      currency: byList.get(e.priceListId)?.currency ?? "AED",
+      itemCode: e.itemCode,
+      minQuantityMilli: e.minQuantityMilli,
+      unitPriceMinor: e.unitPriceMinor,
+      discountBps: e.discountBps,
+      validFrom: iso(e.validFrom),
+      validTo: e.validTo ? iso(e.validTo) : null,
+      inForce: inForce(e.validFrom, e.validTo, on),
+    })),
     parties: assignments.map((a) => ({
       partyKey: a.partyKey,
       listCode: byList.get(a.priceListId)?.code ?? "",
@@ -608,18 +703,20 @@ export async function priceListRegister(opts: {
      * A list with no default behind it prices only the parties assigned to it.
      * That is a legitimate arrangement and a common mistake, so it is stated
      * rather than left for somebody to notice from an empty quote.
+     *
+     * Both counts come from the groupBy above rather than from the listed
+     * page: said of a list whose prices fell outside the page, "prices
+     * nothing" is not a warning, it is a false statement.
      */
     findings: [
       ...(lists.some((l) => l.kind === "SELL" && l.isDefault && inForce(l.validFrom, l.validTo, on))
         ? []
         : ["No default sell list is in force. Any party without a list of its own will not be priced."]),
       ...lists
-        .filter((l) => inForce(l.validFrom, l.validTo, on) && !l.isDefault &&
-          !assignments.some((a) => a.priceListId === l.id))
+        .filter((l) => inForce(l.validFrom, l.validTo, on) && !l.isDefault && countIn(partyCounts, l.id) === 0)
         .map((l) => `${l.code} is in force but no party is priced from it.`),
       ...lists
-        .filter((l) => inForce(l.validFrom, l.validTo, on) &&
-          entries.filter((e) => e.priceListId === l.id && inForce(e.validFrom, e.validTo, on)).length === 0)
+        .filter((l) => inForce(l.validFrom, l.validTo, on) && countIn(liveCounts, l.id) === 0)
         .map((l) => `${l.code} is in force and prices nothing on ${iso(on)}.`),
     ],
   };

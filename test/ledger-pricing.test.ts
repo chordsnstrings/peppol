@@ -381,4 +381,111 @@ d("the register", () => {
     expect(r.prices).toHaveLength(1);
     expect(r.prices[0].listCode).toBe("ORPHAN");
   });
+
+  it("counts every price on a list, not the ones that fit on the page", async () => {
+    const r = await priceListRegister({ ...S, on: "2026-03-01" });
+    const list = r.lists.find((l) => l.code === "LIST")!;
+    const listRow = await db.priceList.findFirst({ where: { orgId: ORG, entityId: ENT, code: "LIST" } });
+    const stored = await db.priceListEntry.count({ where: { orgId: ORG, priceListId: listRow!.id } });
+    expect(list.priceCount).toBe(stored);
+    expect(r.truncated).toBe(false);
+    expect(r.listed).toBe(r.prices.length);
+  });
+
+  it("does not say a list prices nothing when its prices were simply not listed", async () => {
+    // The old read filtered a 2,000-row page in memory, so a list whose item
+    // codes sorted past the cut was reported as pricing nothing — a false
+    // statement rather than a warning. The finding is now driven off the
+    // count, so narrowing the page cannot produce it.
+    const narrowed = await priceListRegister({ ...S, on: "2026-03-01", listCode: "LIST" });
+    expect(narrowed.prices.every((p) => p.listCode === "LIST")).toBe(true);
+    expect(narrowed.findings.some((f) => f.includes("ORPHAN is in force and prices nothing"))).toBe(false);
+    expect(narrowed.lists.find((l) => l.code === "ORPHAN")!.livePriceCount).toBe(1);
+  });
+});
+
+d("a price rise", () => {
+  beforeAll(async () => { await wipe(); await seedDefault(); });
+  afterAll(async () => { await wipe(); await db.$disconnect(); });
+
+  it("refuses the new price while the old one is still open ended", async () => {
+    await expect(setPrices({
+      ...S, listCode: "LIST",
+      prices: [{ itemCode: "BOLT", unitPriceMinor: 300n, validFrom: "2026-07-01" }],
+    })).rejects.toThrow(/Close the old price to the day before the new one starts/);
+  });
+
+  it("takes the new price once the old one has been closed to the day before", async () => {
+    const r = await priceListRegister({ ...S, on: "2026-06-01" });
+    const bolt = r.prices.find((p) => p.itemCode === "BOLT")!;
+    // The id the register hands the screen is the entryId closePrice needs.
+    await closePrice({ ...S, entryId: bolt.id, validTo: "2026-06-30" });
+    await setPrices({
+      ...S, listCode: "LIST",
+      prices: [{ itemCode: "BOLT", unitPriceMinor: 300n, validFrom: "2026-07-01" }],
+    });
+
+    // 2.50 on the last day of June, 3.00 on the first of July.
+    const june = await resolvePrice({ ...S, itemCode: "BOLT", quantityMilli: 1_000n, on: "2026-06-30" });
+    const july = await resolvePrice({ ...S, itemCode: "BOLT", quantityMilli: 1_000n, on: "2026-07-01" });
+    expect(june.unitPriceMinor).toBe(250n);
+    expect(july.unitPriceMinor).toBe(300n);
+  });
+
+  it("refuses to close a price before the day it started", async () => {
+    const r = await priceListRegister({ ...S, on: "2026-03-01" });
+    const widget = r.prices.find((p) => p.itemCode === "WIDGET" && p.minQuantityMilli === 0n)!;
+    await expect(closePrice({ ...S, entryId: widget.id, validTo: "2025-12-31" }))
+      .rejects.toThrow(/cannot end before it starts/);
+  });
+});
+
+d("one default succeeding another", () => {
+  beforeAll(async () => { await wipe(); await seedDefault(); });
+  afterAll(async () => { await wipe(); await db.$disconnect(); });
+
+  it("refuses a second default over the same days when nothing is superseded", async () => {
+    await expect(createPriceList({
+      ...S, list: { code: "LIST27", name: "2027 prices", validFrom: "2027-01-01", isDefault: true },
+    })).rejects.toThrow(/already a default SELL list in force/);
+  });
+
+  it("closes the outgoing default the day before, when asked to supersede it", async () => {
+    await createPriceList({
+      ...S,
+      list: {
+        code: "LIST27", name: "2027 prices", validFrom: "2027-01-01",
+        isDefault: true, supersedeDefault: true,
+      },
+    });
+    await setPrices({ ...S, listCode: "LIST27", prices: [{ itemCode: "BOLT", unitPriceMinor: 275n }] });
+
+    const r = await priceListRegister({ ...S, on: "2027-01-01" });
+    const old = r.lists.find((l) => l.code === "LIST")!;
+    const next = r.lists.find((l) => l.code === "LIST27")!;
+    expect(old.validTo).toBe("2026-12-31");
+    expect(old.inForce).toBe(false);
+    expect(next.inForce).toBe(true);
+
+    // 2.50 on the last day the old list ran, 2.75 on the first day of the new.
+    const before = await resolvePrice({ ...S, itemCode: "BOLT", quantityMilli: 1_000n, on: "2026-12-31" });
+    const after = await resolvePrice({ ...S, itemCode: "BOLT", quantityMilli: 1_000n, on: "2027-01-01" });
+    expect(before.unitPriceMinor).toBe(250n);
+    expect(after.unitPriceMinor).toBe(275n);
+  });
+
+  it("refuses to supersede a list that would then end before it started", async () => {
+    await expect(createPriceList({
+      ...S,
+      list: {
+        code: "SAMEDAY", name: "Starting the same day", validFrom: "2027-01-01",
+        isDefault: true, supersedeDefault: true,
+      },
+    })).rejects.toThrow(/cannot end before it starts/);
+
+    // And nothing was written on the way to that refusal.
+    const r = await priceListRegister({ ...S, on: "2027-01-01" });
+    expect(r.lists.some((l) => l.code === "SAMEDAY")).toBe(false);
+    expect(r.lists.find((l) => l.code === "LIST27")!.validTo).toBe(null);
+  });
 });

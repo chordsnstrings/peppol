@@ -119,6 +119,7 @@ export default function TimesheetsPage() {
   const [msg, setMsg] = React.useState<string | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
   const [adding, setAdding] = React.useState(false);
+  const [invoiceRef, setInvoiceRef] = React.useState("");
 
   const act = async (label: string, body: Record<string, unknown>) => {
     setBusy(label); setErr(null); setMsg(null);
@@ -311,6 +312,33 @@ export default function TimesheetsPage() {
                       }}>
                       Write off
                     </button>
+                    <label className="flex items-center gap-1.5">
+                      <span className="sw-label">Onto invoice</span>
+                      <input className="sw-input sw-input-sm sw-code" style={{ width: "9rem" }}
+                        value={invoiceRef} placeholder="INV-1042" data-testid="invoice-ref"
+                        aria-label="Which invoice the chosen time went onto"
+                        onChange={(e) => setInvoiceRef(e.target.value)} />
+                    </label>
+                    <button type="button" className="sw-btn sw-btn-sm"
+                      disabled={busy === "invoice" || !invoiceRef.trim()}
+                      aria-disabled={busy === "invoice" || !invoiceRef.trim() || undefined}
+                      data-testid="invoice-time"
+                      onClick={async () => {
+                        const r = await act("invoice", {
+                          action: "invoice", ids: chosen, invoiceId: invoiceRef.trim(),
+                        });
+                        if (r) {
+                          setPicked(new Set());
+                          setInvoiceRef("");
+                          setMsg(
+                            `Charged ${r.invoiced} entr${Number(r.invoiced) === 1 ? "y" : "ies"} onto ${r.invoiceId}. ` +
+                            `The next work-in-progress run takes that cost out of 1330 and leaves it in 5100, ` +
+                            `where the margin on the invoice is earned.`,
+                          );
+                        }
+                      }}>
+                      Invoiced
+                    </button>
                   </div>
                 )}
               </div>
@@ -373,6 +401,13 @@ export default function TimesheetsPage() {
                 approving it, and leaving it out would make the balance sheet depend on how fast the approvals queue
                 moves. Writing time off removes it from the asset and keeps it on the record, with the reason, because
                 the pattern of what a firm cannot bill is worth more than the entries it deletes.
+              </p>
+              <p className="sw-sub mt-2 max-w-[75ch]">
+                Marking time invoiced is how billable work leaves the asset the ordinary way. Only approved billable
+                time can be marked — approval is what somebody other than the person who wrote the time does to it
+                before a client sees it — and the invoice is named so the charge can be traced back to the hours
+                behind it. Time that has already been charged is corrected with a credit note, not by editing the
+                timesheet.
               </p>
             </>
           )}

@@ -15,8 +15,12 @@ interface Facility {
 }
 interface Register {
   asOf: string;
+  since: string;
+  truncated: boolean;
+  listed: number;
   facilities: Facility[];
   lapsed: string[];
+  lapsedCount: number;
   kinds: Record<string, string>;
 }
 interface Note {
@@ -39,11 +43,15 @@ export default function TradeFinancePage() {
   const [asOf, setAsOf] = React.useState(today);
   const [tab, setTab] = React.useState<"register" | "note">("register");
   const [open, setOpen] = React.useState<string | null>(null);
+  const [closing, setClosing] = React.useState<string | null>(null);
   const [adding, setAdding] = React.useState(false);
+  const [status, setStatus] = React.useState("");
 
+  const q = new URLSearchParams({ entityId: entityId ?? "", asOf });
+  if (status) q.set("status", status);
   const { data, error, loading, reload } = useLedgerQuery<Register>(
-    entityId ? `/api/ledger/trade-finance?entityId=${entityId}&asOf=${asOf}` : null,
-    [asOf],
+    entityId ? `/api/ledger/trade-finance?${q.toString()}` : null,
+    [asOf, status],
   );
   const note = useLedgerQuery<Note>(
     entityId && tab === "note" ? `/api/ledger/trade-finance?entityId=${entityId}&view=note&asOf=${asOf}` : null,
@@ -128,15 +136,43 @@ export default function TradeFinancePage() {
                 <Panel className="mb-4 p-4">
                   <div className="sw-label">Past expiry and not closed</div>
                   <p className="sw-sub mt-1 max-w-[75ch]" data-testid="tf-lapsed">
-                    {data.lapsed.join(", ")}. The bank is still holding the margin and the register still shows a
-                    facility that has lapsed — the first overstates cash and the second leaves a line on a screen
-                    that no longer means anything.
+                    {data.lapsed.join(", ")}
+                    {data.lapsedCount > data.lapsed.length && ` and ${data.lapsedCount - data.lapsed.length} more`}.
+                    The bank is still holding the margin and the register still shows a facility that has lapsed —
+                    the first overstates cash and the second leaves a line on a screen that no longer means anything.
+                    Closing one records whether it ran out or was cancelled, and brings the margin back.
                   </p>
                 </Panel>
               )}
 
+              <div className="mb-3">
+                <label className="flex items-center gap-1.5">
+                  <span className="sw-label">Showing</span>
+                  <select className="sw-select" style={{ width: "12rem" }} value={status}
+                    onChange={(e) => { setStatus(e.target.value); setOpen(null); setClosing(null); }}
+                    aria-label="Which facilities to show">
+                    <option value="">everything still listed</option>
+                    <option value="issued">open, undrawn</option>
+                    <option value="drawn">drawn</option>
+                    <option value="expired">expired</option>
+                    <option value="cancelled">cancelled</option>
+                  </select>
+                </label>
+              </div>
+
+              {data.truncated && (
+                <p className="sw-sub mb-3 max-w-[75ch]" role="status" data-testid="tf-truncated">
+                  {data.listed} facilities are listed, soonest expiry first. Everything still open is here whatever
+                  its age; what is closed is listed back to {data.since}.
+                </p>
+              )}
+
               {data.facilities.length === 0 ? (
-                <Empty>No facility has been recorded.</Empty>
+                <Empty>
+                  {status
+                    ? `No facility in that state, listed from ${data.since}.`
+                    : "No facility has been recorded."}
+                </Empty>
               ) : (
                 <Panel className="overflow-hidden">
                   <div className="sw-scroll">
@@ -213,12 +249,11 @@ export default function TradeFinancePage() {
                                       </>
                                     )}
                                     {" "}
-                                    <button type="button" className="sw-link-btn" disabled={busy === `close:${f.reference}`}
-                                      onClick={async () => {
-                                        const r = await act(`close:${f.reference}`, {
-                                          action: "close", reference: f.reference, on: asOf,
-                                        });
-                                        if (r) setMsg(`${f.reference} is closed and the margin has come back.`);
+                                    <button type="button" className="sw-link-btn"
+                                      aria-expanded={closing === f.reference}
+                                      onClick={() => {
+                                        setClosing(closing === f.reference ? null : f.reference);
+                                        setOpen(null);
                                       }}>
                                       close
                                     </button>
@@ -235,6 +270,36 @@ export default function TradeFinancePage() {
                                 )}
                               </td>
                             </tr>
+                            {closing === f.reference && (
+                              <tr>
+                                <td colSpan={10} style={{ background: "var(--sw-ground)" }}>
+                                  <CloseFacility
+                                    reference={f.reference}
+                                    expiresOn={f.expiresOn}
+                                    marginMinor={f.marginMinor}
+                                    currency={f.currency}
+                                    suggested={asOf}
+                                    busy={busy === `close:${f.reference}`}
+                                    onCancel={() => setClosing(null)}
+                                    onClose={async (on, reason) => {
+                                      const r = await act(`close:${f.reference}`, {
+                                        action: "close", reference: f.reference, on, reason,
+                                      });
+                                      if (r) {
+                                        setClosing(null);
+                                        setMsg(
+                                          reason === "cancel"
+                                            ? `${f.reference} is recorded as cancelled on ${on}, not as expired, and ` +
+                                              `the margin has come back.`
+                                            : `${f.reference} is recorded as expired on ${on} and the margin has ` +
+                                              `come back.`,
+                                        );
+                                      }
+                                    }}
+                                  />
+                                </td>
+                              </tr>
+                            )}
                             {open === f.reference && (
                               <tr>
                                 <td colSpan={10} style={{ background: "var(--sw-ground)" }}>
@@ -529,5 +594,73 @@ function NewFacilityForm({ kinds, busy, onIssue }: {
         </button>
       </div>
     </Panel>
+  );
+}
+
+/* ------------------------------------------------------- closing a facility */
+
+/**
+ * A facility ends for one of two reasons, and which one it was has to be said.
+ *
+ * Recording a cancellation as an expiry leaves a row whose status says
+ * "expired" against an expiry date still in the future, which is not a small
+ * untidiness: it is the difference between a credit the bank let run out and
+ * one the entity walked away from, and only one of those is a fact about the
+ * entity's relationship with its bank.
+ *
+ * The margin comes back either way. The bank holds it against the promise
+ * rather than against the drawing.
+ */
+function CloseFacility({ reference, expiresOn, marginMinor, currency, suggested, busy, onCancel, onClose }: {
+  reference: string;
+  expiresOn: string;
+  marginMinor: string;
+  currency: string;
+  suggested: string;
+  busy: boolean;
+  onCancel: () => void;
+  onClose: (on: string, reason: "expire" | "cancel") => void;
+}) {
+  const [on, setOn] = React.useState(suggested);
+  // What it looks like from the dates, offered rather than assumed: a facility
+  // closed before its expiry was almost always cancelled, and one closed after
+  // it almost always just ran out.
+  const [reason, setReason] = React.useState<"expire" | "cancel">(on < expiresOn ? "cancel" : "expire");
+
+  return (
+    <div className="p-3" style={{ maxWidth: "46rem" }}>
+      <div className="sw-label">Closing {reference}</div>
+      <div className="mt-2 flex flex-wrap items-end gap-3">
+        <label className="block">
+          <span className="sw-label">Closed on</span>
+          <input type="date" className="sw-input mt-1" style={{ width: "10rem" }} value={on}
+            aria-label={`Date ${reference} was closed`}
+            onChange={(e) => setOn(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">Because</span>
+          <select className="sw-select mt-1" style={{ width: "18rem" }} value={reason}
+            data-testid={`close-reason-${reference}`}
+            aria-label={`Why ${reference} is being closed`}
+            onChange={(e) => setReason(e.target.value as "expire" | "cancel")}>
+            <option value="expire">it reached its expiry of {expiresOn}</option>
+            <option value="cancel">it was cancelled before then</option>
+          </select>
+        </label>
+        <button type="button" className="sw-btn sw-btn-primary" disabled={busy || !on}
+          data-testid={`close-confirm-${reference}`}
+          onClick={() => onClose(on, reason)}>
+          {busy ? "Closing…" : "Close it"}
+        </button>
+        <button type="button" className="sw-btn" onClick={onCancel}>Leave it open</button>
+      </div>
+      <p className="sw-sub mt-2 max-w-[70ch]">
+        {BigInt(marginMinor) > 0n
+          ? <>The margin of <Figure minor={marginMinor} currency={currency} colour={false} /> comes back out of 1255
+              and into the bank account. Nothing else is posted — the face of the facility never reached an
+              account.</>
+          : "Nothing is posted: no margin was held, and the face of a facility never reached an account."}
+      </p>
+    </div>
   );
 }
