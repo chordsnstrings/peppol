@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { generalLedger } from "@/lib/server/ledger/reports";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -8,7 +9,9 @@ export const runtime = "nodejs";
 /** General-ledger detail for one account — the drill-down target. */
 export async function GET(req: Request, ctx: { params: Promise<{ code: string }> }) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The general ledger behind one account is a read of the books. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const { code } = await ctx.params;
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -31,10 +32,26 @@ export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* Leave is payroll data, so `payroll.read` and not `ledger.read`.
+     *
+     * The register does not merely list absences. It values every employee's
+     * untaken days at their CURRENT wage, row by row, because Article 29(3)
+     * says that is what they would be paid — so divide one person's provision
+     * by their days and you have their daily rate, and from that their salary.
+     * The shipped VIEWER role says in as many words that "salaries are not a
+     * general read", and a Viewer holding `ledger.read` could read the whole
+     * payroll off this one screen.
+     *
+     * It costs something real. Under the shipped roles the accountant who
+     * reconciles account 2260 does not hold `payroll.read` and will be refused
+     * until somebody grants it. That is the better of the two mistakes: a
+     * refusal names itself and says who can fix it, whereas a workspace
+     * quietly publishing its salaries says nothing at all. */
+    await requirePermission({ orgId, userId, entityId, permission: "payroll.read" });
 
     // Absent a date, today: leave is earned every day, so "now" is the only
     // date a reader who did not name one can have meant.
@@ -52,6 +69,7 @@ export async function GET(req: Request) {
     ]);
     return json(ledgerJson({ ...register, records }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -77,6 +95,19 @@ export async function POST(req: Request) {
       expenseAccount?: string;
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
+    /* `encash` pays leave out at the employee's wage and `provision` measures
+     * the whole workforce's untaken leave at theirs and posts it to salary
+     * cost on 6000 — calculating and posting pay, which is `payroll.run` word
+     * for word.
+     *
+     * `record` is guarded with them rather than more lightly, and it is the
+     * uncomfortable one: writing down that somebody was away last week names
+     * no money at all, and a narrower `leave.record` is the key I would have
+     * wanted. It goes here because a leave record moves the balance that both
+     * the provision and the encashment are computed from, so a wider group
+     * able to write records would be a wider group able to move a payroll
+     * figure at one remove. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "payroll.run" });
 
     switch (b.action) {
       case "record":
@@ -115,6 +146,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -20,11 +21,14 @@ export const runtime = "nodejs";
 /** The floats and whether they reconcile, or one float with its movements. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Whether each float still reconciles — cash plus receipts against the
+     * float — is a report, and it is one more people should read, not fewer. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const fundId = q.get("fundId");
     if (fundId) return json(ledgerJson(await fundDetail({ orgId, entityId, fundId })));
@@ -36,6 +40,7 @@ export async function GET(req: Request) {
       status: status === "active" || status === "closed" ? status : undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -69,6 +74,30 @@ export async function POST(req: Request) {
     };
 
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+
+    /*
+     * The split follows the bank, because that is what actually differs here.
+     *
+     * Opening a float, reimbursing it and taking cash back all move money in or
+     * out of the bank account — Cr bank for the advance, Cr bank for the exact
+     * total of the receipts, Dr bank for what the custodian hands back — and
+     * every one of them lands on the statement as a line somebody has to match.
+     * Closing a float ends that arrangement. They are the cashier's work, so
+     * they take `bank.reconcile`: it is the key the shipped Cashier role holds,
+     * and reimbursing is the moment somebody other than the custodian looks at
+     * the receipts, which is the only real control a tin has.
+     *
+     * Recording a receipt is the one action that touches neither the bank nor
+     * the ledger — under the imprest treatment it stays in the subledger until
+     * the float is reimbursed. What it is, is a small purchase with input tax
+     * on it, refused unless the supplier's TRN is a real one, so it takes the
+     * purchase-ledger key. `bank.reconcile` would be wrong for it precisely
+     * because no money moves.
+     */
+    await requirePermission({
+      orgId, userId, entityId: b.entityId,
+      permission: b.action === "spend" ? "ap.manage" : "bank.reconcile",
+    });
 
     switch (b.action) {
       case "open":
@@ -122,6 +151,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

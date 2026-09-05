@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -17,15 +18,18 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The register and its ledger balances are a report. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const code = params.get("code");
     if (code) return json(ledgerJson(await contractDetail({ orgId, entityId, code })));
     return json(ledgerJson(await contractRegister({ orgId, entityId })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -35,7 +39,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "modify" | "bill" | "satisfy" | "progress" | "cancel" | "run" | "runAll";
       entityId?: string;
@@ -50,6 +54,13 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
+    /* One guard for the whole switch. A revenue contract is what the customer
+     * was sold and what has been billed for it; recognising it moves the
+     * contract liability into revenue for that same customer. All of it is the
+     * sales ledger, which is where the catalogue puts revenue. `ledger.post`
+     * would be the wrong key: a recognition run is not a hand-written journal,
+     * and granting it here would give away every other journal too. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ar.manage" });
 
     switch (b.action) {
       case "create":
@@ -100,6 +111,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

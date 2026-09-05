@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -29,7 +30,9 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The queue is assembled out of reads of the books, so it is one. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
 
     const entityId = q.get("entityId");
@@ -44,6 +47,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson(await notificationCentre({ orgId, entityId, asOf })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -65,6 +69,13 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* This one writes: acknowledging or snoozing a row takes a finding off
+     * everybody's queue, not just the acknowledger's. There is no notifications
+     * key in the catalogue and "notifications.manage" is what this would have
+     * asked for. Of the twenty-one that exist the read key is the closest — the
+     * people who work this queue are bookkeepers and accountants, and putting it
+     * behind the setup key would lock the queue's own audience out of it. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "acknowledge" | "snooze" | "clear";
       entityId?: string;
@@ -104,6 +115,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

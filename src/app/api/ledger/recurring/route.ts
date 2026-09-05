@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -19,13 +20,16 @@ export const runtime = "nodejs";
 /** The standing instructions: when each last ran, when it is next due, what is behind. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* When each standing instruction last ran and what is behind is a report. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const asOf = url.searchParams.get("asOf") ?? undefined;
     return json(await templateStatus({ orgId, entityId, asOf }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -47,6 +51,20 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const entityId = b.entityId;
+
+    /* `due` is a question — it lists what would be raised for a month and
+     * stores nothing — so it takes the read key.
+     *
+     * Everything else takes `ledger.post`. Running a month posts the accruals,
+     * prepayments and standing charges as journals; and writing the template is
+     * writing the journal, a month early. Somebody who can save a template can
+     * put an entry in the ledger every month without ever holding the key to
+     * post one, so the template actions cannot be guarded any more loosely than
+     * the run they cause. */
+    await requirePermission({
+      orgId, userId, entityId,
+      permission: b.action === "due" ? "ledger.read" : "ledger.post",
+    });
 
     switch (b.action) {
       case "create": {
@@ -106,6 +124,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

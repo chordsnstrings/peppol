@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -27,10 +28,13 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Every view here is a way of reading the receivables — including the credit
+     * check, which asks a question and changes nothing. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const scope = { orgId, entityId };
     const asOf = q.get("asOf") ? new Date(q.get("asOf") as string) : undefined;
     const code = q.get("code");
@@ -75,6 +79,7 @@ export async function GET(req: Request) {
         })));
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -95,30 +100,55 @@ export async function POST(req: Request) {
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
 
+    /* The guards are per action, not one at the top, because this entry point
+     * covers two different powers. Keeping a customer's record is the sales
+     * ledger; stopping their next order is not, and the catalogue gives the
+     * second its own key so the two can be held by different people. */
+    const guard = (permission: string) => requirePermission({ orgId, userId, entityId: scope.entityId, permission });
+
     switch (b.action) {
-      case "create":
+      case "create": {
+        await guard("ar.manage");
         if (!b.counterparty) return json({ error: "There is no counterparty to create." }, 400);
+        /* An account can be opened already on hold — a customer arrives with a
+         * history — and that is a hold placed through the create verb. It takes
+         * the hold key as well, or "create with onHold" would be the way round
+         * the guard on "hold". */
+        if (b.counterparty.onHold === true) await guard("ar.credit_hold");
         return json(ledgerJson({ counterparty: await createCounterparty({ ...scope, counterparty: b.counterparty }) }));
+      }
 
       case "update":
+        /* A hold is deliberately not changeable through an update — the module
+         * refuses it and says so — so this stays the sales-ledger key. */
+        await guard("ar.manage");
         if (!b.code || !b.change) return json({ error: "Which counterparty, and what change?" }, 400);
         return json(ledgerJson({ counterparty: await updateCounterparty({ ...scope, code: b.code, change: b.change }) }));
 
       case "archive":
+        await guard("ar.manage");
         if (!b.code) return json({ error: "Which counterparty?" }, 400);
         return json(ledgerJson({ counterparty: await archiveCounterparty({ ...scope, code: b.code }) }));
 
       case "restore":
+        await guard("ar.manage");
         if (!b.code) return json({ error: "Which counterparty?" }, 400);
         return json(ledgerJson({ counterparty: await restoreCounterparty({ ...scope, code: b.code }) }));
 
       // The reason is required by the domain rather than checked here, so the
       // rule holds for every caller and not only for this route.
       case "hold":
+        /* Stopping new sales to a customer is its own permission, the same one
+         * /api/ledger/credit-control demands — this is the same act reached
+         * from the customer screen instead of the credit screen. */
+        await guard("ar.credit_hold");
         if (!b.code) return json({ error: "Which counterparty?" }, 400);
         return json(ledgerJson(await placeOnHold({ ...scope, code: b.code, reason: b.reason ?? "", actorId: userId })));
 
       case "release":
+        /* Letting them start again is the same power as stopping them, and the
+         * release is the decision that matters more. */
+        await guard("ar.credit_hold");
         if (!b.code) return json({ error: "Which counterparty?" }, 400);
         return json(ledgerJson(await releaseHold({ ...scope, code: b.code, reason: b.reason ?? "", actorId: userId })));
 
@@ -126,6 +156,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

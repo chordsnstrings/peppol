@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { ftaAuditFile } from "@/lib/server/ledger/faf";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -22,7 +23,11 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Every transaction in the period in one file for the FTA. Like the export,
+     * this is the widest read in the product rather than a narrow one, and the
+     * read key is what it takes. It files nothing; it only serves the file. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
@@ -50,6 +55,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson(file));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

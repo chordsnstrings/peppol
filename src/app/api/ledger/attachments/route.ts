@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -26,7 +27,20 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Evidence for a document is part of reading the document — `ledger.read`.
+     *
+     * An entry says what was decided; the attachment is what it was decided
+     * on. An audit trail whose evidence only some of its readers may see is
+     * not an audit trail, and somebody who can already open the bill has
+     * gained nothing by being refused the supplier's PDF of it.
+     *
+     * One key is honest here only because every subject type this module
+     * accepts — journal entry, invoice, bill, expense claim, asset, bank line
+     * — is a record `ledger.read` already covers. If a payslip ever becomes a
+     * subject type this has to branch on the subject instead of answering with
+     * one key, because a receipt and a payslip are not the same read. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const id = url.searchParams.get("id");
 
@@ -43,6 +57,7 @@ export async function GET(req: Request) {
     const attachments = await listAttachments({ orgId, subjectType, subjectId });
     return json(ledgerJson({ attachments }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -67,6 +82,15 @@ export async function POST(req: Request) {
     if (!b.filename || !b.mimeType || !b.contentBase64) {
       return json({ error: "An attachment needs a filename, a type and its content." }, 400);
     }
+    /* Attaching evidence writes into the record the books rest on, so
+     * `ledger.post` — the narrowest key the catalogue has for adding to the
+     * books by hand. An `attachment.add` is what I would have wanted, and it
+     * ought to follow the subject: a claimant photographing the receipt for
+     * their own claim should not need the power to post journals. As it
+     * stands the roles that can raise these documents are the roles that can
+     * put evidence behind them, which at least matches the expenses route
+     * next door. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
 
     const result = await attach({
       orgId,
@@ -82,6 +106,7 @@ export async function POST(req: Request) {
     // should be able to tell a person "that is already attached".
     return json(ledgerJson({ attachment: result, limitBytes: MAX_BYTES }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -100,6 +125,14 @@ export async function DELETE(req: Request) {
     const { orgId, userId } = await requireSession();
     const id = new URL(req.url).searchParams.get("id");
     if (!id) return json({ error: "Which attachment?" }, 400);
+    /* Detaching is guarded harder than attaching, with `ledger.reverse`.
+     * Taking evidence off a posted record is a correction to that record, and
+     * "correct a posted entry" is what that key names. Under the shipped roles
+     * the bookkeeper may add a receipt and only the accountant or the owner
+     * may take one away, which is the right way round: as the module puts it,
+     * removing evidence silently is how evidence stops being evidence, and the
+     * console line below is the only history there is. */
+    await requirePermission({ orgId, userId, permission: "ledger.reverse" });
 
     const removed = await removeAttachment({ orgId, id, removedBy: userId });
     console.info("[attachment removed]", {
@@ -114,6 +147,7 @@ export async function DELETE(req: Request) {
     });
     return json(ledgerJson({ removed }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

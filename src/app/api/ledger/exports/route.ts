@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -30,7 +31,12 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* An export is the widest read in the product: every journal, every account
+     * and every balance, in one bundle that then leaves the building. There is
+     * nothing narrower to give it, so it takes the read key — and anyone holding
+     * the read key can already see all of this a screen at a time. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required to export a ledger." }, 400);
@@ -76,6 +82,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson({ ...bundle, verification }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -85,6 +92,10 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Migrating in loads a trial balance into an empty ledger, which is opening
+     * balances by another name. Parsing and previewing are guarded with it
+     * because they are the earlier steps of that same screen. */
+    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "parse" | "preview" | "import";
       entityId?: string;
@@ -108,6 +119,7 @@ export async function POST(req: Request) {
     }
     return json(ledgerJson(await previewImport({ orgId, entityId: b.entityId, asOf: b.asOf, rows })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

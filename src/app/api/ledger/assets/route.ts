@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -9,11 +10,18 @@ export const runtime = "nodejs";
 /** The asset register, with the ledger balances it should agree with. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const entityId = new URL(req.url).searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The register and the ledger balances it is reconciled against are a
+     * report. Reading it is `ledger.read`, not `asset.manage` — a Viewer who
+     * may read the balance sheet may see what makes up the fixed assets on
+     * it, and refusing that would hide a line of the accounts from somebody
+     * who can already read the total. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json(await assetRegister({ orgId, entityId }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -35,6 +43,11 @@ export async function POST(req: Request) {
       proceedsAccount?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* "Add, revalue, depreciate and dispose of assets" is `asset.manage` word
+     * for word, and add / depreciate / dispose are exactly the three actions
+     * here. One guard, because no action among them lets somebody do less
+     * than the others. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "asset.manage" });
 
     switch (b.action) {
       case "add": {
@@ -65,6 +78,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

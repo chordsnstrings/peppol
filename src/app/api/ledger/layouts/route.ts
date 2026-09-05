@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -22,7 +23,9 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Listing layouts, and rendering one, are both reads of the statements. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
@@ -48,6 +51,7 @@ export async function GET(req: Request) {
       }),
     );
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -66,7 +70,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "save" | "preview" | "duplicate" | "seed" | "archive";
       entityId?: string;
@@ -82,6 +86,14 @@ export async function POST(req: Request) {
       status?: "active" | "archived";
       overwrite?: boolean;
     };
+    /* Saving, copying, seeding or archiving a layout decides how the statements
+     * are shown to everybody afterwards, so it goes with setting the books up.
+     * A preview is the exception: it renders the rows in the body and writes
+     * nothing, so it is a report request and takes the read key. */
+    await requirePermission({
+      orgId, userId,
+      permission: b.action === "preview" ? "ledger.read" : "setup.manage",
+    });
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
 
     switch (b.action) {
@@ -139,6 +151,7 @@ export async function POST(req: Request) {
       }
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

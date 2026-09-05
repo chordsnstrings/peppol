@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
@@ -19,6 +20,9 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Putting an invoice or a receipt into the books is the sales ledger, and
+     * it is the mirror of the guard on /api/ledger/ap/post. */
+    await requirePermission({ orgId, userId, permission: "ar.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       invoiceId?: string;
       kind?: "invoice" | "receipt";
@@ -66,6 +70,7 @@ export async function POST(req: Request) {
     const result = await postInvoice({ orgId, invoice, actorType: "HUMAN", actorId: userId });
     return json(result);
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

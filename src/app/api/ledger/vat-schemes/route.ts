@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -31,10 +32,16 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The register, the due list and the margin arithmetic are reports and
+     * previews; nothing here writes. Reading the reports is `ledger.read`.
+     * The adjustment preview shows what an assessment WOULD post, which is
+     * still a read — the posting itself is the POST below, and that is where
+     * the tax key belongs. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (params.get("view") === "margin") {
       const purchase = params.get("purchaseMinor");
@@ -97,6 +104,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson({ register, due, zones: designatedZoneMatrix() }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -125,6 +133,17 @@ export async function POST(req: Request) {
       expenseAccount?: string;
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
+    /* The capital assets scheme is VAT work, so `tax.file`.
+     *
+     * "Capital asset" here is not the fixed asset register. This register
+     * carries input tax and the taxable-use proportion it was claimed at, and
+     * every figure it produces lands in the adjustment column of a VAT 201
+     * box: registering an asset fixes the intervals a later return adjusts
+     * over, and assessing or disposing of one posts the adjustment itself.
+     * `asset.manage` is the wrong shelf — its holder maintains what the
+     * accounts say a thing is worth, which nothing here touches. All three
+     * actions are the one duty, so the guard is one. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "tax.file" });
 
     switch (b.action) {
       case "register": {
@@ -215,6 +234,7 @@ export async function POST(req: Request) {
         );
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { EMIRATES } from "@/lib/domain/peppol";
 import { LedgerError } from "./post";
-import { filingFor, getRegistration, taxPeriodFor } from "./tax-periods";
+import { filingFor, getRegistration, taxPeriodFor, ASSUMED_RULE } from "./tax-periods";
 import { MARGIN_TAX_MEMO } from "./ar";
 
 /**
@@ -111,6 +111,46 @@ export interface VatReturn {
   };
   /** Anything that would make this return wrong if filed as it stands. */
   warnings: string[];
+  /**
+   * Corrections in this period to returns already filed (Tax Procedures Law
+   * Article 10). The population, never a verdict — see `voluntaryDisclosure`.
+   */
+  voluntaryDisclosure: VoluntaryDisclosure;
+}
+
+/** One reversal in this period of an entry that belongs to a filed return. */
+export interface FiledPeriodCorrection {
+  /** The reversing entry, as it appears in the ledger. */
+  reference: string;
+  entryDate: string;
+  /** The entry it reversed, and the period that entry belongs to. */
+  originalReference: string;
+  originalDate: string;
+  originalPeriodLabel: string;
+  /** When that period's return was filed, where a filing is recorded. */
+  filedOn: string | null;
+  outputVatMinor: string;
+  inputVatMinor: string;
+  /** The effect on the tax due for the ORIGINAL period. Positive: more was due. */
+  netMinor: string;
+}
+
+export interface VoluntaryDisclosure {
+  /** AED 10,000 — Article 10(1) of Federal Decree-Law 28/2022. */
+  thresholdMinor: string;
+  /** True where the books are not kept in AED, so the threshold is not directly comparable. */
+  currencyDiffers: boolean;
+  corrections: FiledPeriodCorrection[];
+  /** Article 10 measures the error PER RETURN, so the corrections are grouped by the period they belong to. */
+  byPeriod: {
+    label: string;
+    filedOn: string | null;
+    netMinor: string;
+    overThreshold: boolean;
+    corrections: number;
+  }[];
+  largestMinor: string;
+  note: string;
 }
 
 /**
@@ -624,6 +664,27 @@ export async function vatReturn(opts: {
     );
   }
 
+  const voluntaryDisclosure = await correctionsToFiledPeriods({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    from,
+    to,
+    currency: book.functionalCurrency,
+  });
+  if (voluntaryDisclosure.byPeriod.some((p) => p.overThreshold)) {
+    const over = voluntaryDisclosure.byPeriod.filter((p) => p.overThreshold);
+    warnings.push(
+      `Entries belonging to ${over.length === 1 ? "a return" : `${over.length} returns`} already filed ` +
+        `(${over.map((p) => p.label).join(", ")}) were reversed in this period, moving the tax due for ` +
+        `${over.length === 1 ? "it" : "them"} by more than ${VOLUNTARY_DISCLOSURE_THRESHOLD_AED_MINOR / 100_000n} ` +
+        `thousand dirhams. Article 10 of Federal Decree-Law 28/2022 requires a voluntary disclosure within 20 ` +
+        `business days of becoming aware of an error above AED 10,000 in a filed return, and a correction is not ` +
+        `made by putting it through the current return. This is the population, not a verdict: the ledger cannot ` +
+        `tell an error from a legitimate credit note under Articles 61 and 62, and it does not know when anybody ` +
+        `became aware of anything. Look at each one.`,
+    );
+  }
+
   return {
     entityId: opts.entityId,
     periodFrom,
@@ -644,8 +705,205 @@ export async function vatReturn(opts: {
       inputMatches: inputVat === ledgerInput,
     },
     warnings,
+    voluntaryDisclosure,
   };
 }
+
+/** AED 10,000, in fils. Article 10(1) of Federal Decree-Law 28/2022. */
+export const VOLUNTARY_DISCLOSURE_THRESHOLD_AED_MINOR = 1_000_000n;
+
+/**
+ * Corrections made in this period to returns that have already been filed.
+ *
+ * `reverse()` refuses a closed period, so a correction to a filed quarter
+ * necessarily lands in an open one and flows into the CURRENT return as
+ * ordinary movement. Nothing measured its size, compared it to the Article 10
+ * threshold, or said that a correction to a filed return is a voluntary
+ * disclosure rather than a line on the next one. The tax was quietly moved from
+ * the period it belonged to into the period somebody noticed, which is exactly
+ * what Article 10 exists to stop.
+ *
+ * Three decisions, all of which matter.
+ *
+ * WHAT COUNTS AS FILED. A recorded filing, first: `tax-periods.ts` holds the
+ * date each return went, and that is a fact rather than an inference. Where no
+ * filing is recorded the period lock is the proxy — the same proxy `attention.ts`
+ * runs its 28-day statutory clock off, so the "we cannot know what was filed"
+ * defence does not apply to one and not the other. A period that is neither
+ * filed nor closed is not treated as filed, because a correction to a return
+ * nobody has sent is just bookkeeping.
+ *
+ * WHAT COUNTS AS THE ERROR. Article 10 measures per RETURN, not in aggregate,
+ * so the corrections are grouped by the period the ORIGINAL entry belongs to
+ * and each group is tested on its own. Two errors of six thousand in different
+ * quarters are two errors under the threshold; the same two in one quarter are
+ * one above it.
+ *
+ * WHAT THIS WILL NOT SAY. Whether a reversal is an error. The ledger cannot
+ * tell a mistake from a legitimate credit note under Articles 61 and 62, and it
+ * cannot know when anybody became aware of anything, so it cannot start the
+ * 20-business-day clock. It reports the population and names the test. A
+ * product that guessed here would be wrong in the direction that costs somebody
+ * a penalty.
+ */
+export async function correctionsToFiledPeriods(opts: {
+  orgId: string;
+  entityId: string;
+  from: Date;
+  to: Date;
+  currency: string;
+}): Promise<VoluntaryDisclosure> {
+  const currencyDiffers = opts.currency !== "AED";
+  const empty: VoluntaryDisclosure = {
+    thresholdMinor: VOLUNTARY_DISCLOSURE_THRESHOLD_AED_MINOR.toString(),
+    currencyDiffers,
+    corrections: [],
+    byPeriod: [],
+    largestMinor: "0",
+    note:
+      "No entry belonging to a filed return was reversed in this period, so nothing here calls for a voluntary " +
+      "disclosure under Article 10.",
+  };
+
+  // Reversals posted in this period that touch the VAT accounts. A reversal is
+  // identified by the link the ledger already keeps, not by its memo.
+  const lines = await prisma.journalLine.findMany({
+    where: {
+      orgId: opts.orgId,
+      account: { code: { in: [VAT_OUTPUT_ACCOUNT, VAT_INPUT_ACCOUNT] }, entityId: opts.entityId },
+      entry: {
+        entityId: opts.entityId,
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: opts.from, lte: opts.to },
+        reversalOfId: { not: null },
+      },
+    },
+    include: {
+      account: { select: { code: true } },
+      entry: { select: { id: true, series: true, number: true, entryDate: true, reversalOfId: true } },
+    },
+  });
+  if (lines.length === 0) return empty;
+
+  const originalIds = [...new Set(lines.map((l) => l.entry.reversalOfId).filter((v): v is string => v !== null))];
+  const originals = await prisma.journalEntry.findMany({
+    where: { id: { in: originalIds } },
+    select: { id: true, series: true, number: true, entryDate: true, periodId: true },
+  });
+  const originalById = new Map(originals.map((o) => [o.id, o]));
+
+  const periods = await prisma.accountingPeriod.findMany({
+    where: { id: { in: [...new Set(originals.map((o) => o.periodId))] } },
+    select: { id: true, label: true, status: true },
+  });
+  const periodById = new Map(periods.map((p) => [p.id, p]));
+
+  const registration = await getRegistration({ orgId: opts.orgId, entityId: opts.entityId, regime: "VAT" });
+  const rule = registration
+    ? { frequency: registration.frequency, firstPeriodEndMonth: registration.firstPeriodEndMonth }
+    : ASSUMED_RULE;
+
+  /** One row per reversing entry, with its two VAT sides netted. */
+  const byEntry = new Map<string, { output: bigint; input: bigint; entry: (typeof lines)[number]["entry"] }>();
+  for (const l of lines) {
+    const g = byEntry.get(l.entry.id) ?? { output: 0n, input: 0n, entry: l.entry };
+    if (l.account.code === VAT_OUTPUT_ACCOUNT) g.output += -l.functionalAmountMinor;
+    else g.input += l.functionalAmountMinor;
+    byEntry.set(l.entry.id, g);
+  }
+
+  const filedOnCache = new Map<string, string | null>();
+  const corrections: FiledPeriodCorrection[] = [];
+
+  for (const g of byEntry.values()) {
+    const original = g.entry.reversalOfId ? originalById.get(g.entry.reversalOfId) : undefined;
+    if (!original) continue;
+
+    // The tax period the ORIGINAL belongs to, on this registration's stagger.
+    const taxPeriod = taxPeriodFor(rule, original.entryDate);
+
+    let filedOn = filedOnCache.get(taxPeriod.label);
+    if (filedOn === undefined) {
+      const filing = await filingFor({
+        orgId: opts.orgId, entityId: opts.entityId, regime: "VAT", periodLabel: taxPeriod.label,
+      });
+      filedOn = filing?.filedOn ?? null;
+      filedOnCache.set(taxPeriod.label, filedOn);
+    }
+
+    // Filed, or closed behind itself — the same proxy the attention list uses.
+    const locked = periodById.get(original.periodId)?.status;
+    const treatAsFiled = filedOn !== null || locked === "hard_closed" || locked === "soft_closed";
+    if (!treatAsFiled) continue;
+
+    corrections.push({
+      reference: `${g.entry.series}-${g.entry.number}`,
+      entryDate: g.entry.entryDate.toISOString().slice(0, 10),
+      originalReference: `${original.series}-${original.number}`,
+      originalDate: original.entryDate.toISOString().slice(0, 10),
+      originalPeriodLabel: taxPeriod.label,
+      filedOn,
+      outputVatMinor: g.output.toString(),
+      inputVatMinor: g.input.toString(),
+      // The tax due for the original period moves by output less input, the
+      // same arithmetic the return itself uses.
+      netMinor: (g.output - g.input).toString(),
+    });
+  }
+
+  if (corrections.length === 0) return empty;
+
+  const grouped = new Map<string, { filedOn: string | null; net: bigint; count: number }>();
+  for (const c of corrections) {
+    const g = grouped.get(c.originalPeriodLabel) ?? { filedOn: c.filedOn, net: 0n, count: 0 };
+    g.net += BigInt(c.netMinor);
+    g.count += 1;
+    grouped.set(c.originalPeriodLabel, g);
+  }
+
+  const byPeriod = [...grouped.entries()]
+    .map(([label, g]) => {
+      const size = g.net < 0n ? -g.net : g.net;
+      return {
+        label,
+        filedOn: g.filedOn,
+        netMinor: g.net.toString(),
+        // Size, not sign. Tax overpaid by twelve thousand is as much a
+        // correction to a filed return as tax underpaid by it.
+        overThreshold: size > VOLUNTARY_DISCLOSURE_THRESHOLD_AED_MINOR,
+        corrections: g.count,
+      };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  const largest = byPeriod.reduce((m, p) => {
+    const size = BigInt(p.netMinor) < 0n ? -BigInt(p.netMinor) : BigInt(p.netMinor);
+    return size > m ? size : m;
+  }, 0n);
+
+  return {
+    thresholdMinor: VOLUNTARY_DISCLOSURE_THRESHOLD_AED_MINOR.toString(),
+    currencyDiffers,
+    corrections: corrections.sort((a, b) => a.originalDate.localeCompare(b.originalDate)),
+    byPeriod,
+    largestMinor: largest.toString(),
+    note:
+      `${corrections.length} ${corrections.length === 1 ? "entry" : "entries"} belonging to ` +
+      `${byPeriod.length === 1 ? "a return" : `${byPeriod.length} returns`} already filed ` +
+      `${corrections.length === 1 ? "was" : "were"} reversed in this period. Article 10 of Federal Decree-Law ` +
+      `28/2022 asks for a voluntary disclosure within 20 business days of becoming aware of an error above ` +
+      `AED 10,000 in a filed return; below that the correction goes on the next return. Which of these is an ` +
+      `error and which is a credit note under Articles 61 or 62 is not something the ledger can tell, and it does ` +
+      `not know when anybody became aware of anything — so this is the list to look at, not an answer.` +
+      (currencyDiffers
+        ? ` These books are kept in ${opts.currency}; the threshold is AED 10,000 and the figures below are not ` +
+          `directly comparable to it.`
+        : ""),
+  };
+}
+
+const VAT_OUTPUT_ACCOUNT = "2100";
+const VAT_INPUT_ACCOUNT = "1350";
 
 type TaggedLine = { taxCode: string | null; functionalAmountMinor: bigint };
 const byCode = (lines: TaggedLine[], code: string, credit: boolean) =>

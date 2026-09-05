@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -26,10 +27,13 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* Job costing is the ledger read down one dimension. Every figure on this
+     * screen comes from dimensionalProfitAndLoss, so it is the same read. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const projects = await listProjects({ orgId, entityId });
 
@@ -53,6 +57,7 @@ export async function GET(req: Request) {
     if (!from || !to) return json({ projects });
     return json({ projects, summary: await projectSummary({ orgId, entityId, from, to }) });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -62,7 +67,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "update" | "close";
       entityId?: string;
@@ -75,6 +80,14 @@ export async function POST(req: Request) {
       status?: string;
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
+
+    /* A project is not a second way of tagging a posting — it is a value of the
+     * ordinary PROJECT dimension, created through dimensions.ts's addValue().
+     * So creating, renaming or closing one changes what the ledger will accept
+     * on a journal line, which is exactly the reasoning /api/ledger/dimensions
+     * gives for taking the same key. Nothing here posts, so `ledger.post` would
+     * be wrong; a `dimension.manage` key is what I would have wanted. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "chart.edit" });
 
     switch (b.action) {
       case "create":
@@ -111,6 +124,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action. A project is created, updated or closed." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

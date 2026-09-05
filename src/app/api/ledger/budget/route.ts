@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -22,7 +23,9 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The plan beside the actuals, and the actuals are the profit and loss: a read. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const scenario = url.searchParams.get("scenario") ?? undefined;
@@ -44,6 +47,7 @@ export async function GET(req: Request) {
     if (!from || !to) return json({ error: "from and to are required." }, 400);
     return json(await budgetVsActual({ orgId, entityId, scenario, from, to }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -53,7 +57,11 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Nothing here reaches the ledger — a budget is what somebody intends, not
+     * what happened. It is configuration of the books, so it sits with opening
+     * them rather than with posting into them. */
+    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "set" | "copy";
       entityId?: string;
@@ -90,6 +98,7 @@ export async function POST(req: Request) {
       }),
     );
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

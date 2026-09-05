@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -18,11 +19,14 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const asOf = url.searchParams.get("asOf");
     if (!entityId || !asOf) return json({ error: "entityId and asOf are required." }, 400);
+    /* A preview of what revaluing would do, plus the rates on file. It posts
+     * nothing, so `ledger.read`. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const [preview, rates] = await Promise.all([
       revaluationPreview({ orgId, entityId, asOf, bookCode: url.searchParams.get("bookCode") ?? undefined }),
@@ -30,6 +34,7 @@ export async function GET(req: Request) {
     ]);
     return json(ledgerJson({ ...preview, rates }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -52,6 +57,21 @@ export async function POST(req: Request) {
       reversalDate?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Period-end foreign currency revaluation posts a gain or a loss into
+     * accounts no subledger owns, so `ledger.post`.
+     *
+     * The route name misleads and it is worth saying out loud: this is IAS 21
+     * retranslation of monetary balances, NOT the IAS 16 revaluation of fixed
+     * assets. That one lives at /api/ledger/asset-revaluation and is rightly
+     * guarded by `asset.manage`. Nothing here touches an asset — the module
+     * skips non-monetary items on purpose — so `asset.manage` would be the
+     * wrong key however similar the two screens sound.
+     *
+     * `set-rate` takes the same key as the postings rather than a lighter one,
+     * because the rate on file IS the size of the journal. Somebody who could
+     * write a rate without being able to post could move the period's profit
+     * and would only have to wait for somebody else to press revalue. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
 
     switch (b.action) {
       case "set-rate": {
@@ -88,6 +108,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

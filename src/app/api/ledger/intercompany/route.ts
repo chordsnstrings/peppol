@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
 import { groupList } from "@/lib/server/ledger/consolidation";
@@ -36,7 +37,19 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* A group report over the ledger, so `ledger.read`. There is deliberately
+     * no POST here — an elimination belongs to the group's working papers and
+     * never to a member's ledger — so no posting key is needed, and adding one
+     * would suggest a write exists.
+     *
+     * Checked org-wide rather than per entity: a consolidation group spans
+     * entities by definition, and the report reads several of them at once, so
+     * there is no single entity to scope the grant to. A person with a
+     * `ledger.read` grant on one entity only would be shown the group's
+     * matching, which is why the group picker is fed by `groupList` inside the
+     * org and by nothing the client supplies. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const group = url.searchParams.get("group");
 
@@ -65,6 +78,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson({ groups: await groupList({ orgId }), report, schedule, unrealised }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

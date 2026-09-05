@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -14,10 +15,14 @@ export const runtime = "nodejs";
 /** The register, what is delivered and unbilled, or what an order still owes. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The register and the delivered-not-invoiced list are reports. Delivered
+     * and unbilled is a figure the books owe an explanation for, so anybody who
+     * may read the books may see it. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const view = q.get("view");
 
@@ -38,6 +43,7 @@ export async function GET(req: Request) {
       status: (q.get("status") as NoteStatus) ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -61,6 +67,11 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
+    /* One guard for the whole switch, because every action is the same act:
+     * sending a customer's goods out against a sales order, signing for them,
+     * or taking them back. All of it is the sales side of the ledger, and the
+     * return is what the credit note will be raised from. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ar.manage" });
 
     switch (b.action) {
       case "create":
@@ -92,6 +103,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

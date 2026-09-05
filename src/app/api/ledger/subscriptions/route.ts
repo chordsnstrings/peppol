@@ -15,10 +15,13 @@ export const runtime = "nodejs";
 /** The register, or what is due to be raised as at a date. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Seeing what is on a standing arrangement, and what falls due next, is a
+     * read. Raising the invoices is the POST, and it takes ar.manage. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const asOf = q.get("asOf") ?? undefined;
 
     if (q.get("view") === "due") {
@@ -26,6 +29,7 @@ export async function GET(req: Request) {
     }
     return json(ledgerJson(await subscriptionRegister({ orgId, entityId, asOf })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

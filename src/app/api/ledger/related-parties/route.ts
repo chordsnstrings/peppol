@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -14,10 +15,21 @@ export const runtime = "nodejs";
 /** The IAS 24 note for a period, with its own completeness attached. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The IAS 24 note is part of the financial statements, and `ledger.read`
+     * is "see the chart, the journals, the statements and every report".
+     *
+     * The one thing that gave pause: the note carries key management
+     * compensation, and where the headcount is one that figure is one
+     * person's pay — which is a genuine argument for `payroll.read`. It is not
+     * the argument taken here, because this note exists to be published in the
+     * accounts, and a Viewer who may read the accounts may read the note that
+     * goes out with them. If the module ever grew a per-person breakdown that
+     * the note does not publish, that would flip. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const period = q.get("period") ?? String(new Date().getUTCFullYear());
     const from = q.get("from") ?? `${period}-01-01`;
@@ -29,6 +41,7 @@ export async function GET(req: Request) {
       categories: COMP_CATEGORIES,
     }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -37,7 +50,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "declare" | "end" | "compensation" | "attest" | "assess";
       entityId?: string;
@@ -63,6 +76,20 @@ export async function POST(req: Request) {
       notes?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Declaring a related party, assessing one as unrelated, ending a
+     * relationship, recording key management compensation and attesting the
+     * note all write the IAS 24 disclosure that goes out with the statutory
+     * accounts. No journal is posted, so no key fits exactly; `ledger.post` is
+     * the closest the catalogue has — the power to write something the
+     * accounts will assert. A `disclosure.manage` is the key I would have
+     * wanted.
+     *
+     * `compensation` was considered for a payroll key and left with the rest.
+     * The figure is a published aggregate compiled by whoever prepares the
+     * note, and requiring `payroll.run` would move the accounts' own
+     * disclosure into the hands of the payroll operator instead of the
+     * accountant who writes it. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
     const scope = { orgId, entityId: b.entityId };
 
     switch (b.action) {
@@ -109,6 +136,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

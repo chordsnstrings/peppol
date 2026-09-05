@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { cashFlowStatement } from "@/lib/server/ledger/cashflow";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -15,7 +16,9 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* A statement, drawn from entries already posted: a read. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
@@ -25,6 +28,7 @@ export async function GET(req: Request) {
     const cashFlow = await cashFlowStatement({ orgId, entityId, from, to });
     return json({ cashFlow });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

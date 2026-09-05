@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -35,10 +36,13 @@ export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The register and the IAS 37.84 movement note are reports over the
+     * ledger — `ledger.read`. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (params.get("view") === "note") {
       const asOf = params.get("asOf");
@@ -50,6 +54,7 @@ export async function GET(req: Request) {
 
     return json(ledgerJson(await provisionRegister({ orgId, entityId })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -81,6 +86,14 @@ export async function POST(req: Request) {
       reason?: string;
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
+    /* Every action here is an accounting event with a date and a journal —
+     * recognising, remeasuring, unwinding, utilising, releasing, promoting —
+     * and a provision belongs to no subledger, so none of the subledger keys
+     * reach it. `ledger.post` is "put entries into the ledger by hand", which
+     * is what all six are. One guard, because no action among them lets
+     * somebody do less than the others: releasing a provision writes profit
+     * back just as recognising one writes it away. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
 
     switch (b.action) {
       case "record": {
@@ -154,6 +167,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

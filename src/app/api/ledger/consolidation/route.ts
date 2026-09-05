@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -27,7 +28,9 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Group accounts are the members' own statements added together — a read. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const group = url.searchParams.get("group");
 
@@ -44,6 +47,7 @@ export async function GET(req: Request) {
     ]);
     return json({ group: detail, consolidated: statements });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -53,7 +57,12 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Nothing here posts, but deciding which entities are added together decides
+     * what every group statement afterwards says. That is setting the books up
+     * rather than keeping them, so it takes the setup key; a "consolidation.manage"
+     * key is what this would have asked for if the catalogue had one. */
+    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "add-member" | "remove-member";
       code?: string;
@@ -87,6 +96,7 @@ export async function POST(req: Request) {
 
     return json({ error: 'action must be one of "create", "add-member" or "remove-member".' }, 400);
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

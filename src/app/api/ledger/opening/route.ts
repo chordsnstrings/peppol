@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -20,6 +21,9 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Loading the balances the books start from — and previewing or parsing what
+     * would be loaded, which is the same screen a step earlier. */
+    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "preview" | "import" | "parse";
       entityId?: string;
@@ -43,6 +47,7 @@ export async function POST(req: Request) {
     }
     return json(await previewOpeningBalances({ orgId, entityId: b.entityId, asOf: b.asOf, lines }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

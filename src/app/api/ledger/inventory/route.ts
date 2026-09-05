@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -21,10 +22,13 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The stock valuation is a balance sheet figure and the rest of these reads
+     * explain it. Reading them is reading the books. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (url.searchParams.get("view") === "stocking") {
       const within = Number(url.searchParams.get("within") ?? 30);
@@ -42,6 +46,7 @@ export async function GET(req: Request) {
     if (sku) return json(await itemHistory({ orgId, entityId, sku }));
     return json(await stockValuation({ orgId, entityId, asOf: url.searchParams.get("asOf") ?? undefined }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -92,6 +97,29 @@ export async function POST(req: Request) {
       sweepAction?: "quarantine" | "write_off";
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+
+    /* Two keys, and the line between them is whether the action is a purchase.
+     *
+     * A goods receipt is the purchase side — it is the same act procurement.ts
+     * records against an order, reached here without one — so it takes the
+     * purchase-ledger key.
+     *
+     * Everything else takes `ledger.post`, because everything else either
+     * writes a journal into the general ledger (an issue to cost of sales, a
+     * count difference to stock variance, an NRV write-down under IAS 2, a
+     * sweep that writes expired stock off) or decides what a future journal
+     * will say (a cost method, a location, a reorder level, a transfer that
+     * moves the stock the valuation is built from). None of it is a bill to a
+     * supplier, so `ap.manage` would be the wrong key for it.
+     *
+     * What I would have wanted is an `inventory.manage` key for the master
+     * data — adding a SKU or naming a warehouse is not really posting — but the
+     * catalogue has no such key, and `ledger.post` is the closest one held by
+     * the people who keep stock records. */
+    await requirePermission({
+      orgId, userId, entityId: b.entityId,
+      permission: b.action === "receive" ? "ap.manage" : "ledger.post",
+    });
 
     switch (b.action) {
       case "add": {
@@ -211,6 +239,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

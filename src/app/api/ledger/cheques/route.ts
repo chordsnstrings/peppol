@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -21,11 +22,15 @@ export const runtime = "nodejs";
 /** The register and the diary, or one cheque with its history. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The register and the diary are reports. The diary in particular says
+     * whether the bank will cover what is dated to be presented, which is a
+     * figure anybody reading the books is entitled to see. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const chequeId = q.get("chequeId");
     if (chequeId) {
@@ -47,6 +52,7 @@ export async function GET(req: Request) {
     ]);
     return json(ledgerJson({ register, diary }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -81,6 +87,38 @@ export async function POST(req: Request) {
 
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
+    const guard = (permission: string) => requirePermission({ orgId, userId, entityId: scope.entityId, permission });
+
+    /*
+     * Three different powers share this entry point, so the guards are per
+     * action rather than one at the top.
+     *
+     * Taking a cheque in or handing one over is a settlement: it takes the debt
+     * out of trade receivables, or takes ours off the supplier's account. That
+     * is the same act as posting a receipt or a payment, so it takes the same
+     * key, chosen by the direction of the cheque.
+     *
+     * Depositing, clearing, bouncing and re-presenting are the bank's news. A
+     * deposit raises no journal at all — the paper moved from a drawer to a
+     * counter — and the other three are learned from the statement and matched
+     * against it, which is what `bank.reconcile` is for. The cashier who banks
+     * the cheques and watches them clear should not need the key that raises
+     * invoices to record what the bank did.
+     *
+     * Returning or cancelling the paper unwinds the settlement and puts the
+     * debt back on the customer or the supplier, so it goes back to the trade
+     * key — and which one depends on the cheque, not on the request, so the
+     * direction is read from the register rather than taken from the body.
+     */
+    if (b.action === "record") {
+      if (b.direction === "RECEIVED") await guard("ar.manage");
+      else if (b.direction === "ISSUED") await guard("ap.manage");
+    } else if (b.action === "deposit" || b.action === "clear" || b.action === "bounce" || b.action === "represent") {
+      await guard("bank.reconcile");
+    } else if ((b.action === "return" || b.action === "cancel") && b.chequeId) {
+      const { cheque } = await chequeDetail({ ...scope, chequeId: b.chequeId });
+      await guard(cheque.direction === "RECEIVED" ? "ar.manage" : "ap.manage");
+    }
 
     if (b.action === "record") {
       if (!b.direction || !b.number || !b.counterparty || !b.writtenOn || !b.dueOn || b.amountMinor === undefined) {
@@ -140,6 +178,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

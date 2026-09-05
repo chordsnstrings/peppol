@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -14,10 +15,12 @@ export const runtime = "nodejs";
 /** The lists, their prices, who is priced from them, and what is wrong with the set. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Looking at what things are sold for changes nothing. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     return json(ledgerJson(await priceListRegister({
       orgId, entityId,
@@ -25,6 +28,7 @@ export async function GET(req: Request) {
       listCode: q.get("listCode") ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -33,7 +37,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "createList" | "setPrices" | "closePrice" | "closeList" | "assign" | "unassign" | "quote" | "variance";
       entityId?: string;
@@ -50,6 +54,22 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
+
+    /* Two of these actions are questions, and they are not guarded as writes.
+     * `quote` prices a basket and `variance` measures what was charged against
+     * the list; neither stores anything, and the screen calls them while
+     * somebody types. What a thing sells for is the sales ledger's business, so
+     * the rest take that key.
+     *
+     * One caveat worth stating: a list may be a BUY list, and setting the price
+     * a supplier charges is arguably the purchase ledger. The route cannot tell
+     * which kind a stored list is without a second read, and every role that
+     * keeps prices at all holds both keys, so this stays on one. */
+    if (b.action === "quote" || b.action === "variance") {
+      await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.read" });
+    } else {
+      await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ar.manage" });
+    }
 
     switch (b.action) {
       case "createList":
@@ -101,6 +121,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

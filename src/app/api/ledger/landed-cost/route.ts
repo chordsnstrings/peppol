@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -14,10 +15,13 @@ export const runtime = "nodejs";
 /** The report, the list of vouchers, one voucher, or what each item weighs. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* What freight and duty added to the cost of stock is a report over what
+     * was already posted. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const view = q.get("view");
 
@@ -41,6 +45,7 @@ export async function GET(req: Request) {
       to: q.get("to") ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -62,6 +67,12 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
     const scope = { orgId, entityId: b.entityId };
+    /* One guard for the whole switch. A landed-cost voucher is the freight,
+     * insurance and customs duty a supplier charged on an import, apportioned
+     * onto the goods it was charged on; raising one, applying it and cancelling
+     * it are all the purchase side, and recording what an item weighs is the
+     * basis the apportionment divides by, so it takes the same key. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ap.manage" });
 
     switch (b.action) {
       case "create":
@@ -90,6 +101,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

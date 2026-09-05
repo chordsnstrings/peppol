@@ -19,6 +19,21 @@ interface Ret {
   totalOutputVatMinor: string; totalInputVatMinor: string; netVatMinor: string; payable: boolean;
   reconciliation: { outputVatPerLedgerMinor: string; inputVatPerLedgerMinor: string; outputMatches: boolean; inputMatches: boolean };
   warnings: string[];
+  voluntaryDisclosure: VoluntaryDisclosure;
+}
+
+interface VoluntaryDisclosure {
+  thresholdMinor: string;
+  currencyDiffers: boolean;
+  corrections: {
+    reference: string; entryDate: string;
+    originalReference: string; originalDate: string; originalPeriodLabel: string;
+    filedOn: string | null;
+    outputVatMinor: string; inputVatMinor: string; netMinor: string;
+  }[];
+  byPeriod: { label: string; filedOn: string | null; netMinor: string; overThreshold: boolean; corrections: number }[];
+  largestMinor: string;
+  note: string;
 }
 
 interface Choice { label: string; from: string; to: string }
@@ -135,6 +150,8 @@ export default function VatReturnPage() {
 
           <TaxPeriodPanel period={data.taxPeriod} from={data.periodFrom} to={data.periodTo} />
 
+          <DisclosurePanel vd={data.voluntaryDisclosure} currency={data.currency} />
+
           <div className="grid gap-4 lg:grid-cols-2">
             <BoxTable
               title="VAT on sales and all other outputs"
@@ -222,6 +239,111 @@ export default function VatReturnPage() {
  * against it; where it is not, it says that too rather than letting the dates
  * in the picker pass for a tax period.
  */
+/**
+ * Corrections made in this period to returns already filed.
+ *
+ * `reverse()` refuses a closed period, so a correction to a filed quarter has
+ * to land in an open one — and it then flows into THIS return as ordinary
+ * movement, with the tax quietly moving from the quarter it belonged to into
+ * the quarter somebody noticed. Article 10 exists to stop exactly that, and
+ * nothing on this screen said so.
+ *
+ * The panel shows the population and refuses to reach a conclusion about it.
+ * The ledger cannot tell an error from a legitimate credit note under Articles
+ * 61 and 62, and it cannot know when anybody became aware of anything, so it
+ * cannot start the twenty-day clock. Guessing here would be wrong in the
+ * direction that costs somebody a penalty.
+ */
+function DisclosurePanel({ vd, currency }: { vd: VoluntaryDisclosure; currency: string }) {
+  if (vd.corrections.length === 0) return null;
+  const over = vd.byPeriod.some((p) => p.overThreshold);
+
+  return (
+    <Panel className="mb-4 overflow-hidden">
+      <div className="border-b px-3 py-2" style={{ borderColor: "var(--sw-line)", background: "var(--sw-surface-2)" }}>
+        <span className="sw-label">Corrections to returns already filed</span>
+      </div>
+      <div className="p-3">
+        <p className="sw-sub mb-2" style={{ maxWidth: "80ch" }} data-testid="disclosure-note">{vd.note}</p>
+        <div className="sw-scroll">
+          <table className="sw-table" data-testid="voluntary-disclosure">
+            <caption className="sr-only">Reversals in this period of entries belonging to filed returns</caption>
+            <thead>
+              <tr>
+                <th scope="col">Return</th>
+                <th scope="col">Filed</th>
+                <th scope="col" className="sw-num">Entries</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Tax moved</th>
+                <th scope="col">Article 10</th>
+              </tr>
+            </thead>
+            <tbody>
+              {vd.byPeriod.map((p) => (
+                <tr key={p.label}>
+                  <th scope="row">{p.label}</th>
+                  <td className="sw-sub">{p.filedOn ?? "closed, no filing recorded"}</td>
+                  <td className="sw-num">{p.corrections}</td>
+                  <td className="sw-num">
+                    <Figure minor={p.netMinor} currency={currency} zero="zero" />
+                  </td>
+                  <td>
+                    {p.overThreshold
+                      ? <span className="sw-chip sw-chip-warn">over AED 10,000</span>
+                      : <span className="sw-sub">under the threshold</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {over && (
+          <p className="sw-sub mt-2" style={{ maxWidth: "80ch" }}>
+            A correction above AED 10,000 to a filed return is a voluntary disclosure within 20 business days of
+            becoming aware of it, not a line on the next return. Below the threshold it goes on the next return.
+            Which of these is an error and which is a credit note is a judgement nobody here can make for you.
+          </p>
+        )}
+
+        <details className="mt-2">
+          <summary className="sw-sub" style={{ cursor: "pointer" }}>
+            The {vd.corrections.length} {vd.corrections.length === 1 ? "entry" : "entries"} behind these figures
+          </summary>
+          <div className="sw-scroll mt-1">
+            <table className="sw-table" data-testid="voluntary-disclosure-entries">
+              <caption className="sr-only">Each reversal and the entry it reversed</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Reversal</th>
+                  <th scope="col">Posted</th>
+                  <th scope="col">Reversed</th>
+                  <th scope="col">Originally</th>
+                  <th scope="col">Return</th>
+                  <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Tax moved</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vd.corrections.map((c) => (
+                  <tr key={c.reference}>
+                    <th scope="row" className="sw-code">{c.reference}</th>
+                    <td className="sw-sub">{c.entryDate}</td>
+                    <td className="sw-code">{c.originalReference}</td>
+                    <td className="sw-sub">{c.originalDate}</td>
+                    <td className="sw-sub">{c.originalPeriodLabel}</td>
+                    <td className="sw-num">
+                      <Figure minor={c.netMinor} currency={currency} zero="zero" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </Panel>
+  );
+}
+
 function TaxPeriodPanel({ period, from, to }: { period: TaxPeriod | null; from: string; to: string }) {
   if (!period) {
     return (

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -25,7 +26,9 @@ const BASES = new Set(["expenses", "revenue", "netProfit"]);
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Cost-centre reporting reads the ledger and nothing else. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
@@ -57,6 +60,7 @@ export async function GET(req: Request) {
     const profitAndLoss = await dimensionalProfitAndLoss({ orgId, entityId, from, to, dimensionCode: dimension });
     return json({ dimensions, profitAndLoss, summary });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -66,7 +70,12 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Defining a dimension, adding a value to one, or making one mandatory on an
+     * account all change what the ledger will accept on a journal line from here
+     * on. That is the same kind of change as editing the chart, and it takes the
+     * same key. */
+    await requirePermission({ orgId, userId, permission: "chart.edit" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create-dimension" | "add-value" | "require-on-account";
       entityId?: string;
@@ -105,6 +114,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -9,7 +10,9 @@ export const runtime = "nodejs";
 /** The chart of accounts for an entity. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The chart is part of the books, so listing it is a read of them. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
@@ -29,6 +32,7 @@ export async function GET(req: Request) {
     });
     return json({ accounts });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -38,7 +42,9 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Adding an account changes the chart every future entry is coded against. */
+    await requirePermission({ orgId, userId, permission: "chart.edit" });
     const b = (await req.json().catch(() => ({}))) as Record<string, string | boolean | undefined>;
     if (!b.entityId || !b.code || !b.name || !b.type) {
       return json({ error: "An account needs an entity, a code, a name and a type." }, 400);
@@ -63,6 +69,7 @@ export async function POST(req: Request) {
     });
     return json({ account });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

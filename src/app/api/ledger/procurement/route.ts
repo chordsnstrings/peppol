@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -22,8 +23,12 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
+    /* The order book and the GRNI reconciliation are reports. What is sitting
+     * unexplained in 1250 is a ledger balance, and reading it is reading the
+     * books. */
+    await requirePermission({ orgId, userId, entityId: q.get("entityId") ?? undefined, permission: "ledger.read" });
 
     const orderId = q.get("orderId");
     if (orderId) return json(ledgerJson(await orderDetail({ orgId, orderId })));
@@ -39,6 +44,7 @@ export async function GET(req: Request) {
     ]);
     return json(ledgerJson({ ...orders, grni }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -79,6 +85,22 @@ export async function POST(req: Request) {
       overrideReason?: string;
       varianceAccount?: string;
     };
+
+    /* `match` is the one action here that stores nothing: it holds the order,
+     * the goods receipt and the invoice up against each other and reports what
+     * they say, and the screen calls it on every keystroke. Asking that question
+     * is reading the books; raising the order, receiving the goods and posting
+     * the invoice are the purchase ledger.
+     *
+     * The variance override on `post` is not given a key of its own. It commits
+     * a difference between the three documents to an account rather than
+     * relaxing a separation of duties, and nothing in the catalogue covers it —
+     * a `match.override` key is what I would have wanted. */
+    if (b.action === "match") {
+      await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.read" });
+    } else {
+      await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ap.manage" });
+    }
 
     switch (b.action) {
       case "create": {
@@ -143,6 +165,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

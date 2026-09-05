@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -9,7 +10,9 @@ export const runtime = "nodejs";
 /** Cash flows by the direct method, with the IAS 7.20 reconciliation beside them. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The same statement by the other method, and the same read. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     const from = q.get("from");
@@ -21,6 +24,7 @@ export async function GET(req: Request) {
       orgId, entityId, from, to, bookCode: q.get("bookCode") ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -514,4 +514,107 @@ d("VAT 201 return", () => {
     expect(plain.periodTo).toBe("2026-05-31");
     expect(plain.warnings.find((x) => /tax period/.test(x))).toBeUndefined();
   });
+  /* ------------------------------- Article 10: corrections to filed returns */
+
+  describe("corrections to a return already filed", () => {
+    // Its own registration, so the periods are known rather than assumed, and
+    // its own months, so nothing above is disturbed.
+    beforeAll(async () => {
+      await recordRegistration({
+        orgId: ORG, entityId: ENT, regime: "VAT",
+        trn: "100000000000003", frequency: "QUARTERLY", firstPeriodEndMonth: 3,
+      });
+    });
+
+    it("reports a reversal of a filed quarter, grouped by the return it belongs to", async () => {
+      // A January sale carrying 12,000 of output tax, in a quarter that is then
+      // filed. In April somebody reverses it. `reverse()` refuses a closed
+      // period, so the correction necessarily lands in an open one and flows
+      // into the CURRENT return as ordinary movement — the tax quietly moving
+      // from the quarter it belonged to into the quarter somebody noticed,
+      // which is the thing Article 10 exists to stop.
+      const original = await post({
+        orgId: ORG, entityId: ENT, entryDate: "2026-01-20", source: "invoice",
+        memo: "Sale later found to be wrong",
+        lines: [
+          { account: "1010", debit: 252_000 },
+          { account: "4000", credit: 240_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+          { account: "2100", credit: 12_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+        ],
+      });
+      await recordFiling({
+        orgId: ORG, entityId: ENT, periodLabel: "Jan-Mar 2026",
+        filedOn: "2026-04-20", filedBy: "u-1", reference: "FTA-Q1", asOf: "2026-05-01",
+      });
+
+      const rev = await reverse({ orgId: ORG, entryId: original.id, entryDate: "2026-04-15" });
+
+      const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-04-01", to: "2026-06-30" });
+      const vd = r.voluntaryDisclosure;
+
+      expect(vd.corrections).toHaveLength(1);
+      expect(vd.corrections[0]).toMatchObject({
+        reference: `${rev.series}-${rev.number}`,
+        originalReference: `${original.series}-${original.number}`,
+        originalPeriodLabel: "Jan-Mar 2026",
+        filedOn: "2026-04-20",
+        netMinor: "-12000",
+      });
+
+      // Grouped by the period the ORIGINAL belongs to, because Article 10
+      // measures per return and not in aggregate.
+      expect(vd.byPeriod).toHaveLength(1);
+      expect(vd.byPeriod[0].label).toBe("Jan-Mar 2026");
+      // 120.00 of tax is nowhere near AED 10,000.
+      expect(vd.byPeriod[0].overThreshold).toBe(false);
+      expect(r.warnings.find((x) => /Article 10/.test(x))).toBeUndefined();
+      expect(vd.note).toMatch(/Articles 61 or 62/);
+    });
+
+    it("warns once the movement on a filed return passes AED 10,000", async () => {
+      const big = await post({
+        orgId: ORG, entityId: ENT, entryDate: "2026-02-10", source: "invoice",
+        memo: "Large sale later found to be wrong",
+        lines: [
+          { account: "1010", debit: 21_000_000 },
+          { account: "4000", credit: 20_000_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+          { account: "2100", credit: 1_000_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+        ],
+      });
+      await reverse({ orgId: ORG, entryId: big.id, entryDate: "2026-04-16" });
+
+      const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-04-01", to: "2026-06-30" });
+      const q1 = r.voluntaryDisclosure.byPeriod.find((p) => p.label === "Jan-Mar 2026")!;
+      // 10,000.00 of tax plus the 120.00 above, and the threshold is 10,000.00.
+      expect(BigInt(q1.netMinor)).toBe(-1_012_000n);
+      expect(q1.overThreshold).toBe(true);
+      expect(q1.corrections).toBe(2);
+
+      const w = r.warnings.find((x) => /Article 10/.test(x))!;
+      expect(w).toMatch(/Jan-Mar 2026/);
+      expect(w).toMatch(/20 business days/);
+      // The population, never a verdict.
+      expect(w).toMatch(/not a verdict/);
+      expect(w).toMatch(/61 and 62/);
+    });
+
+    it("says nothing about a reversal of a period nobody has filed or closed", async () => {
+      // A correction to a return that has not gone anywhere is bookkeeping.
+      const open = await post({
+        orgId: ORG, entityId: ENT, entryDate: "2026-08-05", source: "invoice",
+        memo: "Sale corrected before the return went",
+        lines: [
+          { account: "1010", debit: 21_000_000 },
+          { account: "4000", credit: 20_000_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+          { account: "2100", credit: 1_000_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+        ],
+      });
+      await reverse({ orgId: ORG, entryId: open.id, entryDate: "2026-08-20" });
+
+      const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-07-01", to: "2026-09-30" });
+      expect(r.voluntaryDisclosure.corrections).toEqual([]);
+      expect(r.voluntaryDisclosure.note).toMatch(/nothing here calls for a voluntary disclosure/);
+      expect(r.warnings.find((x) => /Article 10/.test(x))).toBeUndefined();
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -14,10 +15,13 @@ export const runtime = "nodejs";
 /** The register, or the IAS 37.86 contingent liabilities note. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The facility register and the IAS 37.86 contingent liabilities note are
+     * reports over the ledger — `ledger.read`. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (q.get("view") === "note") {
       return json(ledgerJson(await contingentLiabilities({
@@ -34,6 +38,7 @@ export async function GET(req: Request) {
       kinds: KINDS,
     }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -54,6 +59,12 @@ export async function POST(req: Request) {
       reason?: "expire" | "cancel";
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Letters of credit and guarantees. Issuing one records a contingent
+     * liability the note has to disclose; drawing and settling move real money
+     * through accounts that belong to no subledger; closing one ends the
+     * exposure. That is `ledger.post` — none of the subledger keys covers a
+     * bank facility, and all four actions are the same duty. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
     const scope = { orgId, entityId: b.entityId, actorId: userId };
 
     switch (b.action) {
@@ -83,6 +94,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

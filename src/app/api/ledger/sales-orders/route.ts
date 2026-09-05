@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -23,8 +24,12 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
+    /* Looking at what has been quoted and ordered is reading the books. The
+     * entity is optional on a single-document read, so the check falls back to
+     * whatever the person holds anywhere in the workspace. */
+    await requirePermission({ orgId, userId, entityId: q.get("entityId") ?? undefined, permission: "ledger.read" });
 
     const orderId = q.get("orderId");
     if (orderId) {
@@ -43,6 +48,7 @@ export async function GET(req: Request) {
       customerCode: q.get("customerCode") ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -77,6 +83,23 @@ export async function POST(req: Request) {
     };
 
     const entityId = b.entityId;
+
+    /* Quoting, ordering, dispatching the paperwork and invoicing it are all the
+     * sales ledger, so every action here needs that key. */
+    await requirePermission({ orgId, userId, entityId, permission: "ar.manage" });
+
+    /* An override is a second power, and it belongs to somebody else.
+     *
+     * `creditGate` refuses an acceptance or an invoice when the customer is on
+     * hold, and an override with a reason is what lets the sale through anyway.
+     * That is releasing the hold for this one sale, reached through "accept"
+     * instead of through "release" — so it takes the same key the hold itself
+     * takes, and the person who may raise the invoice cannot also decide that
+     * the stop on the account does not apply to it. It also covers a refusal on
+     * the credit limit, which is the same decision about the same customer. */
+    if (b.overrideReason?.trim()) {
+      await requirePermission({ orgId, userId, entityId, permission: "ar.credit_hold" });
+    }
 
     switch (b.action) {
       case "create": {
@@ -140,6 +163,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

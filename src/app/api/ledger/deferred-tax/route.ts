@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -27,10 +28,13 @@ export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The register, the position and the IAS 12 note are a report over the
+     * ledger, and reading the reports is `ledger.read`. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     // The date picker needs the register's dates before it can choose one, so
     // this view answers without an asOf.
@@ -73,6 +77,7 @@ export async function GET(req: Request) {
     ]);
     return json(ledgerJson({ position: pos, note, dates }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -91,6 +96,13 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
     if (!b.asOf) return json({ error: "asOf is required — a deferred tax position is measured at a reporting date." }, 400);
+    /* Deferred tax posts to the ledger and belongs to no subledger, so
+     * `ledger.post` — and deliberately not `tax.file`. Nothing here reaches a
+     * return: an IAS 12 position is a measurement made for the financial
+     * statements and the FTA never sees it. `record` writes no journal of its
+     * own, but it fixes the figure `post` puts on the ledger, so guarding the
+     * two differently would be guarding the second door only. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
 
     switch (b.action) {
       case "record": {
@@ -112,6 +124,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action. Use \"record\" to measure a reporting date, or \"post\" to put its movement on the ledger." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -25,11 +26,16 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The register, the maturity analysis, one facility's schedule and the
+     * covenant tests are all reports over the ledger — `ledger.read`. A
+     * breached covenant is something the people who read the accounts need to
+     * see, not a secret from them. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const asOf = q.get("asOf") ?? new Date().toISOString().slice(0, 10);
 
     const code = q.get("code");
@@ -42,6 +48,7 @@ export async function GET(req: Request) {
     }
     return json(ledgerJson(await borrowingRegister({ orgId, entityId, asOf })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -68,6 +75,16 @@ export async function POST(req: Request) {
       cashAccount?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Drawing a facility, posting an instalment and splitting the current
+     * portion are journals into accounts no subledger owns, so `ledger.post`.
+     *
+     * `add` and `covenant` write no journal by themselves and were considered
+     * for something lighter. They are guarded with the rest because a
+     * facility's rate and schedule decide every instalment that follows it,
+     * and a covenant is the test the register reports against — guarding the
+     * postings while leaving the numbers behind them open would be guarding
+     * the wrong end. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
     const scope = { orgId, entityId: b.entityId };
 
     switch (b.action) {
@@ -114,6 +131,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
