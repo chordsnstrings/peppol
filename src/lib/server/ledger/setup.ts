@@ -60,6 +60,13 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "15", name: "Non-current assets", nameAr: "الأصول غير المتداولة", type: "ASSET", parent: "1", isPostable: false },
   { code: "1500", name: "Property, plant and equipment", nameAr: "الممتلكات والآلات والمعدات", type: "ASSET", parent: "15", subtype: "FIXED_ASSET" },
   { code: "1590", name: "Accumulated depreciation", nameAr: "مجمع الإهلاك", type: "ASSET", parent: "15", subtype: "ACCUM_DEP" },
+  // IAS 38. A capitalised software licence used to land on the fixed asset
+  // register, amortise through the depreciation account, and be disclosed
+  // under a note headed "Property, plant and equipment". The arithmetic was
+  // right — straight-line over a finite life is amortisation — but the caption
+  // and the IAS 38.118 reconciliation were not.
+  { code: "1560", name: "Intangible assets", nameAr: "الأصول غير الملموسة", type: "ASSET", parent: "15", subtype: "INTANGIBLE" },
+  { code: "1570", name: "Accumulated amortisation", nameAr: "مجمع الإطفاء", type: "ASSET", parent: "15", subtype: "ACCUM_AMORT" },
   { code: "1600", name: "Capital work in progress", nameAr: "أعمال رأسمالية تحت التنفيذ", type: "ASSET", parent: "15", subtype: "CWIP" },
   { code: "1700", name: "Right-of-use assets", nameAr: "أصول حق الاستخدام", type: "ASSET", parent: "15" },
 
@@ -126,6 +133,8 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "6200", name: "Marketing and advertising", nameAr: "التسويق والإعلان", type: "EXPENSE", parent: "6" },
   { code: "6250", name: "Professional fees", nameAr: "الأتعاب المهنية", type: "EXPENSE", parent: "6" },
   { code: "6300", name: "Government fees and licences", nameAr: "الرسوم الحكومية والتراخيص", type: "EXPENSE", parent: "6" },
+  { code: "6260", name: "Bad debts written off", nameAr: "ديون معدومة", type: "EXPENSE", parent: "6", subtype: "BAD_DEBT" },
+  { code: "6610", name: "Amortisation of intangibles", nameAr: "إطفاء الأصول غير الملموسة", type: "EXPENSE", parent: "6" },
   { code: "6350", name: "Bank charges", nameAr: "الرسوم البنكية", type: "EXPENSE", parent: "6" },
   { code: "6360", name: "Interest and finance costs", nameAr: "الفوائد وتكاليف التمويل", type: "EXPENSE", parent: "6", subtype: "FINANCE_COST" },
   { code: "6400", name: "Travel and entertainment", nameAr: "السفر والضيافة", type: "EXPENSE", parent: "6" },

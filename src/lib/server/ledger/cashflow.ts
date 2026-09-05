@@ -138,6 +138,11 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   [ACCUM_DEP_CODE]: "investing", // accumulated depreciation — see below
   "1600": "investing", // capital work in progress
   "1700": "investing", // right-of-use assets
+  // Intangibles are an investing outflow when acquired, and their amortisation
+  // is the same non-cash charge depreciation is — added back through the same
+  // route, so it sits beside 1590 rather than under operating_noncash.
+  "1560": "investing", // intangible assets (IAS 38)
+  "1570": "investing", // accumulated amortisation — the mirror of 1590
 
   // Financing. IAS 7.17. Dividends and drawings reach the books through
   // retained earnings or the shareholder current account; both are financing.

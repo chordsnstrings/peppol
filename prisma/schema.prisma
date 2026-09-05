@@ -2544,3 +2544,110 @@ model TradeFacilityEvent {
 
   @@index([orgId, facilityId, happenedOn])
 }
+
+
+/// A receivable written off as irrecoverable.
+///
+/// Kept as its own record rather than inferred from a journal, because
+/// Article 64(1) of Federal Decree-Law 8/2017 makes adjusting the output tax
+/// conditional on facts a journal does not hold: six months elapsed, the debt
+/// written off in the books, and the customer notified.
+model ReceivableWriteOff {
+  id            String    @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// The document being written off.
+  documentId    String
+  documentRef   String
+  partyKey      String
+  partyName     String
+  amountMinor   BigInt
+  /// The output tax on it, where the supply bore any. Adjusting it is a
+  /// separate decision from writing the debt off.
+  vatMinor      BigInt    @default(0)
+  writtenOffOn  DateTime  @db.Date
+  /// Article 64(1)(a): the debt must have been outstanding six months.
+  invoicedOn    DateTime  @db.Date
+  reason        String
+  /// Article 64(1)(c): the customer must be notified of the amount written
+  /// off before the output tax may be adjusted.
+  notifiedOn    DateTime? @db.Date
+  /// Whether the output tax was adjusted, and on which return.
+  vatAdjusted   Boolean   @default(false)
+  entryId       String?
+  actorId       String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([orgId, entityId, documentId])
+  @@index([orgId, entityId, writtenOffOn])
+}
+
+/// A counterparty somebody looked at and decided is NOT a related party.
+///
+/// IAS 24 completeness is the whole difficulty with the note, and a reader
+/// cannot tell an assessed nil from an unasked question. This records the
+/// assessment without asserting a relationship, so it clears the "never
+/// assessed" list and reaches no disclosure.
+model PartyAssessment {
+  id         String   @id @default(cuid())
+  orgId      String
+  entityId   String
+  partyKey   String
+  name       String
+  assessedBy String
+  assessedOn DateTime @db.Date
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  @@unique([orgId, entityId, partyKey])
+  @@index([orgId, entityId])
+}
+
+/// The tax period the FTA has assigned this entity, and the filing history.
+///
+/// Nothing held it before, so every reminder and every "is this filed" answer
+/// was inferred from the period lock — an inference the register labelled as
+/// one. A registrant's VAT stagger is assigned by the FTA and is not derivable
+/// from anything in the books.
+model TaxRegistration {
+  id            String    @id @default(cuid())
+  orgId         String
+  entityId      String
+  /// VAT | CORPORATE_TAX | EXCISE
+  regime        String
+  trn           String?
+  /// MONTHLY | QUARTERLY | ANNUAL
+  frequency     String    @default("QUARTERLY")
+  /// The month the stagger's first period ends: 1..12. A quarterly registrant
+  /// assigned Feb/May/Aug/Nov has 2 here.
+  firstPeriodEndMonth Int  @default(3)
+  registeredOn  DateTime? @db.Date
+  deregisteredOn DateTime? @db.Date
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  filings       TaxFiling[]
+
+  @@unique([orgId, entityId, regime])
+}
+
+/// A return that was actually filed, so "filed" stops being an inference.
+model TaxFiling {
+  id             String          @id @default(cuid())
+  orgId          String
+  registrationId String
+  registration   TaxRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  /// The period covered, as the label the return itself carries.
+  periodLabel    String
+  periodFrom     DateTime        @db.Date
+  periodTo       DateTime        @db.Date
+  dueOn          DateTime        @db.Date
+  filedOn        DateTime?       @db.Date
+  reference      String?
+  netVatMinor    BigInt?
+  filedBy        String?
+  notes          String?
+  createdAt      DateTime        @default(now())
+
+  @@unique([registrationId, periodLabel])
+  @@index([orgId, periodTo])
+}
