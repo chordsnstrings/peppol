@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 /**
@@ -78,6 +79,7 @@ export default function PettyCashPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [opening, setOpening] = React.useState(false);
+  const ask = useAsk();
 
   const q = useLedgerQuery<FundListResponse>(entityId ? `/api/ledger/petty-cash?entityId=${entityId}` : null);
   const detail = useLedgerQuery<FundDetailResponse>(
@@ -104,11 +106,19 @@ export default function PettyCashPage() {
 
   const runFund = async (f: FundState, action: "reimburse" | "return" | "close") => {
     if (action === "return") {
-      const answer = window.prompt(
-        `How much cash is ${f.custodian} handing back from ${f.code}?\n` +
-          `The tin holds ${fmtMinor(f.cashMinor, f.currency, { zero: "zero" })}. ` +
-          `Cash handed back reduces the float by the same amount, so the tin still adds up afterwards.`,
-      );
+      const answer = await ask({
+        title: `How much cash is ${f.custodian} handing back from ${f.code}?`,
+        detail:
+          `The tin holds ${fmtMinor(f.cashMinor, f.currency, { zero: "zero" })} in notes. An entry is posted for ` +
+          "what comes back — into the bank, out of petty cash — and the float in force is permanently reduced by " +
+          "the same amount, so cash on hand plus receipts still equals the float afterwards.",
+        reason: {
+          label: "Amount",
+          placeholder: "250.00",
+          hint: `In ${f.currency}, written with the fils: 250.00, not 250. It cannot be more than the cash actually in the tin.`,
+        },
+        confirmLabel: "Post the return",
+      });
       if (answer === null) return;
       const amount = parseAmount(answer, f.currency);
       if (amount === null || amount <= 0n) { setErr("That is not an amount."); return; }
@@ -117,7 +127,17 @@ export default function PettyCashPage() {
       return;
     }
     if (action === "close") {
-      if (!window.confirm(`Close ${f.code} — ${f.name}?\n\nA closed float takes no further movements.`)) return;
+      const go = await ask({
+        title: `Close ${f.code} — ${f.name}?`,
+        detail:
+          "A closed float takes no further movements: no spending, no reimbursement, no cash back. Its history and " +
+          "the entries raised from it stay exactly where they are, but the float cannot be reopened from here — a " +
+          `new one has to be opened for ${f.custodian} instead. The ledger refuses this unless the tin is empty on ` +
+          "both sides, cash and receipts.",
+        confirmLabel: "Close the float",
+        destructive: true,
+      });
+      if (go === null) return;
       const r = await act(`${f.fundId}:close`, { action: "close", fundId: f.fundId });
       if (r) setMsg(`${f.code} is closed.`);
       return;

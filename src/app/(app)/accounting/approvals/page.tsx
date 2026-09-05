@@ -3,6 +3,7 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { parseAmount } from "@/lib/ledger/format";
 
 interface RuleRow {
@@ -56,6 +57,7 @@ export default function ApprovalsPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [writing, setWriting] = React.useState(false);
+  const ask = useAsk();
 
   const act = async (key: string, body: Record<string, unknown>) => {
     setBusy(key); setErr(null); setMsg(null);
@@ -76,7 +78,20 @@ export default function ApprovalsPage() {
   const judge = async (item: PendingRow, decision: "APPROVED" | "REJECTED") => {
     let reason: string | undefined;
     if (decision === "REJECTED") {
-      const answer = window.prompt(`Why is ${item.label} being rejected? Whoever raised it sees this.`);
+      const answer = await ask({
+        title: `Why is ${item.label} being rejected?`,
+        detail:
+          `Whoever raised this ${SUBJECT_ONE[item.subjectType] ?? "document"} is shown the reason word for word. ` +
+          "The rejection then stands until they withdraw it and submit a fresh round — a later approval does not " +
+          "undo it. Nothing is posted either way.",
+        reason: {
+          label: "Reason",
+          placeholder: "The hotel folio is missing; only the booking confirmation is attached",
+          minLength: 12,
+          hint: "Say what has to change. A rejection nobody can act on comes straight back unchanged.",
+        },
+        confirmLabel: "Reject it",
+      });
       if (answer === null) return;
       reason = answer;
     }
@@ -239,8 +254,16 @@ export default function ApprovalsPage() {
                         className="sw-btn sw-btn-sm"
                         disabled={busy === `${r.id}:off`}
                         data-testid="deactivate-rule"
-                        onClick={() => {
-                          if (!window.confirm("Switch this rule off?\n\nDocuments already signed keep their approvals; new ones stop asking for this one.")) return;
+                        onClick={async () => {
+                          const go = await ask({
+                            title: "Switch this rule off?",
+                            detail:
+                              "Documents already signed keep their approvals; new ones stop asking for this one. The " +
+                              "rule is switched off rather than deleted, so it still explains the signatures it " +
+                              "collected — writing the same rule again turns it back on.",
+                            confirmLabel: "Switch it off",
+                          });
+                          if (go === null) return;
                           void act(`${r.id}:off`, { action: "deactivateRule", ruleId: r.id });
                         }}
                       >

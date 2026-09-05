@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useEntityId, useLedgerQuery, api, ApiError } from "@/components/ledger/use-ledger";
 import { PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 
 interface Period {
   id: string; label: string; seq: number; startsOn: string; endsOn: string;
@@ -34,9 +35,18 @@ export default function PeriodsPage() {
   );
   const [busy, setBusy] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const ask = useAsk();
 
-  const move = async (p: Period, to: string, warn?: string) => {
-    if (warn && !window.confirm(`${warn}\n\nLock ${p.label}?`)) return;
+  const move = async (p: Period, to: string, label: string, warn?: string) => {
+    if (warn) {
+      const go = await ask({
+        title: `${label} ${p.label}?`,
+        detail: warn,
+        confirmLabel: `${label} the period`,
+        destructive: true,
+      });
+      if (go === null) return;
+    }
     setBusy(p.id);
     setActionError(null);
     try {
@@ -98,7 +108,7 @@ export default function PeriodsPage() {
                             type="button"
                             className="sw-btn sw-btn-sm"
                             disabled={busy === p.id}
-                            onClick={() => move(p, n.to, n.warn)}
+                            onClick={() => void move(p, n.to, n.label, n.warn)}
                           >
                             {busy === p.id ? "…" : n.label}
                           </button>

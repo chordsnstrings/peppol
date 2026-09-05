@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 
 /* ------------------------------------------------------------------- wire --- */
 
@@ -42,6 +43,7 @@ export default function PaymentRunsPage() {
   const [draft, setDraft] = React.useState({ runDate: today(), dueBy: today(), bankAccount: "1010" });
   const [ibans, setIbans] = React.useState<Record<string, string>>({});
   const [file, setFile] = React.useState<BankFileResult | null>(null);
+  const ask = useAsk();
 
   const list = useLedgerQuery<RunListResponse>(entityId ? `/api/ledger/payment-runs?entityId=${entityId}` : null);
   const detail = useLedgerQuery<RunDetail>(
@@ -219,7 +221,19 @@ export default function PaymentRunsPage() {
                   onClick={async () => {
                     // The run has nowhere to record who prepared it, so the
                     // approver is asked. Naming yourself here is refused.
-                    const submittedBy = window.prompt(`Who prepared ${open.reference}?`);
+                    const submittedBy = await ask({
+                      title: `Who prepared ${open.reference}?`,
+                      detail:
+                        "Preparing a payment and approving it have to be two different people — that is the one " +
+                        "control a payment run exists for, and the ledger refuses the approval if this name is " +
+                        "yours. Approving posts nothing: the run then waits to be released, and only that moves money.",
+                      reason: {
+                        label: "Name",
+                        placeholder: "Fatima Al Mansoori",
+                        hint: "The person who put this run together, not you. It is checked against your own name.",
+                      },
+                      confirmLabel: "Approve the run",
+                    });
                     if (submittedBy === null) return;
                     const r = await act<RunDetail>("approve", { action: "approve", runId: open.id, submittedBy });
                     if (r) setMsg(`${r.reference} approved by ${r.approvedBy}. Release it when the bank file has gone.`);
@@ -252,7 +266,21 @@ export default function PaymentRunsPage() {
                   type="button" className="sw-btn sw-btn-sm" data-testid="cancel-run"
                   disabled={busy !== null} aria-disabled={busy !== null || undefined}
                   onClick={async () => {
-                    const reason = window.prompt(`Why is ${open.reference} being cancelled?`);
+                    const reason = await ask({
+                      title: `Why is ${open.reference} being cancelled?`,
+                      detail:
+                        "Every bill still in the run is taken out of it and carries this reason, and the run stops " +
+                        "there — it cannot be approved or released afterwards, and a fresh run has to be proposed to " +
+                        "pay these suppliers. Nothing is posted: none of this money has left the bank yet.",
+                      reason: {
+                        label: "Reason",
+                        placeholder: "The bank balance will not cover it until the Etisalat receipt clears",
+                        minLength: 12,
+                        hint: "Every supplier on this run inherits this sentence. It is what they are told when they ask why they were not paid.",
+                      },
+                      confirmLabel: "Cancel the run",
+                      destructive: true,
+                    });
                     if (reason === null) return;
                     const r = await act<RunDetail>("cancel", { action: "cancel", runId: open.id, reason });
                     if (r) setMsg(`${r.reference} cancelled. Every payment on it carries the reason.`);
@@ -301,11 +329,34 @@ export default function PaymentRunsPage() {
                           type="button" className="sw-btn sw-btn-sm"
                           disabled={busy !== null} aria-disabled={busy !== null || undefined}
                           onClick={async () => {
-                            const reason = window.prompt(
-                              i.excluded
-                                ? `Why is ${i.billNumber} going back into ${open.reference}?`
-                                : `Why is ${i.billNumber} being left out of ${open.reference}?`,
-                            );
+                            const reason = i.excluded
+                              ? await ask({
+                                  title: `Why is ${i.billNumber} going back into ${open.reference}?`,
+                                  detail:
+                                    `${i.supplierName} is paid again by this run and the total the bank is asked ` +
+                                    "for goes up by that much. The note replaces the reason it was left out with, so " +
+                                    "say what changed rather than only that it did.",
+                                  reason: {
+                                    label: "Reason",
+                                    placeholder: "The hold on the supplier was lifted this morning",
+                                    hint: "This replaces the exclusion note on the bill; it is the only record of why it came back.",
+                                  },
+                                  confirmLabel: "Put it back in",
+                                })
+                              : await ask({
+                                  title: `Why is ${i.billNumber} being left out of ${open.reference}?`,
+                                  detail:
+                                    `${i.supplierName} is not paid by this run and the total the bank is asked for ` +
+                                    "drops by that much. The bill stays owing and comes back as a candidate for the " +
+                                    "next run — leaving it out delays it, it does not settle or write it off.",
+                                  reason: {
+                                    label: "Reason",
+                                    placeholder: "Query on the delivery — half of it was short",
+                                    minLength: 8,
+                                    hint: "This is the answer given three weeks later when the supplier asks why they were not paid.",
+                                  },
+                                  confirmLabel: "Leave it out",
+                                });
                             if (reason === null) return;
                             await act<RunDetail>(i.excluded ? "include" : "exclude", {
                               action: i.excluded ? "include" : "exclude",

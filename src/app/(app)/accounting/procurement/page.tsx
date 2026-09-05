@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 /* ------------------------------------------------------------------- wire --- */
@@ -101,6 +102,7 @@ export default function ProcurementPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [drafting, setDrafting] = React.useState(false);
+  const ask = useAsk();
 
   const list = useLedgerQuery<ListResponse>(entityId ? `/api/ledger/procurement?entityId=${entityId}` : null);
   const detail = useLedgerQuery<Detail>(
@@ -223,7 +225,20 @@ export default function ProcurementPage() {
                             disabled={busy !== null}
                             aria-disabled={busy !== null || undefined}
                             onClick={async () => {
-                              const reason = window.prompt(`Why is ${o.number} being cancelled?`);
+                              const reason = await ask({
+                                title: `Why is ${o.number} being cancelled?`,
+                                detail:
+                                  `Nothing has been delivered against ${o.number}, so nothing is posted and nothing ` +
+                                  "reverses — the order simply stops committing the business to the supplier. The " +
+                                  "reason is kept on the order, and a cancelled order cannot be issued again.",
+                                reason: {
+                                  label: "Reason",
+                                  placeholder: "Ordered twice by mistake",
+                                  hint: "Whoever finds this order later has only what is written here.",
+                                },
+                                confirmLabel: "Cancel the order",
+                                destructive: true,
+                              });
                               if (reason === null) return;
                               const r = await act<{ order: { number: string } }>(`${o.id}:cancel`, { action: "cancel", orderId: o.id, reason });
                               if (r) setMsg(`${r.order.number} cancelled.`);

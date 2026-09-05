@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { parseAmount } from "@/lib/ledger/format";
 
 interface Totals {
@@ -29,7 +30,14 @@ interface ClaimListResponse {
  * only decides which buttons are worth showing, and a stale tab that offers the
  * wrong one gets a full sentence back explaining why, rather than a 500.
  */
-const ACTIONS: Record<string, { action: string; label: string; primary?: boolean; reason?: boolean; confirm?: string }[]> = {
+const ACTIONS: Record<
+  string,
+  {
+    action: string; label: string; primary?: boolean; reason?: boolean;
+    /** Asked before the action runs, saying what it will do rather than only that it will. */
+    confirm?: { title: string; detail: string; confirmLabel: string };
+  }[]
+> = {
   draft: [{ action: "submit", label: "Submit", primary: true }],
   submitted: [
     { action: "approve", label: "Approve", primary: true },
@@ -41,7 +49,19 @@ const ACTIONS: Record<string, { action: string; label: string; primary?: boolean
     { action: "reject", label: "Reject", reason: true },
   ],
   rejected: [{ action: "reopen", label: "Back to draft" }],
-  posted: [{ action: "pay", label: "Reimburse", primary: true, confirm: "Post the payment out of the bank for this claim?" }],
+  posted: [{
+    action: "pay",
+    label: "Reimburse",
+    primary: true,
+    confirm: {
+      title: "Post the payment out of the bank for this claim?",
+      detail:
+        "An entry is posted now: the bank down by the full amount, and what the business owed the employee cleared. " +
+        "Like any posted entry it is corrected by a reversal rather than an edit, so post it once the transfer has " +
+        "actually been made.",
+      confirmLabel: "Post the reimbursement",
+    },
+  }],
   paid: [],
 };
 
@@ -70,6 +90,7 @@ export default function ExpenseClaimsPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [drafting, setDrafting] = React.useState(false);
+  const ask = useAsk();
 
   const act = async (key: string, body: Record<string, unknown>) => {
     setBusy(key); setErr(null); setMsg(null);
@@ -90,11 +111,31 @@ export default function ExpenseClaimsPage() {
   const run = async (claim: ClaimRow, a: (typeof ACTIONS)[string][number]) => {
     let reason: string | undefined;
     if (a.reason) {
-      const answer = window.prompt(`Why is ${claim.reference} being rejected? The claimant sees this.`);
+      const answer = await ask({
+        title: `Why is ${claim.reference} being rejected?`,
+        detail:
+          `${claim.employeeName} sees this reason on the claim, and nothing is posted. The claim can be sent back to ` +
+          "draft afterwards, fixed and submitted again — at which point the reason is cleared, so it is only ever the " +
+          "instruction for what to change.",
+        reason: {
+          label: "Reason",
+          placeholder: "The taxi receipt is for 12 March; the trip on the claim is 12 April",
+          minLength: 12,
+          hint: "Say what has to change. A claim rejected without that comes straight back unchanged.",
+        },
+        confirmLabel: "Reject the claim",
+      });
       if (answer === null) return;
       reason = answer;
     }
-    if (a.confirm && !window.confirm(`${a.confirm}\n\n${claim.reference} — ${claim.employeeName}`)) return;
+    if (a.confirm) {
+      const go = await ask({
+        title: a.confirm.title,
+        detail: `${claim.reference} — ${claim.employeeName}. ${a.confirm.detail}`,
+        confirmLabel: a.confirm.confirmLabel,
+      });
+      if (go === null) return;
+    }
 
     const r = await act(`${claim.id}:${a.action}`, { action: a.action, claimId: claim.id, reason });
     if (!r) return;

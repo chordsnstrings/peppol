@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { parseAmount } from "@/lib/ledger/format";
 
 interface ProjectRow {
@@ -74,6 +75,7 @@ export default function ProjectsPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
+  const ask = useAsk();
 
   const q = useLedgerQuery<{ projects: ProjectRow[]; summary?: Summary }>(
     entityId ? `/api/ledger/projects?entityId=${entityId}&from=${range.from}&to=${range.to}` : null,
@@ -171,7 +173,15 @@ export default function ProjectsPage() {
             detail={oneQ.data.detail}
             busy={busy === `close:${oneQ.data.profitability.code}`}
             onClose={async (code) => {
-              if (!window.confirm(`Mark ${code} complete? Its cost stays exactly as posted; nothing is written to the ledger.`)) return;
+              const go = await ask({
+                title: `Mark ${code} complete?`,
+                detail:
+                  "The job is stamped as finishing today and its project tag is archived, so it stops being offered " +
+                  "for new cost. Nothing is written to the ledger — cost already posted stays exactly as posted — but " +
+                  "the job leaves the work in progress list below, which carries only work still in flight.",
+                confirmLabel: "Mark complete",
+              });
+              if (go === null) return;
               const ok = await act(`close:${code}`, { action: "close", code });
               if (ok) setMsg(`${code} is complete.`);
             }}
