@@ -181,8 +181,22 @@ interface DeferredTaxNote extends NoteBase {
   narrative: string[];
 }
 
+interface IntangiblesNote extends NoteBase {
+  key: "intangible_assets";
+  costAccount: string;
+  accumulatedAmortisationAccount: string;
+  cost: Movement & { additionsMinor: string; disposalsMinor: string };
+  accumulatedAmortisation: Movement & { chargeMinor: string; releasedOnDisposalMinor: string };
+  netBookValue: { openingMinor: string; closingMinor: string };
+  byCategory: {
+    category: string; count: number; costMinor: string; accumulatedMinor: string;
+    netBookValueMinor: string; shortestLifeMonths: number; longestLifeMonths: number;
+  }[];
+  notDerivable: string[];
+}
+
 type Note =
-  | PolicyNote | PpeNote | LeaseNote | ReceivablesPayablesNote
+  | PolicyNote | PpeNote | IntangiblesNote | LeaseNote | ReceivablesPayablesNote
   | RevenueNote | RelatedPartyNote | ProvisionsNote | DeferredTaxNote
   | TaxNote | RequiresInputNote;
 
@@ -468,6 +482,7 @@ function NoteBody({ note, currency }: { note: Note; currency: string }) {
   switch (note.key) {
     case "accounting_policies": return <PolicyBody note={note} />;
     case "property_plant_and_equipment": return <PpeBody note={note} currency={currency} />;
+    case "intangible_assets": return <IntangiblesBody note={note} currency={currency} />;
     case "leases": return <LeaseBody note={note} currency={currency} />;
     case "trade_receivables_and_payables": return <TradeBody note={note} currency={currency} />;
     case "revenue": return <RevenueBody note={note} currency={currency} />;
@@ -627,6 +642,91 @@ function PpeBody({ note, currency }: { note: PpeNote; currency: string }) {
           depreciation {note.register.accumulatedAgrees ? "agrees" : "does not agree"}
         </span>
       </p>
+    </div>
+  );
+}
+
+/**
+ * IAS 38.118: the movement on intangible assets, and the classes behind it.
+ *
+ * Two tables and no revaluation column, unlike the note above. IAS 38.75
+ * permits the revaluation model only where an active market exists for the
+ * asset, and none exists for software or a licence — so nothing here revalues
+ * an intangible, and a column that is always nil would only invite somebody to
+ * look for the entry that filled it.
+ */
+function IntangiblesBody({ note, currency }: { note: IntangiblesNote; currency: string }) {
+  if (note.state === "empty") return null;
+  const months = (a: number, b: number) => (a === b ? `${a} months` : `${a}–${b} months`);
+  return (
+    <div className="grid gap-4 px-3 pb-3 lg:grid-cols-2">
+      <MovementTable
+        testId="intangible-cost"
+        caption={`Cost — account ${note.costAccount}`}
+        currency={currency}
+        rows={[
+          { label: "At the start of the year", minor: note.cost.openingMinor },
+          { label: "Additions", minor: note.cost.additionsMinor },
+          { label: "Disposals", minor: `-${note.cost.disposalsMinor}` },
+        ]}
+        closing={{ label: "At the end of the year", minor: note.cost.closingMinor }}
+        perLedger={note.cost.perBalanceSheetMinor}
+        agrees={note.cost.agrees}
+      />
+      <MovementTable
+        testId="intangible-amortisation"
+        caption={`Accumulated amortisation — account ${note.accumulatedAmortisationAccount}`}
+        currency={currency}
+        rows={[
+          { label: "At the start of the year", minor: note.accumulatedAmortisation.openingMinor },
+          { label: "Charge for the year", minor: note.accumulatedAmortisation.chargeMinor },
+          { label: "Released on disposal", minor: `-${note.accumulatedAmortisation.releasedOnDisposalMinor}` },
+        ]}
+        closing={{ label: "At the end of the year", minor: note.accumulatedAmortisation.closingMinor }}
+        perLedger={note.accumulatedAmortisation.perBalanceSheetMinor}
+        agrees={note.accumulatedAmortisation.agrees}
+      />
+
+      {note.byCategory.length > 0 && (
+        <div className="sw-scroll lg:col-span-2">
+          <table className="sw-table" data-testid="intangible-classes">
+            <caption className="sr-only">Intangible assets by class, with the amortisation period</caption>
+            <thead>
+              <tr>
+                <th scope="col">Class</th>
+                <th scope="col" className="sw-num" style={{ width: "5rem" }}>Assets</th>
+                <th scope="col">Amortised over</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Cost</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amortisation</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Carrying amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {note.byCategory.map((c) => (
+                <tr key={c.category}>
+                  <th scope="row">{c.category.toLowerCase()}</th>
+                  <td className="sw-num">{c.count}</td>
+                  <td className="sw-sub">{months(c.shortestLifeMonths, c.longestLifeMonths)}</td>
+                  <td className="sw-num"><Figure minor={c.costMinor} currency={currency} zero="zero" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={c.accumulatedMinor} currency={currency} zero="zero" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={c.netBookValueMinor} currency={currency} zero="zero" colour={false} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {note.notDerivable.length > 0 && (
+        <div className="lg:col-span-2">
+          <div className="sw-label">What this note cannot say</div>
+          <ul className="grid gap-1">
+            {note.notDerivable.map((line) => (
+              <li key={line} className="sw-sub" style={{ maxWidth: "80ch" }}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

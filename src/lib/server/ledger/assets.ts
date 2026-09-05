@@ -36,6 +36,34 @@ export interface NewAsset {
   notes?: string;
 }
 
+/**
+ * Where each category of asset posts, absent an explicit override.
+ *
+ * INTANGIBLE is the one that matters. A capitalised software licence or an ERP
+ * implementation went onto this register as category IT, and the register's
+ * defaults then put it on 1500 with the plant and machinery, amortised it
+ * through 6600 "Depreciation", and presented it under a note headed "Property,
+ * plant and equipment". The arithmetic was right — straight-line over a finite
+ * life IS amortisation — and the caption, the account and the disclosure were
+ * all wrong, which is a year-end problem rather than a monthly one and
+ * therefore the kind nobody notices until an auditor does.
+ *
+ * The chart has carried 1560, 1570 and 6610 all along. What was missing was
+ * anything routing to them: a person had to know to type three account codes,
+ * and the screen offered no category that would make them think to.
+ *
+ * IAS 38.54 is why this is a category and not a checkbox: an intangible is
+ * recognised only when it meets the definition and the recognition criteria,
+ * and that is a judgement somebody makes about the item — not something the
+ * ledger can infer from an amount.
+ */
+export const CATEGORY_ACCOUNTS: Record<string, { asset: string; accum: string; expense: string }> = {
+  INTANGIBLE: { asset: "1560", accum: "1570", expense: "6610" },
+};
+
+/** What everything else posts to: property, plant and equipment. */
+const DEFAULT_ACCOUNTS = { asset: "1500", accum: "1590", expense: "6600" };
+
 /** Register an asset that is already on the balance sheet. */
 export async function addAsset(opts: { orgId: string; entityId: string; asset: NewAsset }) {
   const a = opts.asset;
@@ -62,18 +90,37 @@ export async function addAsset(opts: { orgId: string; entityId: string; asset: N
   });
   if (clash) throw new LedgerError(`Asset ${a.code} is already on the register.`);
 
+  const category = a.category ?? "EQUIPMENT";
+  const accounts = CATEGORY_ACCOUNTS[category] ?? DEFAULT_ACCOUNTS;
+
+  // An intangible with no end to its life is not amortised at all (IAS 38.107)
+  // and is tested for impairment instead. This register has no such path —
+  // `usefulLifeMonths` is a required positive integer — so it is refused by
+  // name rather than quietly given a life somebody did not choose.
+  if (category === "INTANGIBLE" && method === "REDUCING_BALANCE") {
+    throw new LedgerError(
+      `${a.code} is an intangible asset, and IAS 38.98 allows a reducing-balance pattern only where the pattern ` +
+        `of consumption can actually be shown to be that — which is why straight-line is what almost every ` +
+        `intangible uses. Register it straight-line over its useful life.`,
+    );
+  }
+
   return prisma.fixedAsset.create({
     data: {
       orgId: opts.orgId, entityId: opts.entityId,
       code: a.code, name: a.name, nameAr: a.nameAr ?? null,
-      category: a.category ?? "EQUIPMENT",
+      category,
       acquiredOn: new Date(a.acquiredOn),
       costMinor: cost, residualMinor: residual,
       method, usefulLifeMonths: a.usefulLifeMonths,
       ratePercent: method === "REDUCING_BALANCE" ? a.ratePercent! : null,
-      assetAccount: a.assetAccount ?? "1500",
-      accumAccount: a.accumAccount ?? "1590",
-      expenseAccount: a.expenseAccount ?? "6600",
+      // Routed by category, and still overridable one account at a time — a
+      // business with its own chart may put motor vehicles somewhere of its
+      // own, and an override on one account must not drag the other two with
+      // it.
+      assetAccount: a.assetAccount ?? accounts.asset,
+      accumAccount: a.accumAccount ?? accounts.accum,
+      expenseAccount: a.expenseAccount ?? accounts.expense,
       notes: a.notes ?? null,
     },
   });
@@ -486,6 +533,13 @@ export async function assetRegister(opts: {
       code: a.code,
       name: a.name,
       category: (a as unknown as { category: string }).category,
+      // The account the cost sits on. A reader of the register can tell
+      // property, plant and equipment from an intangible without inferring it
+      // from the category — and the IAS 38 note needs the accounts, because an
+      // asset can be routed to 1560 by an explicit override without its
+      // category saying so.
+      assetAccount: a.assetAccount,
+      accumAccount: a.accumAccount,
       acquiredOn: a.acquiredOn.toISOString().slice(0, 10),
       method: a.method,
       usefulLifeMonths: a.usefulLifeMonths,

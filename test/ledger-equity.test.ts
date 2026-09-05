@@ -18,6 +18,7 @@ import {
   type Note,
   type PolicyNote,
   type PpeNote,
+  type IntangiblesNote,
   type LeaseNote,
   type ReceivablesPayablesNote,
   type RevenueNote,
@@ -127,6 +128,22 @@ d("statement of changes in equity and the notes", () => {
       orgId: ORG, entityId: ENT,
       asset: { code: "FA-001", name: "Delivery van", acquiredOn: "2026-01-15", costMinor: 12_000_000, usefulLifeMonths: 60 },
     });
+    // An ERP licence capitalised in the same year. Registered as INTANGIBLE, so
+    // it routes to 1560 / 1570 / 6610 rather than joining the van on 1500 and
+    // amortising through 6600 "Depreciation" under a heading that says property,
+    // plant and equipment.
+    await P(ENT, "2026-01-20", [
+      { account: "1560", debit: 3_600_000 },
+      { account: "1010", credit: 3_600_000 },
+    ], { memo: "ERP licence" });
+    await addAsset({
+      orgId: ORG, entityId: ENT,
+      asset: {
+        code: "IA-001", name: "ERP licence", category: "INTANGIBLE",
+        acquiredOn: "2026-01-20", costMinor: 3_600_000, usefulLifeMonths: 36,
+      },
+    });
+
     for (const m of ["01", "02", "03", "04", "05", "06"]) {
       await runDepreciation({ orgId: ORG, entityId: ENT, period: `2026-${m}` });
     }
@@ -475,10 +492,14 @@ d("statement of changes in equity and the notes", () => {
   describe("the notes", () => {
     it("numbers the notes and returns them all", async () => {
       const notes = await N();
-      expect(notes.map((n) => n.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(notes.map((n) => n.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       expect(notes.map((n) => n.key)).toEqual([
         "accounting_policies",
         "property_plant_and_equipment",
+        // A capitalised licence used to sit inside the note above, on 1500,
+        // amortising through 6600 and captioned as plant. IAS 38.118 asks for
+        // its own reconciliation and this is it.
+        "intangible_assets",
         "leases",
         "trade_receivables_and_payables",
         "revenue",
@@ -491,6 +512,60 @@ d("statement of changes in equity and the notes", () => {
         "events_after_the_reporting_period",
         "commitments_and_contingencies",
       ]);
+    });
+
+    it("gives an intangible its own note rather than calling it plant", async () => {
+      const notes = await N();
+      const ppe = noteOf<PpeNote>(notes, "property_plant_and_equipment");
+      const ia = noteOf<IntangiblesNote>(notes, "intangible_assets");
+
+      // The ERP licence is 3,600,000 over 36 months = 100,000 a month, six
+      // months charged = 600,000; the van is 12,000,000 over 60 = 200,000 a
+      // month, 1,200,000 charged. Each is wholly in one note and in neither
+      // other.
+      expect(ia.cost.additionsMinor).toBe("3600000");
+      expect(ia.accumulatedAmortisation.chargeMinor).toBe("600000");
+      expect(ia.netBookValue.closingMinor).toBe("3000000");
+      expect(ia.cost.agrees).toBe(true);
+      expect(ia.accumulatedAmortisation.agrees).toBe(true);
+      expect(ia.costAccount).toBe("1560");
+      expect(ia.accumulatedAmortisationAccount).toBe("1570");
+
+      // The van, and only the van. Before this the licence was on 1500 and
+      // inside the class table below it.
+      expect(ppe.cost.additionsMinor).toBe("12000000");
+      expect(ppe.accumulatedDepreciation.chargeMinor).toBe("1200000");
+      expect(ppe.byCategory.map((c) => c.category)).not.toContain("INTANGIBLE");
+      expect(ppe.cost.agrees).toBe(true);
+
+      // IAS 38.118(a): the amortisation period, by class.
+      expect(ia.byCategory).toHaveLength(1);
+      expect(ia.byCategory[0]).toMatchObject({
+        category: "INTANGIBLE", count: 1, shortestLifeMonths: 36, longestLifeMonths: 36,
+      });
+
+      // And what it cannot say, said. An indefinite life and an internally
+      // generated asset both need a judgement no accounting record holds.
+      expect(ia.notDerivable.join(" ")).toMatch(/indefinite/i);
+      expect(ia.notDerivable.join(" ")).toMatch(/internally/i);
+    });
+
+    it("states the IAS 38 policy once there is an intangible, and not before", async () => {
+      const policies = noteOf<PolicyNote>(await N(), "accounting_policies").policies;
+      const ia = policies.find((p) => p.key === "intangible_assets")!;
+      expect(ia).toBeDefined();
+      expect(ia.policy).toMatch(/straight-line/i);
+      expect(ia.policy).toMatch(/presented separately from depreciation/i);
+      // IAS 38.75: the revaluation model needs an active market, and software
+      // has none — so the note says the model is not applied rather than
+      // leaving a reader to wonder which was chosen.
+      expect(ia.policy).toMatch(/revaluation model is not applied/i);
+      expect(ia.basis).toMatch(/IAS 38\.118/);
+
+      // An entity holding none does not get the paragraph. A policy note padded
+      // with paragraphs that apply to nothing is one nobody reads to the end.
+      const bare = noteOf<PolicyNote>(await N(BARE), "accounting_policies").policies;
+      expect(bare.find((p) => p.key === "intangible_assets")).toBeUndefined();
     });
 
     it("states only the policies this entity's data actually needs", async () => {
@@ -833,7 +908,7 @@ d("statement of changes in equity and the notes", () => {
   describe("provisions, deferred tax and related parties", () => {
     it("carries the provisions register's IAS 37.84 movement table", async () => {
       const note = noteOf<ProvisionsNote>(await N(PACK), "provisions");
-      expect(note.number).toBe(7);
+      expect(note.number).toBe(8);
       expect(note.state).toBe("present");
       expect(note.rows.map((r) => r.category)).toEqual(["WARRANTY"]);
       const warranty = note.rows[0];
@@ -858,8 +933,8 @@ d("statement of changes in equity and the notes", () => {
     it("carries the deferred tax register's IAS 12.81(g) note after the tax charge", async () => {
       const notes = await N(PACK);
       const note = noteOf<DeferredTaxNote>(notes, "deferred_tax");
-      expect(note.number).toBe(9);
-      expect(notes.find((n) => n.key === "corporate_tax")!.number).toBe(8);
+      expect(note.number).toBe(10);
+      expect(notes.find((n) => n.key === "corporate_tax")!.number).toBe(9);
       expect(note.state).toBe("present");
       expect(note.rows.map((r) => r.category)).toEqual(["FIXED_ASSET"]);
       // 20,000.00 of taxable difference at 9% is 1,800.00.
@@ -898,7 +973,7 @@ d("statement of changes in equity and the notes", () => {
       const notes = await N(PACK);
       const commitments = noteOf<RequiresInputNote>(notes, "commitments_and_contingencies");
       const question = commitments.requires.find((r) => r.key === "contingent_liabilities")!.question;
-      expect(question).toContain("disclosed in note 7");
+      expect(question).toContain("disclosed in note 8");
       // The question is still asked: a register holding one contingency is not
       // a register holding all of them.
       expect(question).toMatch(/litigation, claim or assessment/);
@@ -1011,7 +1086,7 @@ d("statement of changes in equity and the notes", () => {
       expect(both.to).toBe("2026-12-31");
       expect(both.currency).toBe("AED");
       expect(both.availableYears.map((y) => y.label)).toEqual(["2026"]);
-      expect(both.notes).toHaveLength(11);
+      expect(both.notes).toHaveLength(12);
       expect(both.statement.reconciles).toBe(true);
     });
 

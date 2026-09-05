@@ -236,7 +236,24 @@ function Compare({ label, account, a, b, ok }: {
   );
 }
 
-const CATEGORIES = ["EQUIPMENT", "VEHICLES", "FURNITURE", "IT", "BUILDINGS", "LEASEHOLD"];
+/**
+ * INTANGIBLE is last and is not like the others.
+ *
+ * The rest are kinds of property, plant and equipment and all post to the same
+ * three accounts. An intangible posts to 1560, 1570 and 6610 instead, appears
+ * under its own note, and draws the IAS 38 policy rather than the IAS 16 one —
+ * so choosing it here is the judgement IAS 38.54 asks somebody to make, not a
+ * label on a row. A capitalised licence registered as IT amortises correctly
+ * and is captioned, accounted and disclosed as plant.
+ */
+const CATEGORIES = ["EQUIPMENT", "VEHICLES", "FURNITURE", "IT", "BUILDINGS", "LEASEHOLD", "INTANGIBLE"];
+
+const CATEGORY_NOTE: Record<string, string> = {
+  INTANGIBLE:
+    "Software, licences, and development costs that met IAS 38.57. Posts to intangible assets (1560), " +
+    "amortises through 6610, and is disclosed apart from property, plant and equipment. An intangible with no " +
+    "foreseeable end to its life is not amortised at all and does not belong on this register.",
+};
 
 function AddAsset({ busy, onAdd }: {
   busy: boolean;
@@ -281,6 +298,9 @@ function AddAsset({ busy, onAdd }: {
           <select className="sw-select" value={f.category} onChange={(e) => set("category", e.target.value)}>
             {CATEGORIES.map((c) => <option key={c} value={c}>{c.toLowerCase()}</option>)}
           </select>
+          {CATEGORY_NOTE[f.category] && (
+            <span className="sw-sub mt-1 block" style={{ maxWidth: "40ch" }}>{CATEGORY_NOTE[f.category]}</span>
+          )}
         </Field>
         <Field label="Acquired"><input type="date" className="sw-input" value={f.acquiredOn} onChange={(e) => set("acquiredOn", e.target.value)} /></Field>
         <Field label="Cost"><input className="sw-input sw-cell-num" inputMode="decimal" value={f.cost} onChange={(e) => set("cost", e.target.value)} placeholder="120,000.00" /></Field>

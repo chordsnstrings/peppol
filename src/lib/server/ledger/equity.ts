@@ -95,6 +95,20 @@ const EQUITY_COLUMNS = [
 /** Cost of property, plant and equipment, and the contra account against it. */
 const PPE_COST_CODES = ["1500", "1600"];
 const ACCUM_DEPRECIATION = "1590";
+/**
+ * Intangibles, which are not property, plant and equipment and were disclosed
+ * as though they were.
+ *
+ * A capitalised licence went onto the fixed asset register as category IT and
+ * therefore onto 1500, amortised through 6600 "Depreciation", and appeared
+ * under a note headed "Property, plant and equipment". The arithmetic was
+ * right — straight-line over a finite life IS amortisation — and the caption,
+ * the accounts and the disclosure were all wrong. IAS 38.118 asks for its own
+ * reconciliation, and this is it.
+ */
+const INTANGIBLE_COST = "1560";
+const ACCUM_AMORTISATION = "1570";
+const AMORTISATION_EXPENSE = "6610";
 
 /**
  * The source on entries the revaluation module made. It restates cost against
@@ -214,6 +228,45 @@ export interface PolicyNote extends NoteBase {
   functionalCurrency: string;
   presentationCurrency: string;
   policies: AccountingPolicy[];
+}
+
+export interface IntangiblesNote extends NoteBase {
+  key: "intangible_assets";
+  costAccount: string;
+  accumulatedAmortisationAccount: string;
+  cost: {
+    openingMinor: string;
+    additionsMinor: string;
+    disposalsMinor: string;
+    closingMinor: string;
+    perBalanceSheetMinor: string;
+    agrees: boolean;
+  };
+  accumulatedAmortisation: {
+    openingMinor: string;
+    chargeMinor: string;
+    releasedOnDisposalMinor: string;
+    closingMinor: string;
+    perBalanceSheetMinor: string;
+    agrees: boolean;
+  };
+  netBookValue: { openingMinor: string; closingMinor: string };
+  /** IAS 38.118(a): amortisation period, by class. */
+  byCategory: {
+    category: string;
+    count: number;
+    costMinor: string;
+    accumulatedMinor: string;
+    netBookValueMinor: string;
+    shortestLifeMonths: number;
+    longestLifeMonths: number;
+  }[];
+  /**
+   * What this note cannot say, listed rather than left out. IAS 38 asks for
+   * things the ledger does not hold, and a note that quietly omits them reads
+   * as a note that had nothing to say.
+   */
+  notDerivable: string[];
 }
 
 export interface PpeNote extends NoteBase {
@@ -480,6 +533,7 @@ export interface RequiresInputNote extends NoteBase {
 export type Note =
   | PolicyNote
   | PpeNote
+  | IntangiblesNote
   | LeaseNote
   | ReceivablesPayablesNote
   | RevenueNote
@@ -1089,6 +1143,26 @@ function accountingPolicies(ctx: Context, n: number, registerAssets: number, reg
     });
   }
 
+  if (has([INTANGIBLE_COST, ACCUM_AMORTISATION, AMORTISATION_EXPENSE])) {
+    // Stated only where there is something to state. An entity holding no
+    // intangibles does not need a policy about them, and a policy note padded
+    // with paragraphs that apply to nothing is a note nobody reads to the end.
+    policies.push({
+      key: "intangible_assets",
+      label: "Intangible assets",
+      policy:
+        "Intangible assets are stated at cost less accumulated amortisation. Amortisation is charged on a " +
+        "straight-line basis over the useful life recorded for each asset, from the month it is available for " +
+        "use, and is presented separately from depreciation. The revaluation model is not applied: IAS 38.75 " +
+        "permits it only where an active market exists for the asset, and none exists for the software and " +
+        "licences held here. A change in an estimate is applied prospectively; prior periods are not restated.",
+      basis: "IAS 38.74, IAS 38.97, IAS 38.118(a)-(b), IAS 8.36",
+      evidence:
+        `Movements on accounts ${INTANGIBLE_COST} and ${ACCUM_AMORTISATION}, with amortisation charged to ` +
+        `${AMORTISATION_EXPENSE}.`,
+    });
+  }
+
   if (registerLeases > 0 || has([ROU_ASSET, LEASE_LIABILITY])) {
     policies.push({
       key: "leases",
@@ -1225,6 +1299,123 @@ function revaluationEventsIn(
   return out;
 }
 
+/**
+ * IAS 38.118: the movement on intangible assets, and the classes behind it.
+ *
+ * Its own note because an intangible is its own thing. It went onto the fixed
+ * asset register as category IT, onto 1500 with the plant, amortised through
+ * 6600 "Depreciation", and appeared under a heading that said property, plant
+ * and equipment. Straight-line over a finite life IS amortisation, so nothing
+ * was arithmetically wrong — the caption, the accounts and the disclosure were,
+ * and that is a year-end problem rather than a monthly one, which is exactly
+ * the kind nobody notices until an auditor does.
+ *
+ * There is no revaluation partition here, unlike the PPE note. IAS 38.75
+ * permits the revaluation model only where an active market exists for the
+ * asset, which for software and licences it does not, so nothing in this
+ * product revalues an intangible and a partition would be a column that is
+ * always nil.
+ *
+ * What it cannot say is said rather than left out — an indefinite life, and
+ * internally generated assets, both of which need a judgement no accounting
+ * record holds.
+ */
+function intangiblesNote(
+  ctx: Context,
+  n: number,
+  register: Awaited<ReturnType<typeof assetRegister>>,
+): IntangiblesNote {
+  const cost = ctx.lines.filter((l) => l.code === INTANGIBLE_COST);
+  const accum = ctx.lines.filter((l) => l.code === ACCUM_AMORTISATION);
+
+  const additions = cost.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  const disposals = -cost.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  const costOpening = balanceOf(ctx.openingBs, INTANGIBLE_COST);
+  const costClosing = costOpening + additions - disposals;
+  const costPerSheet = balanceOf(ctx.closingBs, INTANGIBLE_COST);
+
+  const charge = -accum.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  const released = accum.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  const accumOpening = -balanceOf(ctx.openingBs, ACCUM_AMORTISATION);
+  const accumClosing = accumOpening + charge - released;
+  const accumPerSheet = -balanceOf(ctx.closingBs, ACCUM_AMORTISATION);
+
+  // The register's own view of the same assets, by class. Amortisation period
+  // is IAS 38.118(a) and is a range rather than a single figure, because a
+  // class holds assets bought in different years on different terms.
+  const mine = register.assets.filter((a) => a.status === "active" && a.assetAccount === INTANGIBLE_COST);
+  const classes = new Map<string, { count: number; cost: bigint; accumulated: bigint; lives: number[] }>();
+  for (const a of mine) {
+    const row = classes.get(a.category) ?? { count: 0, cost: 0n, accumulated: 0n, lives: [] };
+    row.count += 1;
+    row.cost += BigInt(a.costMinor);
+    row.accumulated += BigInt(a.accumulatedMinor);
+    row.lives.push(a.usefulLifeMonths);
+    classes.set(a.category, row);
+  }
+
+  const anything = costOpening !== 0n || costClosing !== 0n || additions !== 0n || mine.length > 0;
+
+  return {
+    number: n,
+    key: "intangible_assets",
+    title: "Intangible assets",
+    basis: "IAS 38.118(a), IAS 38.118(c)-(e)",
+    state: anything ? "present" : "empty",
+    statement: anything
+      ? `Cost and accumulated amortisation are the movements on accounts ${INTANGIBLE_COST} and ` +
+        `${ACCUM_AMORTISATION} in ${ctx.year.label}. Amortisation is charged to ${AMORTISATION_EXPENSE} and is ` +
+        `kept apart from depreciation, because an intangible is not property, plant and equipment and IAS 38.118 ` +
+        `asks for its own reconciliation. Every asset here has a finite life; the register has no path for an ` +
+        `indefinite one, which is not amortised at all under IAS 38.107.`
+      : `The entity holds no intangible assets. Accounts ${INTANGIBLE_COST} and ${ACCUM_AMORTISATION} are nil at ` +
+        `both ends of the year and no asset on the register is registered against them. That is a fact about ` +
+        `these books rather than a statement that the entity has nothing capitalisable.`,
+    costAccount: INTANGIBLE_COST,
+    accumulatedAmortisationAccount: ACCUM_AMORTISATION,
+    cost: {
+      openingMinor: costOpening.toString(),
+      additionsMinor: additions.toString(),
+      disposalsMinor: disposals.toString(),
+      closingMinor: costClosing.toString(),
+      perBalanceSheetMinor: costPerSheet.toString(),
+      agrees: costClosing === costPerSheet,
+    },
+    accumulatedAmortisation: {
+      openingMinor: accumOpening.toString(),
+      chargeMinor: charge.toString(),
+      releasedOnDisposalMinor: released.toString(),
+      closingMinor: accumClosing.toString(),
+      perBalanceSheetMinor: accumPerSheet.toString(),
+      agrees: accumClosing === accumPerSheet,
+    },
+    netBookValue: {
+      openingMinor: (costOpening - accumOpening).toString(),
+      closingMinor: (costClosing - accumClosing).toString(),
+    },
+    byCategory: [...classes.entries()]
+      .map(([category, c]) => ({
+        category,
+        count: c.count,
+        costMinor: c.cost.toString(),
+        accumulatedMinor: c.accumulated.toString(),
+        netBookValueMinor: (c.cost - c.accumulated).toString(),
+        shortestLifeMonths: Math.min(...c.lives),
+        longestLifeMonths: Math.max(...c.lives),
+      }))
+      .sort((a, b) => a.category.localeCompare(b.category)),
+    notDerivable: anything
+      ? [
+          "IAS 38.118(a) asks whether each class has a finite or an indefinite life. Every asset on this " +
+            "register has a finite one, because the register requires a useful life in months — an entity that " +
+            "holds an indefinite-life intangible is not disclosing it from here.",
+          "IAS 38.118(e)(i) separates additions made internally from those acquired. The ledger records what an " +
+            "asset cost and not how it was come by, so additions above are the total of both.",
+        ]
+      : [],
+  };
+}
+
 function ppeNote(
   ctx: Context,
   n: number,
@@ -1274,7 +1465,13 @@ function ppeNote(
   const revaluationNet =
     revaluations.increases - revaluations.decreases - revaluations.impairmentLosses + revaluations.impairmentReversals;
 
-  const active = register.assets.filter((a) => a.status === "active");
+  // Intangibles are on the same register and belong in their own note. Without
+  // this the class table below would list a software licence under property,
+  // plant and equipment while the movement above — read from 1500 and 1600 —
+  // correctly did not include it, so the note would disagree with itself.
+  const active = register.assets.filter(
+    (a) => a.status === "active" && PPE_COST_CODES.includes(a.assetAccount),
+  );
   const categories = new Map<string, { count: number; cost: bigint; accumulated: bigint }>();
   for (const a of active) {
     const row = categories.get(a.category) ?? { count: 0, cost: 0n, accumulated: 0n };
@@ -2020,15 +2217,16 @@ async function buildNotes(ctx: Context, statement: StatementOfChangesInEquity): 
   const notes: Note[] = [];
   notes.push(accountingPolicies(ctx, 1, assets.assets.length, leases.leases.length));
   notes.push(ppeNote(ctx, 2, assets, revaluationEventsIn(ctx, revaluations)));
-  notes.push(leaseNote(ctx, 3, leases));
-  notes.push(receivablesPayablesNote(ctx, 4, ar, ap));
-  notes.push(revenueNote(ctx, 5));
-  notes.push(relatedPartyNote(ctx, 6, statement, relatedParties));
-  const provisionsNoteNumber = 7;
+  notes.push(intangiblesNote(ctx, 3, assets));
+  notes.push(leaseNote(ctx, 4, leases));
+  notes.push(receivablesPayablesNote(ctx, 5, ar, ap));
+  notes.push(revenueNote(ctx, 6));
+  notes.push(relatedPartyNote(ctx, 7, statement, relatedParties));
+  const provisionsNoteNumber = 8;
   notes.push(provisionsNote(provisionsNoteNumber, provisions));
-  notes.push(await taxNote(ctx, 8, BigInt(statement.profitForThePeriodMinor)));
-  notes.push(deferredTaxPackNote(9, deferredTax));
-  notes.push(...requiresInputNotes(10, ctx.to, {
+  notes.push(await taxNote(ctx, 9, BigInt(statement.profitForThePeriodMinor)));
+  notes.push(deferredTaxPackNote(10, deferredTax));
+  notes.push(...requiresInputNotes(11, ctx.to, {
     contingentLiabilities: provisions.contingentLiabilities.length,
     contingentAssets: provisions.contingentAssets.length,
     number: provisionsNoteNumber,
