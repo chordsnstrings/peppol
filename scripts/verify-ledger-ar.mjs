@@ -156,8 +156,18 @@ check('the trial balance ties across both subledgers', r.body?.balanced === true
 console.log('\nVAT 201 RETURN');
 r = await call('GET', `/api/ledger/vat?entityId=${ENT}&from=2026-02-01&to=2026-02-28`);
 const b = (side, n) => (r.body?.[side] ?? []).find(x => x.box === n);
-check('standard-rated sales reach box 1', b('sales','1')?.amountMinor === '200000' && b('sales','1')?.vatMinor === '10000',
-  `${b('sales','1')?.amountMinor} @ ${b('sales','1')?.vatMinor}`);
+// Box 1 is seven rows, one per emirate, because the VAT 201 distributes the tax
+// on standard-rated supplies between them and the split decides where the money
+// ends up. This invoice names no emirate on the seller's address, so it lands in
+// 1x — which is not a box on the FTA's form and is deliberately not spread
+// across the seven in proportion to anything: that would be arithmetic presented
+// as a decision, and it would move real money between real emirates.
+check('standard-rated sales reach box 1, and say which emirate is missing',
+  b('sales','1x')?.amountMinor === '200000' && b('sales','1x')?.vatMinor === '10000',
+  `${b('sales','1x')?.amountMinor} @ ${b('sales','1x')?.vatMinor}`);
+check('the seven real rows are all present and all nil',
+  ['1a','1b','1c','1d','1e','1f','1g'].every((n) => b('sales',n)?.amountMinor === '0'),
+  ['1a','1b','1c','1d','1e','1f','1g'].map((n) => `${n}:${b('sales',n)?.amountMinor}`).join(' '));
 check('zero-rated exports reach box 4 with no VAT figure', b('sales','4')?.amountMinor === '50000' && b('sales','4')?.vatMinor === null,
   `${b('sales','4')?.amountMinor} / vat ${JSON.stringify(b('sales','4')?.vatMinor)}`);
 check('the reverse-charge supply reaches box 3', b('sales','3')?.vatMinor === '5000', `${b('sales','3')?.vatMinor}`);
@@ -170,7 +180,13 @@ check('a net reclaim is reported as a reclaim, not a payment', r.body?.payable =
 check('the return reconciles to both VAT control accounts',
   r.body?.reconciliation?.outputMatches === true && r.body?.reconciliation?.inputMatches === true,
   `2100 ${r.body?.reconciliation?.outputVatPerLedgerMinor} / 1350 ${r.body?.reconciliation?.inputVatPerLedgerMinor}`);
-check('and files no warnings when everything is coded', (r.body?.warnings ?? []).length === 0, JSON.stringify(r.body?.warnings ?? []).slice(0, 120));
+// An entity whose address names no emirate cannot file box 1, and the return
+// says exactly that rather than reporting a figure it cannot stand behind. That
+// is the one warning this correctly-coded return carries, and it names the fix.
+const w = r.body?.warnings ?? [];
+check('the only warning is the one it cannot answer for the user',
+  w.length === 1 && /carry no emirate/.test(w[0]) && /selling establishment/.test(w[0]),
+  JSON.stringify(w).slice(0, 160));
 
 r = await call('GET', `/api/ledger/vat?entityId=${ENT}&from=2026-02-28&to=2026-02-01`);
 check('a backwards period is refused', r.status === 422, `HTTP ${r.status}`);

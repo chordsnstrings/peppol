@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/server/session";
 import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
+import { ledgerJson } from "@/lib/server/ledger/serialize";
 import { prisma } from "@/lib/server/prisma";
 import { postInvoice, postReceipt } from "@/lib/server/ledger/ar";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -67,7 +68,12 @@ export async function POST(req: Request) {
         actorType: "HUMAN",
         actorId: userId,
       });
-      return json(result);
+      // Through `ledgerJson`, like every other ledger route. The receipt result
+      // carries BigInts — a minor-unit amount is a BigInt everywhere in this
+      // ledger — and `JSON.stringify` throws on one, so posting a customer
+      // receipt answered 500 with "Something went wrong. Please try again."
+      // and the money had already moved.
+      return json(ledgerJson(result));
     }
 
     // An invoice only reaches the books once it is a real document. A draft can
@@ -78,7 +84,7 @@ export async function POST(req: Request) {
     }
 
     const result = await postInvoice({ orgId, invoice, actorType: "HUMAN", actorId: userId });
-    return json(result);
+    return json(ledgerJson(result));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);

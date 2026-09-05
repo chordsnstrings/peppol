@@ -12,6 +12,110 @@ const ok = (n, x = "") => { pass++; console.log(`  PASS  ${n}${x ? " — " + x :
 const bad = (n, e) => { fail++; console.log(`  FAIL  ${n} — ${e}`); };
 const check = (n, cond, x = "") => (cond ? ok(n, x) : bad(n, x || "assertion failed"));
 
+/**
+ * Type into a React-controlled input.
+ *
+ * `page.fill()` sets the DOM value and dispatches an `input` event, which is
+ * usually enough — but React keeps a `_valueTracker` on the node and drops the
+ * event when the tracker already holds the new value. Setting through the
+ * prototype's own setter updates the tracker first, so React sees the change.
+ *
+ * The symptom when this goes wrong is the worst kind: every field on screen
+ * holds the right value, the form looks filled in, and the Continue button
+ * stays disabled — because the component's state was never told. That is
+ * indistinguishable from a product defect until somebody reads the tracker.
+ */
+/**
+ * Wait until React has hydrated the page.
+ *
+ * `domcontentloaded` means the markup is there, not that anything is listening
+ * to it. A value set before hydration lands on inert DOM: the field shows the
+ * text, the component's state never hears about it, and the form sits there
+ * looking filled in with its Continue button disabled — which reads exactly
+ * like a broken product and is not one.
+ *
+ * React marks every node it has attached to with a `__reactFiber$…` key, so
+ * that is the signal rather than a sleep somebody will have to lengthen later.
+ */
+async function hydrated(selector) {
+  // Generous, because a dev server compiles a route on its first hit and can
+  // take several seconds before the page even exists. Against the production
+  // build this suite is written for, it returns immediately.
+  await page.waitForSelector(selector, { timeout: 60000 });
+  await page.waitForFunction(
+    (sel) => {
+      const el = document.querySelector(sel);
+      return !!el && Object.keys(el).some((k) => k.startsWith("__reactFiber$"));
+    },
+    selector,
+    { timeout: 60000 },
+  );
+}
+
+/**
+ * Navigate, tolerating a client-side navigation already in flight.
+ *
+ * The app routes on its own after onboarding and after opening the books, and a
+ * `goto` issued into the middle of one is aborted by it — `net::ERR_ABORTED`,
+ * which reads as the server refusing the page and is nothing of the kind. One
+ * retry after the in-flight navigation lands is enough; a second failure is a
+ * real one and is allowed to throw.
+ */
+/**
+ * The blocker once the grid has finished resolving.
+ *
+ * "Every line with an amount needs an account" is what it says for the moment
+ * between leaving a cell and the code being matched against the chart. Reading
+ * it then and reporting it is how a suite turns a race into a defect, so this
+ * waits for that message to give way to whatever the real answer is.
+ */
+async function settledBlocker() {
+  const el = page.locator('[data-testid="blocker"]');
+  // Patient on purpose. This suite is meant to run against a production build,
+  // where the chart and the periods arrive in a few hundred milliseconds; a dev
+  // server compiling a route on first hit can take several seconds, and a check
+  // that gives up first reports the load as the answer.
+  for (let i = 0; i < 100; i++) {
+    if ((await el.count()) === 0) return "";
+    const text = (await el.innerText().catch(() => "")).trim();
+    // Both of these are what the grid says while it is still loading: the chart
+    // it resolves account codes against, and the periods it checks the date
+    // against. Reading either one and reporting it is how a suite turns a load
+    // into a defect.
+    if (text && !/needs an account|no accounting period covering/.test(text)) return text;
+    await page.waitForTimeout(120);
+  }
+  return (await el.innerText().catch(() => "")).trim();
+}
+
+async function go(url) {
+  try {
+    return await page.goto(url, { waitUntil: "domcontentloaded" });
+  } catch (e) {
+    if (!/ERR_ABORTED/.test(String(e))) throw e;
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    return await page.goto(url, { waitUntil: "domcontentloaded" });
+  }
+}
+
+async function fill(sel, value) {
+  const loc = typeof sel === "string" ? page.locator(sel).first() : sel;
+  await loc.focus();
+  await loc.evaluate((el, v) => {
+    const proto = el instanceof window.HTMLTextAreaElement
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+  // And then leave the cell, because that is what a person does and because
+  // several controls here commit on blur rather than on every keystroke — the
+  // amount cells evaluate their arithmetic there, and a minus typed in Debit
+  // moves itself to Credit there. Filling without leaving tests half of it.
+  await loc.blur();
+}
+
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 const page = await ctx.newPage();
@@ -25,12 +129,12 @@ try {
   console.log("\nSIGN UP AND ONBOARD");
   // The real onboarding wizard, not a shortcut — it is the only path that
   // creates the org, the user and the first entity together.
-  await page.goto(`${B}/onboarding`, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector('input[placeholder="Ahmed Al Marri"]', { timeout: 20000 });
-  await page.fill('input[placeholder="Ahmed Al Marri"]', "Grid Tester");
-  await page.fill("input[type=email]", email);
-  await page.fill("input[type=password]", "test-password-123");
-  await page.fill('input[placeholder="Marri Trading LLC"]', "Grid Test LLC");
+  await go(`${B}/onboarding`);
+  await hydrated('input[placeholder="Ahmed Al Marri"]');
+  await fill('input[placeholder="Ahmed Al Marri"]', "Grid Tester");
+  await fill("input[type=email]", email);
+  await fill("input[type=password]", "test-password-123");
+  await fill('input[placeholder="Marri Trading LLC"]', "Grid Test LLC");
 
   const advance = async () => {
     for (const [ph, val] of [
@@ -38,19 +142,40 @@ try {
       ["100 1234 5678 9003", "100000000000003"],
     ]) {
       const f = page.locator(`input[placeholder="${ph}"]`).first();
-      if ((await f.count()) && !(await f.inputValue())) await f.fill(val);
+      if ((await f.count()) && !(await f.inputValue())) await fill(f, val);
     }
+    // The last step's button says "Create workspace" and navigates. Both are
+    // checked for existence before being clicked: clicking a button that is not
+    // there waits thirty seconds and then reports a timeout, which says nothing
+    // about which step the wizard was actually on.
     const cont = page.locator('button:has-text("Continue")').first();
-    if ((await cont.count()) && (await cont.isEnabled())) await cont.click();
-    else await page.locator('button:has-text("Create workspace")').first().click();
-    await page.waitForTimeout(900);
+    if ((await cont.count()) && (await cont.isEnabled())) {
+      await cont.click();
+      await page.waitForTimeout(700);
+      return true;
+    }
+    const create = page.locator('button:has-text("Create workspace")').first();
+    if ((await create.count()) && (await create.isEnabled())) {
+      await create.click();
+      await page.waitForURL(/\/dashboard/, { timeout: 30000 });
+      return true;
+    }
+    return false;
   };
-  for (let i = 0; i < 8 && !/\/dashboard/.test(page.url()); i++) await advance();
+  for (let i = 0; i < 8 && !/\/dashboard/.test(page.url()); i++) {
+    if (!(await advance())) break;
+  }
   await page.waitForURL(/\/dashboard/, { timeout: 25000 });
+  // The dashboard does its own client-side work on arrival, and a goto issued
+  // into the middle of that is aborted by it. Waiting for the page to settle is
+  // not a sleep for luck: it is waiting for the navigation that has already
+  // started to finish before starting another.
+  await page.waitForLoadState("domcontentloaded");
+  await hydrated("body");
   ok("registered and onboarded through the real wizard");
 
   console.log("\nOPEN THE BOOKS");
-  await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting`);
   await page.waitForSelector("text=The books are not open yet", { timeout: 20000 });
   ok("empty state explains what opening the books does");
   await page.click('button:has-text("Open the books")');
@@ -61,7 +186,7 @@ try {
   ok("books opened, overview shows the trial balance");
 
   console.log("\nCHART OF ACCOUNTS");
-  await page.goto(`${B}/accounting/accounts`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/accounts`);
   await page.waitForSelector("table", { timeout: 15000 });
   const rowCount = await page.locator("table tbody tr").count();
   check("chart is populated", rowCount > 50, `${rowCount} accounts`);
@@ -70,13 +195,13 @@ try {
   const controlChip = await page.locator('.sw-chip:has-text("control")').count();
   check("control accounts are marked", controlChip > 0, `${controlChip} marked`);
 
-  await page.fill("#acct-search", "receiv");
+  await fill("#acct-search", "receiv");
   await page.waitForTimeout(200);
   const filtered = await page.locator("table tbody tr").count();
   check("one field searches both code and name", filtered > 0 && filtered < rowCount, `${filtered} of ${rowCount}`);
 
   console.log("\nJOURNAL ENTRY GRID");
-  await page.goto(`${B}/accounting/journals/new`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/journals/new`);
   await page.waitForSelector('[data-testid="post-entry"]', { timeout: 15000 });
 
   let blocker = await page.locator('[data-testid="blocker"]').innerText();
@@ -85,8 +210,8 @@ try {
   check("blocked Post is aria-disabled, not silently dead", ariaDisabled === "true");
 
   // Line 1: debit cash. Typed as arithmetic to prove the expression parser.
-  await page.locator('input[aria-label="Line 1 account"]').fill("1010");
-  await page.locator('input[aria-label="Line 1 debit"]').fill("2000+500");
+  await fill(page.locator('input[aria-label="Line 1 account"]'), "1010");
+  await fill(page.locator('input[aria-label="Line 1 debit"]'), "2000+500");
   await page.locator('input[aria-label="Line 1 debit"]').blur();
   await page.waitForTimeout(150);
   const debit1 = await page.locator('input[aria-label="Line 1 debit"]').inputValue();
@@ -103,18 +228,28 @@ try {
   check("next empty line offers the balancing figure", suggestion === "2500.00", String(suggestion));
 
   // Line 2: a minus typed into Debit should move itself to Credit.
-  await page.locator('input[aria-label="Line 2 account"]').fill("3000");
-  await page.locator('input[aria-label="Line 2 debit"]').fill("-2500");
+  await fill(page.locator('input[aria-label="Line 2 account"]'), "3000");
+  await fill(page.locator('input[aria-label="Line 2 debit"]'), "-2500");
   await page.locator('input[aria-label="Line 2 debit"]').blur();
   await page.waitForTimeout(150);
   const l2debit = await page.locator('input[aria-label="Line 2 debit"]').inputValue();
   const l2credit = await page.locator('input[aria-label="Line 2 credit"]').inputValue();
   check("a minus in Debit moves itself to Credit", l2debit === "" && l2credit === "2500.00", `debit:"${l2debit}" credit:"${l2credit}"`);
 
-  const noBlocker = await page.locator('[data-testid="blocker"]').count();
-  check("balanced entry clears the blocker", noBlocker === 0);
+  // The grid resolves an account code against the chart it has loaded, so the
+  // blocker clears a beat after the cell is left rather than in the same tick.
+  // Waiting for it is what a person does; sampling once at a fixed delay is how
+  // a suite reports a race as a defect.
+  await page.waitForSelector("text=ready to post", { timeout: 5000 }).catch(() => {});
+  const gridBlocker = await page.locator('[data-testid="blocker"]').innerText().catch(() => "");
+  // Not just gone — replaced by the sentence that says it is ready. A blocker
+  // that disappears while the button stays dead is the failure this pair of
+  // checks exists to tell apart.
+  const readyText = await page.locator("text=ready to post").count();
+  check("balanced entry clears the blocker", gridBlocker === "" && readyText > 0,
+    gridBlocker ? `still blocked: ${gridBlocker}` : "no 'ready to post' line");
 
-  await page.fill("#je-memo", "Owner capital introduced");
+  await fill("#je-memo", "Owner capital introduced");
   await page.click('[data-testid="post-entry"]');
   await page.waitForURL(/\/accounting\/journals\?posted=/, { timeout: 20000 });
   ok("entry posted", new URL(page.url()).search);
@@ -127,13 +262,13 @@ try {
   const expandedText = await page.locator("table").innerText();
   check("expanding shows both sides of the entry", /1010/.test(expandedText) && /3000/.test(expandedText));
 
-  await page.goto(`${B}/accounting/accounts/1010`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/accounts/1010`);
   await page.waitForSelector('[data-testid="gl-closing"]', { timeout: 15000 });
   const closing = await page.locator('[data-testid="gl-closing"]').innerText();
   check("drill-down running balance is right", closing.trim() === "2,500.00", closing);
 
   console.log("\nTRIAL BALANCE");
-  await page.goto(`${B}/accounting/trial-balance`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/trial-balance`);
   await page.waitForSelector('[data-testid="tb-debit"]', { timeout: 15000 });
   const tbD = (await page.locator('[data-testid="tb-debit"]').innerText()).trim();
   const tbC = (await page.locator('[data-testid="tb-credit"]').innerText()).trim();
@@ -142,7 +277,7 @@ try {
   check("no out-of-balance row when it ties", outOfBalance === 0);
 
   console.log("\nPERIOD CLOSE");
-  await page.goto(`${B}/accounting/periods`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/periods`);
   await page.waitForSelector("table", { timeout: 15000 });
   const periodRows = await page.locator("table tbody tr").count();
   check("a fiscal year of periods exists", periodRows === 13, `${periodRows} periods (12 + adjustment)`);
@@ -154,28 +289,26 @@ try {
   ok("period hard-closes");
 
   // A closed period must refuse a posting — from the UI, before the request.
-  await page.goto(`${B}/accounting/journals/new`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/journals/new`);
   await page.waitForSelector("#je-date", { timeout: 15000 });
-  await page.fill("#je-date", "2026-01-20");
-  await page.locator('input[aria-label="Line 1 account"]').fill("1010");
-  await page.locator('input[aria-label="Line 1 debit"]').fill("100");
-  await page.locator('input[aria-label="Line 2 account"]').fill("3000");
-  await page.locator('input[aria-label="Line 2 credit"]').fill("100");
+  await fill("#je-date", "2026-01-20");
+  await fill(page.locator('input[aria-label="Line 1 account"]'), "1010");
+  await fill(page.locator('input[aria-label="Line 1 debit"]'), "100");
+  await fill(page.locator('input[aria-label="Line 2 account"]'), "3000");
+  await fill(page.locator('input[aria-label="Line 2 credit"]'), "100");
   await page.locator('input[aria-label="Line 2 credit"]').blur();
-  await page.waitForTimeout(200);
-  blocker = await page.locator('[data-testid="blocker"]').innerText();
+  blocker = await settledBlocker();
   check("a closed period blocks posting with the reason", /hard closed/i.test(blocker), blocker);
 
   // A control account must be refused too.
-  await page.fill("#je-date", "2026-02-10");
-  await page.locator('input[aria-label="Line 1 account"]').fill("1100");
+  await fill("#je-date", "2026-02-10");
+  await fill(page.locator('input[aria-label="Line 1 account"]'), "1100");
   await page.locator('input[aria-label="Line 1 account"]').blur();
-  await page.waitForTimeout(200);
-  blocker = await page.locator('[data-testid="blocker"]').innerText();
+  blocker = await settledBlocker();
   check("a control account is refused with an explanation", /control account/i.test(blocker), blocker);
 
   console.log("\nSPREADSHEET PASTE AND ACCESSIBILITY");
-  await page.goto(`${B}/accounting/journals/new`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/journals/new`);
   await page.waitForSelector('[data-testid="post-entry"]', { timeout: 15000 });
 
   // The live region must exist before it has anything to say — a role="status"
@@ -224,8 +357,14 @@ try {
   check("a pasted block that balances shows as balanced", totalD.trim() === "2,000.00" && totalC.trim() === "2,000.00",
     `dr ${totalD.trim()} / cr ${totalC.trim()}`);
 
-  // The live region should have caught up by now and speak a sentence.
-  await page.waitForTimeout(900);
+  // The live region is debounced on purpose — a screen reader announcing every
+  // keystroke is unusable — so this waits for it to catch up rather than
+  // sampling at a delay somebody will have to lengthen later.
+  await page.waitForFunction(
+    () => /Balanced at/.test(document.querySelector('[role="status"][aria-live="polite"]')?.textContent ?? ""),
+    undefined,
+    { timeout: 8000 },
+  ).catch(() => {});
   const spoken = await page.locator('[role="status"][aria-live="polite"]').innerText();
   check("the live region speaks a sentence, not a bare number", /Balanced at 2,000\.00/.test(spoken), spoken);
 
@@ -250,7 +389,7 @@ try {
     ["/accounting/recurring", "Recurring"],
     ["/accounting/dimensions", "Cost centre"],
   ]) {
-    await page.goto(`${B}${path}`, { waitUntil: "domcontentloaded" });
+    await go(`${B}${path}`);
     await page.waitForSelector("h1", { timeout: 20000 });
     const heading = await page.locator("h1").first().innerText();
     const crashed = await page.locator("text=Application error").count();
@@ -258,7 +397,7 @@ try {
   }
 
   // The statements screen is the one that has to prove an arithmetic claim.
-  await page.goto(`${B}/accounting/statements`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/statements`);
   await page.waitForSelector('[data-testid="net-profit"]', { timeout: 20000 });
   const netProfit = (await page.locator('[data-testid="net-profit"]').innerText()).trim();
   const liabEq = (await page.locator('[data-testid="total-liab-eq"]').innerText()).trim();
@@ -273,13 +412,13 @@ try {
   check("and explains where this year's result sits", /earned so far this year/.test(bsNote), bsNote.slice(0, 70));
 
   // The VAT screen must show its reconciliation rather than assert it quietly.
-  await page.goto(`${B}/accounting/vat`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/vat`);
   await page.waitForSelector("text=Reconciliation to the ledger", { timeout: 20000 });
   const agrees = await page.locator('.sw-chip:has-text("agrees")').count();
   check("the VAT return shows it reconciles to both control accounts", agrees === 2, `${agrees} of 2 agree`);
 
   // Bank: the import parser is the part a user meets first.
-  await page.goto(`${B}/accounting/bank`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/bank`);
   await page.waitForSelector('[data-testid="import-statement"]', { timeout: 20000 });
   const importBtn = page.locator('[data-testid="import-statement"]');
   check("import is blocked until there is something to import",
@@ -288,17 +427,30 @@ try {
   // Every day in this file is 12 or under, so nothing in it says whether it is
   // day-first or month-first. Guessing would put every line in the wrong month
   // without a word, so it is refused — and the refusal has to point somewhere.
-  await page.fill('textarea[aria-label="Bank statement to import"]',
+  await fill('textarea[aria-label="Bank statement to import"]',
     "Date,Description,Reference,Amount,Balance\n05/02/2026,Opening transfer,FT900,1500.00,1500.00\n07/02/2026,Card fee,,-25.50,1474.50");
   await page.click('[data-testid="import-statement"]');
-  await page.waitForTimeout(1500);
+  // Wait for the refusal rather than sleeping for it. The page carries notes of
+  // its own — the reconciliation says "Nothing. Every line the bank reported is
+  // accounted for." whatever happens here — so a sample taken too early reads
+  // one of those and reports the refusal as missing.
+  // A NON-EMPTY alert. The page carries an empty live region for announcements,
+  // so waiting for the selector alone returns instantly and samples the screen
+  // before the refusal has arrived.
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('[role="alert"]')].some((e) => (e.textContent ?? "").trim().length > 0),
+    undefined,
+    { timeout: 20000 },
+  ).catch(() => {});
   const ambiguous = await page.locator('[role="alert"], .sw-error, .sw-note').allInnerTexts();
   check("an unreadable date order is refused rather than guessed",
-    ambiguous.some((t) => /date|order|import screen/i.test(t)),
-    (ambiguous[0] ?? "nothing said").slice(0, 90));
+    ambiguous.some((t) => /day-first|month-first|date order|import screen/i.test(t)),
+    // Say what WAS on screen, not just the first note on the page — the whole
+    // point of this check is which sentence the user got.
+    (ambiguous.find((t) => /refus|could|cannot/i.test(t)) ?? ambiguous[0] ?? "nothing said").slice(0, 120));
 
   // The same file with a day above 12 settles it, and imports.
-  await page.fill('textarea[aria-label="Bank statement to import"]',
+  await fill('textarea[aria-label="Bank statement to import"]',
     "Date,Description,Reference,Amount,Balance\n05/02/2026,Opening transfer,FT900,1500.00,1500.00\n27/02/2026,Card fee,,-25.50,1474.50");
   await page.click('[data-testid="import-statement"]');
   await page.waitForSelector('[data-testid="bank-result"]', { timeout: 20000 });
@@ -310,7 +462,7 @@ try {
 
   // Fixed assets: the form must refuse impossible estimates before the server
   // has to, and say which one is wrong.
-  await page.goto(`${B}/accounting/assets`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/assets`);
   await page.waitForSelector('[data-testid="run-depreciation"]', { timeout: 20000 });
   await page.click('button:has-text("Add asset")');
   await page.waitForSelector('[data-testid="save-asset"]', { timeout: 10000 });
@@ -318,15 +470,15 @@ try {
   check("the asset form says what is missing", /give the asset a code/i.test(assetBlock), assetBlock);
 
   const field = (label) => page.locator(`label:has-text("${label}")`).locator("input, select").first();
-  await field("Code").fill("FA-UI-1");
-  await field("Name").fill("Office fit-out");
-  await field("Cost").fill("120000");
-  await field("Residual value").fill("500000");
+  await fill(field("Code"), "FA-UI-1");
+  await fill(field("Name"), "Office fit-out");
+  await fill(field("Cost"), "120000");
+  await fill(field("Residual value"), "500000");
   await page.waitForTimeout(200);
   assetBlock = await page.locator('[data-testid="asset-blocker"]').innerText();
   check("a residual above cost is caught in the form", /cannot exceed the cost/i.test(assetBlock), assetBlock);
 
-  await field("Residual value").fill("0");
+  await fill(field("Residual value"), "0");
   await page.waitForTimeout(200);
   const noBlock = await page.locator('[data-testid="asset-blocker"]').count();
   check("and clears once the estimate is possible", noBlock === 0);
@@ -342,7 +494,7 @@ try {
 
   // Year end: the screen has to show what closing would do, and refuse while
   // the year is still trading, before anyone can press the button.
-  await page.goto(`${B}/accounting/year-end`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/year-end`);
   await page.waitForSelector('[data-testid="close-year"]', { timeout: 20000 });
   const closeBtn = page.locator('[data-testid="close-year"]');
   check("closing is blocked while the year is still trading",
@@ -354,7 +506,7 @@ try {
   check("locking periods is opt-in, not the default", (await lockBox.isChecked()) === false);
 
   console.log("\nNAVIGATION");
-  await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting`);
   await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 20000 });
   const groups = await page.locator("nav[aria-label='Accounting'] .sw-tab").allInnerTexts();
   check("the nav is grouped rather than one long row", groups.length >= 4 && groups.length <= 8,
@@ -372,12 +524,12 @@ try {
     for (const s of subs) {
       if (seen.has(s.href)) continue;
       seen.add(s.href);
-      const res = await page.goto(`${B}${s.href}`, { waitUntil: "domcontentloaded" });
+      const res = await go(`${B}${s.href}`);
       const crashed = await page.locator("text=Application error").count();
       if (!res || res.status() >= 400 || crashed > 0) broken.push(`${s.label} (${s.href})`);
       await page.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
     }
-    await page.goto(`${B}/accounting`, { waitUntil: "domcontentloaded" });
+    await go(`${B}/accounting`);
     await page.waitForSelector("nav[aria-label='Accounting']", { timeout: 15000 });
   }
   check("every nav destination resolves", broken.length === 0, broken.length ? broken.join("; ") : `${seen.size} screens reached`);
@@ -411,7 +563,7 @@ try {
     ["/accounting/landed-cost", /landed cost/i],
   ];
   for (const [href, heading] of screens) {
-    const res = await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    const res = await go(`${B}${href}`);
     await page.waitForTimeout(700);
     const crashed = await page.locator("text=Application error").count();
     const h1 = await page.locator("h1").first().innerText().catch(() => "");
@@ -424,7 +576,7 @@ try {
 
   // Every one of them has to be operable without a mouse. A screen whose only
   // control cannot be tabbed to is a screen a screen-reader user cannot use.
-  await page.goto(`${B}/accounting/revenue`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/revenue`);
   await page.waitForSelector("h1", { timeout: 15000 });
   await page.keyboard.press("Tab");
   const focused = await page.evaluate(() => {
@@ -446,7 +598,7 @@ try {
   // all of them.
   const unnamed = [];
   for (const href of [...seen]) {
-    await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    await go(`${B}${href}`);
     await page.waitForTimeout(500);
     const bad = await page.evaluate(() => {
       const named = (el) => {
@@ -482,7 +634,7 @@ try {
   const misaligned = [];
   const minuses = [];
   for (const href of [...seen]) {
-    await page.goto(`${B}${href}`, { waitUntil: "domcontentloaded" });
+    await go(`${B}${href}`);
     await page.waitForTimeout(400);
     const found = await page.evaluate(() => {
       const cells = [...document.querySelectorAll("td.sw-num, th.sw-num")];
@@ -510,7 +662,7 @@ try {
 
   console.log("\nRESPONSIVE AND CONSOLE");
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`${B}/accounting/trial-balance`, { waitUntil: "domcontentloaded" });
+  await go(`${B}/accounting/trial-balance`);
   await page.waitForSelector("table", { timeout: 15000 });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check("no horizontal page scroll on a phone", overflow <= 1, `${overflow}px overflow`);
