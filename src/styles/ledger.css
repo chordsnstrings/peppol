@@ -487,3 +487,58 @@
 }
 .sw-check:focus-visible { outline: 2px solid var(--sw-accent); outline-offset: 2px; }
 .sw-check:disabled { cursor: not-allowed; opacity: 0.45; }
+
+/* Asking a question in the page, rather than through window.prompt.
+ *
+ * The scrim darkens with the violet ink at low alpha, never neutral black —
+ * the same rule every shadow in this file follows, and for the same reason:
+ * a neutral grey over a warm ground reads as dirty rather than as dimmed.
+ */
+.sw-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(28 26 36 / 0.44);
+}
+.sw-ask {
+  width: min(30rem, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 1.25rem;
+  /* A dialog sits above the ground, so it keeps its edge and takes the
+     low-angle shadow — long and soft, as winter sun casts. */
+  box-shadow: 0 6px 24px rgb(28 26 36 / 0.18);
+}
+.sw-ask-title {
+  font-size: 1.0625rem;
+  line-height: 1.5rem;
+  font-weight: 600;
+  color: var(--sw-fg);
+}
+.sw-ask-detail { margin-top: 0.4rem; }
+.sw-ask-field { display: block; margin-top: 0.9rem; }
+.sw-ask-input {
+  margin-top: 0.3rem;
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+}
+.sw-ask-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
+}
+
+/* A destructive confirm. Falu red as a STATUS, which is the use --sw-neg is
+   allowed on chrome for — never as a value. */
+.sw-btn-danger {
+  border-color: var(--sw-neg);
+  background: var(--sw-neg);
+  color: var(--sw-accent-ink);
+}
+.sw-btn-danger:hover:not(:disabled) { filter: brightness(0.94); }
+.sw-btn-danger:focus-visible { outline: 2px solid var(--sw-fg); outline-offset: 2px; }

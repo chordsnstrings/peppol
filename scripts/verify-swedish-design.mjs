@@ -87,7 +87,20 @@ debitOnNumerals.length === 0
  * and .sw-chip-bad do; those are named explicitly rather than pattern-matched,
  * because an exception nobody wrote down becomes the rule.
  */
-const STATUS_USE = [".sw-error", ".sw-chip-bad", ".sw-chip-warn", ".sw-chip-ok", ".sw-cell-invalid", ".sw-warn"];
+/*
+ * The named status uses. --sw-neg carries two meanings and only one of them is
+ * a value: as a STATUS — an error, a refusal, a failed check, the destructive
+ * one of two buttons — it may appear on chrome. Every entry here is listed
+ * explicitly rather than pattern-matched, because an exception nobody wrote
+ * down becomes the rule.
+ *
+ * In each of these, colour is never the only signal: an error has its words, a
+ * failed chip has its label, and the destructive button says what it will do.
+ */
+const STATUS_USE = [
+  ".sw-error", ".sw-chip-bad", ".sw-chip-warn", ".sw-chip-ok",
+  ".sw-cell-invalid", ".sw-warn", ".sw-btn-danger",
+];
 const valueOnChrome = [...css.matchAll(/^([^{}\n]*)\{([^}]*)\}/gm)]
   // A block that DEFINES the token is not a block that uses it. The theme
   // blocks necessarily mention every token they set, and treating that as a

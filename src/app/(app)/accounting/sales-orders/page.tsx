@@ -3,6 +3,7 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { parseAmount } from "@/lib/ledger/format";
 import { TAX_PROFILE_LIST } from "@/lib/domain/tax";
 
@@ -328,6 +329,7 @@ function RowActions({ order, busy, onSelect, act, onDone }: {
   act: <T,>(key: string, body: Record<string, unknown>) => Promise<T | null>;
   onDone: (m: string) => void;
 }) {
+  const ask = useAsk();
   const guard = { disabled: busy, "aria-disabled": busy || undefined } as const;
   return (
     <div className="flex flex-wrap gap-1">
@@ -356,7 +358,18 @@ function RowActions({ order, busy, onSelect, act, onDone }: {
           <button
             type="button" className="sw-btn sw-btn-sm" {...guard}
             onClick={async () => {
-              const reason = window.prompt(`Why did ${order.number} not go ahead?`);
+              const reason = await ask({
+                title: `Why did ${order.number} not go ahead?`,
+                detail:
+                  "The document stays exactly as the customer saw it. Nothing is posted — a quotation the " +
+                  "customer turned down never reached the books.",
+                reason: {
+                  label: "Reason",
+                  placeholder: "Went to another supplier on price",
+                  hint: "This is what the next person sees when they ask why this one did not close.",
+                },
+                confirmLabel: "Mark declined",
+              });
               if (reason === null) return;
               const r = await act<{ order: { number: string } }>(`${order.id}:decline`, { action: "decline", orderId: order.id, reason });
               if (r) onDone(`${r.order.number} marked declined.`);
@@ -384,7 +397,19 @@ function RowActions({ order, busy, onSelect, act, onDone }: {
         <button
           type="button" className="sw-btn sw-btn-sm" {...guard}
           onClick={async () => {
-            const reason = window.prompt(`Why is ${order.number} being withdrawn?`);
+            const reason = await ask({
+              title: `Why is ${order.number} being withdrawn?`,
+              detail:
+                "Cancelling stops the document going any further. Anything already invoiced from it stays " +
+                "invoiced — the invoice is its own document and the customer is holding it.",
+              reason: {
+                label: "Reason",
+                placeholder: "Customer withdrew the order",
+                hint: "Whoever finds this document later has only what is written here.",
+              },
+              confirmLabel: "Cancel the document",
+              destructive: true,
+            });
             if (reason === null) return;
             const r = await act<{ order: { number: string } }>(`${order.id}:cancel`, { action: "cancel", orderId: order.id, reason });
             if (r) onDone(`${r.order.number} cancelled.`);
