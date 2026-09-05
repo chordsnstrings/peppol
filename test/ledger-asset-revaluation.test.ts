@@ -7,6 +7,7 @@ import {
 import { addAsset, runDepreciation } from "@/lib/server/ledger/assets";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
+import { profitAndLoss } from "@/lib/server/ledger/statements";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -225,6 +226,57 @@ d("revaluing and impairing an asset", () => {
     });
     await expect(releaseSurplus({ ...S, code: "FA-2", on: "2026-10-31" }))
       .rejects.toThrow(/carries no revaluation surplus/i);
+  });
+
+  /* -------------------------------- other comprehensive income (IAS 1) */
+
+  it("reports a revaluation as other comprehensive income, and a release as neither", async () => {
+    // October: FA-1 was revalued up to 1,500,000 and then 50,000 of surplus was
+    // released to retained earnings, both in the tests above. The uplift is
+    // income the profit and loss never saw; the release is a transfer within
+    // equity that IAS 16.41 says is not made through profit or loss — and it is
+    // not made through OCI either. Counting it would report the same uplift as
+    // income twice: once when it arose and again when it was realised.
+    const pl = await profitAndLoss({ ...S, from: "2026-10-01", to: "2026-10-31" });
+
+    const surplus = await db.journalLine.aggregate({
+      where: {
+        orgId: ORG,
+        account: { code: SURPLUS_ACCOUNT, entityId: ENT },
+        entry: {
+          entityId: ENT, status: { in: ["posted", "reversed"] },
+          entryDate: { gte: new Date("2026-10-01"), lte: new Date("2026-10-31") },
+          sourceType: "ASSET_REVALUATION",
+        },
+      },
+      _sum: { functionalAmountMinor: true },
+    });
+    // Credited to equity, so negative in the ledger and positive as income.
+    const uplift = -(surplus._sum.functionalAmountMinor ?? 0n);
+    expect(uplift).toBeGreaterThan(0n);
+
+    const oci = pl.otherComprehensiveIncome;
+    expect(BigInt(oci.totalMinor)).toBe(uplift);
+    expect(oci.lines.map((l) => l.code)).toEqual([SURPLUS_ACCOUNT]);
+    // The 50,000 release is in the movement on 3300 and out of this figure.
+    expect(BigInt(oci.totalMinor)).not.toBe(uplift - 50_000n);
+
+    // IAS 1.82A(a): a revaluation surplus goes to retained earnings on
+    // realisation, never back through profit or loss.
+    expect(oci.neverReclassifiedMinor).toBe(oci.totalMinor);
+
+    // IAS 1.81A(c): the total.
+    expect(BigInt(pl.totalComprehensiveIncomeMinor))
+      .toBe(BigInt(pl.netProfitMinor) + BigInt(oci.totalMinor));
+  });
+
+  it("reports nil other comprehensive income in a month where equity did not move", async () => {
+    const pl = await profitAndLoss({ ...S, from: "2026-01-01", to: "2026-01-31" });
+    expect(pl.otherComprehensiveIncome.totalMinor).toBe("0");
+    expect(pl.otherComprehensiveIncome.lines).toEqual([]);
+    // Nil is a measured nil, not an absent section: total comprehensive income
+    // still equals the profit, and the reader can see that it does.
+    expect(pl.totalComprehensiveIncomeMinor).toBe(pl.netProfitMinor);
   });
 
   /* ----------------------------------------------------- the register */

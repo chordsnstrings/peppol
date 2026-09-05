@@ -11,6 +11,8 @@ interface PL {
   from: string; to: string; currency: string;
   revenue: Section; costOfSales: Section; grossProfitMinor: string;
   expenses: Section; netProfitMinor: string; grossMarginBps: number | null;
+  otherComprehensiveIncome: Section & { neverReclassifiedMinor: string };
+  totalComprehensiveIncomeMinor: string;
 }
 interface BS {
   asOf: string; currency: string;
@@ -72,13 +74,36 @@ export default function StatementsPage() {
                 <Subtotal label="Gross profit" minor={pl.grossProfitMinor} currency={pl.currency}
                   note={pl.grossMarginBps === null ? undefined : `${(pl.grossMarginBps / 100).toFixed(2)}% margin`} />
                 <Rows section={pl.expenses} currency={pl.currency} />
+                <tbody>
+                  <tr>
+                    <th scope="row" colSpan={2} style={{ textAlign: "end", fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                      {BigInt(pl.netProfitMinor) >= 0n ? "Net profit" : "Net loss"}
+                    </th>
+                    <td className="sw-num" data-testid="net-profit"
+                      style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                      <Figure minor={pl.netProfitMinor} currency={pl.currency} zero="zero" />
+                    </td>
+                  </tr>
+                </tbody>
+                {/*
+                  * IAS 1.7 and 1.81A: income and expense recognised outside
+                  * profit or loss, and the total of both.
+                  *
+                  * Shown even at nil, because a nil that was measured and a
+                  * section that does not exist are different statements — and
+                  * this ledger produces a real OCI item, the revaluation
+                  * surplus, which used to appear in the statement of changes in
+                  * equity with no primary statement explaining where it came
+                  * from.
+                  */}
+                <Rows section={pl.otherComprehensiveIncome} currency={pl.currency} />
                 <tfoot>
                   <tr>
                     <th scope="row" colSpan={2} style={{ textAlign: "end" }}>
-                      {BigInt(pl.netProfitMinor) >= 0n ? "Net profit" : "Net loss"}
+                      Total comprehensive income
                     </th>
-                    <td className="sw-num" data-testid="net-profit">
-                      <Figure minor={pl.netProfitMinor} currency={pl.currency} zero="zero" />
+                    <td className="sw-num" data-testid="total-comprehensive-income">
+                      <Figure minor={pl.totalComprehensiveIncomeMinor} currency={pl.currency} zero="zero" />
                     </td>
                   </tr>
                 </tfoot>

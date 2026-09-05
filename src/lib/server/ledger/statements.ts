@@ -45,6 +45,21 @@ export interface ProfitAndLoss {
   netProfitMinor: string;
   /** Gross profit over revenue, in basis points — no floats in a ledger. */
   grossMarginBps: number | null;
+  /**
+   * IAS 1.7: income and expense not recognised in profit or loss.
+   *
+   * There was no such section, so there was no total comprehensive income
+   * figure anywhere in the product — and this ledger produces a genuine OCI
+   * item, the revaluation surplus under IAS 16.39-.40, which is credited
+   * straight to equity and never touches the profit and loss. Without this the
+   * statement of changes in equity had a movement no primary statement
+   * explained, and IAS 1.81A's requirement for a total was simply not met.
+   */
+  otherComprehensiveIncome: StatementSection & {
+    /** Items that will not be reclassified to profit or loss (IAS 1.82A(a)). */
+    neverReclassifiedMinor: string;
+  };
+  totalComprehensiveIncomeMinor: string;
 }
 
 export interface BalanceSheet {
@@ -169,6 +184,91 @@ function section(key: string, label: string, rows: Bal[], naturalSide: "debit" |
   return { key, label, lines, totalMinor: total.toString() };
 }
 
+/**
+ * What went to equity in the period without passing through profit or loss.
+ *
+ * Two things make this more than a movement on an equity account.
+ *
+ * FIRST, not every movement on the revaluation surplus is other comprehensive
+ * income. `releaseSurplus` moves realised surplus from 3300 to 3900 as an
+ * asset is used or sold, and IAS 16.41 is explicit that the transfer is not
+ * made through profit or loss — it is not made through OCI either. Counting it
+ * would report income twice: once when the asset was revalued and again when
+ * the surplus was released, for the same uplift. So it is excluded by the
+ * source the transfer posts under rather than by its sign, which would be a
+ * guess.
+ *
+ * SECOND, the section is presented on the same footing as revenue: a credit is
+ * income, so a revaluation increase reads positive and a decrease negative,
+ * matching how every other income figure on this statement reads.
+ *
+ * Every item this ledger can produce is one that will NEVER be reclassified to
+ * profit or loss — IAS 1.82A(a) — because a revaluation surplus goes to
+ * retained earnings on realisation and not back through the income statement.
+ * The split is stated rather than assumed, so an entity that later acquires a
+ * cash-flow hedge or a foreign operation has somewhere for it to go.
+ */
+async function otherComprehensiveIncome(opts: {
+  orgId: string;
+  entityId: string;
+  from: Date;
+  to: Date;
+  rows: Bal[];
+}): Promise<ProfitAndLoss["otherComprehensiveIncome"]> {
+  const ociRows = opts.rows.filter((r) => r.type === "EQUITY" && OCI_SUBTYPES.has(r.subtype ?? ""));
+
+  if (ociRows.length === 0 || ociRows.every((r) => r.balance === 0n)) {
+    const empty = section("other_comprehensive_income", "Other comprehensive income", ociRows, "credit");
+    return { ...empty, neverReclassifiedMinor: empty.totalMinor };
+  }
+
+  // The part of the movement that is a transfer within equity rather than
+  // income. Read from the journal rather than inferred, because a release and a
+  // downward revaluation are the same sign on the same account.
+  const transfers = await prisma.journalLine.groupBy({
+    by: ["accountId"],
+    where: {
+      orgId: opts.orgId,
+      account: { code: { in: ociRows.map((r) => r.code) }, entityId: opts.entityId },
+      entry: {
+        entityId: opts.entityId,
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: opts.from, lte: opts.to },
+        sourceType: { in: [...WITHIN_EQUITY_SOURCE_TYPES] },
+      },
+    },
+    _sum: { functionalAmountMinor: true },
+  });
+
+  const accounts = transfers.length
+    ? await prisma.account.findMany({
+        where: { id: { in: transfers.map((t) => t.accountId) } },
+        select: { id: true, code: true },
+      })
+    : [];
+  const codeOf = new Map(accounts.map((a) => [a.id, a.code]));
+  const transferBy = new Map<string, bigint>();
+  for (const t of transfers) {
+    const code = codeOf.get(t.accountId);
+    if (code) transferBy.set(code, (transferBy.get(code) ?? 0n) + (t._sum.functionalAmountMinor ?? 0n));
+  }
+
+  const adjusted = ociRows.map((r) => ({ ...r, balance: r.balance - (transferBy.get(r.code) ?? 0n) }));
+  const built = section("other_comprehensive_income", "Other comprehensive income", adjusted, "credit");
+  return { ...built, neverReclassifiedMinor: built.totalMinor };
+}
+
+/** Equity accounts whose movement is other comprehensive income, by subtype. */
+const OCI_SUBTYPES = new Set(["REVALUATION_SURPLUS"]);
+
+/**
+ * Sources that move an OCI reserve WITHIN equity rather than through it.
+ *
+ * `releaseSurplus` is the one this ledger has: realised surplus moving from
+ * 3300 to 3900 as an asset is depreciated or sold.
+ */
+const WITHIN_EQUITY_SOURCE_TYPES = ["SURPLUS_TRANSFER"] as const;
+
 /** A ratio in basis points, rounded to the nearest and away from zero. */
 function roundedBps(numerator: bigint, denominator: bigint): bigint {
   const n = numerator * 10_000n;
@@ -245,10 +345,16 @@ export async function profitAndLoss(opts: {
   const gross = rev - BigInt(cos.totalMinor);
   const net = gross - BigInt(opex.totalMinor);
 
+  const oci = await otherComprehensiveIncome({
+    orgId: opts.orgId, entityId: opts.entityId, from, to, rows,
+  });
+
   return {
     from: opts.from, to: opts.to, currency,
     revenue, costOfSales: cos, grossProfitMinor: gross.toString(),
     expenses: opex, netProfitMinor: net.toString(),
+    otherComprehensiveIncome: oci,
+    totalComprehensiveIncomeMinor: (net + BigInt(oci.totalMinor)).toString(),
     // Basis points rather than a float, because a margin held as a double
     // disagrees with itself at the fourth decimal place. Rounded to the
     // nearest, away from zero: integer division truncates towards zero, which
