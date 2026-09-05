@@ -59,19 +59,37 @@ function lastEnded(choices: Choice[], today: string): Choice {
 
 export default function VatReturnPage() {
   const entityId = useEntityId();
-  const year = new Date().getUTCFullYear();
-  const periods = React.useMemo(() => periodsFor(year), [year]);
-  const [sel, setSel] = React.useState(() => {
-    const q = Math.floor(new Date().getUTCMonth() / 3);
-    return periodsFor(new Date().getUTCFullYear())[q].label;
-  });
-  const period = periods.find((p) => p.label === sel) ?? periods[0];
+  const today = new Date().toISOString().slice(0, 10);
+  const year = Number(today.slice(0, 4));
+
+  // The registration first, because it decides what the picker may offer. A
+  // year either side, so the period that straddles a year end is on the list.
+  const { data: periodData } = useLedgerQuery<Periods>(
+    entityId
+      ? `/api/ledger/tax-periods?entityId=${entityId}&regime=VAT&from=${year - 1}-01-01&to=${year}-12-31`
+      : null,
+  );
+  const registration = periodData?.registration ?? null;
+  const choices: Choice[] = React.useMemo(() => {
+    if (registration && periodData?.periods.length) {
+      return periodData.periods.map((p) => ({ label: p.label, from: p.from, to: p.to }));
+    }
+    return calendarPeriods(year);
+  }, [registration, periodData, year]);
+
+  // Null until somebody picks, so the default follows whichever list is in
+  // play rather than being frozen at the calendar quarter chosen on first
+  // render — the registration arrives a moment after the screen does.
+  const [sel, setSel] = React.useState<string | null>(null);
+  const period = choices.find((p) => p.label === sel) ?? lastEnded(choices, today);
 
   const { data, error, loading } = useLedgerQuery<Ret>(
     entityId ? `/api/ledger/vat?entityId=${entityId}&from=${period.from}&to=${period.to}` : null,
   );
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
+
+  const calendar = !registration;
 
   return (
     <>
@@ -81,13 +99,26 @@ export default function VatReturnPage() {
         actions={
           <label className="flex items-center gap-2">
             <span className="sw-label">Period</span>
-            <select className="sw-select" style={{ width: "9rem" }} value={sel} onChange={(e) => setSel(e.target.value)}>
-              <optgroup label="Quarters">
-                {periods.slice(0, 4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
-              </optgroup>
-              <optgroup label="Months">
-                {periods.slice(4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
-              </optgroup>
+            <select
+              className="sw-select"
+              style={{ width: "11rem" }}
+              value={period.label}
+              onChange={(e) => setSel(e.target.value)}
+            >
+              {calendar ? (
+                <>
+                  <optgroup label="Quarters">
+                    {choices.slice(0, 4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                  </optgroup>
+                  <optgroup label="Months">
+                    {choices.slice(4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                  </optgroup>
+                </>
+              ) : (
+                <optgroup label="Your tax periods">
+                  {choices.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                </optgroup>
+              )}
             </select>
           </label>
         }
@@ -102,8 +133,25 @@ export default function VatReturnPage() {
             <div key={i} className="sw-error mb-3" role="alert" data-testid="vat-warning">{w}</div>
           ))}
 
+          <TaxPeriodPanel period={data.taxPeriod} from={data.periodFrom} to={data.periodTo} />
+
           <div className="grid gap-4 lg:grid-cols-2">
-            <BoxTable title="VAT on sales and all other outputs" rows={data.sales} currency={data.currency} />
+            <BoxTable
+              title="VAT on sales and all other outputs"
+              rows={data.sales}
+              currency={data.currency}
+              note={
+                <>
+                  Box 1 is seven rows because the VAT 201 splits standard-rated supplies between the emirates —
+                  the tax collected is distributed between them on that basis, so the split decides where the
+                  money goes. Row 1x is not a box on the FTA&rsquo;s form: it is the supplies whose emirate this
+                  ledger does not hold, shown rather than spread across the other seven, and it has to be
+                  attributed before the return is filed. The emirate recorded is the one on the selling
+                  establishment&rsquo;s address at the moment the invoice posted, so a business that supplies
+                  from more than one emirate should check it rather than trust it.
+                </>
+              }
+            />
             <BoxTable title="VAT on expenses and all other inputs" rows={data.expenses} currency={data.currency} />
           </div>
 
@@ -165,7 +213,58 @@ export default function VatReturnPage() {
   );
 }
 
-function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; currency: string }) {
+/**
+ * Which tax period the figures are actually for.
+ *
+ * A return is filed for a tax period the FTA assigned, not for a span of dates
+ * somebody picked off a calendar. Where the registration is recorded this says
+ * which period, when it falls due and whether a filing has been recorded
+ * against it; where it is not, it says that too rather than letting the dates
+ * in the picker pass for a tax period.
+ */
+function TaxPeriodPanel({ period, from, to }: { period: TaxPeriod | null; from: string; to: string }) {
+  if (!period) {
+    return (
+      <Panel className="mb-4 p-4">
+        <div className="sw-label">Tax period</div>
+        <p className="sw-sub mt-1.5 max-w-[70ch]" data-testid="vat-no-registration">
+          No FTA tax period is recorded for this entity, so this return covers exactly the dates chosen above —
+          {" "}{from} to {to} — and the periods offered are calendar quarters and months. The Authority assigns a
+          tax period on registration and does not give everybody the same one: a registrant on the
+          February, May, August and November stagger has no calendar quarter at all. Record the registration and
+          the periods, the deadline and the reminders all come from it instead.
+        </p>
+      </Panel>
+    );
+  }
+  return (
+    <Panel className="mb-4 p-4">
+      <div className="sw-label">Tax period</div>
+      <div className="mt-3 grid gap-4 sm:grid-cols-3">
+        <Stat label="Period" value={<span data-testid="vat-period-label">{period.label}</span>} />
+        <Stat label="Due to the FTA" value={period.dueOn} />
+        <Stat
+          label="Filed"
+          value={
+            period.filedOn
+              ? <span className="sw-chip sw-chip-ok">{period.filedOn}</span>
+              : <span className="sw-chip sw-chip-warn">not recorded</span>
+          }
+        />
+      </div>
+      <p className="sw-sub mt-3 max-w-[70ch]">
+        {period.from} to {period.to}
+        {period.matchesRequest ? "" : " — the dates asked for were not this registration's period, so they were replaced by it"}
+        . The return is due on the 28th day following the end of the tax period (Article 64 of the Executive
+        Regulation).
+      </p>
+    </Panel>
+  );
+}
+
+function BoxTable({
+  title, rows, currency, note,
+}: { title: string; rows: Box[]; currency: string; note?: React.ReactNode }) {
   // The Adjustment column appears only where a box on this side of the form has
   // one. An empty fourth column on the sales table would read as "no
   // adjustments" when what it means is "not reported here".
@@ -218,6 +317,9 @@ function BoxTable({ title, rows, currency }: { title: string; rows: Box[]; curre
           asset adjustment under Articles 57 and 58 of the Executive Regulation. It has its own column so that it is
           never shown as tax on expenses nobody incurred. It is already inside the totals below.
         </p>
+      )}
+      {note && (
+        <p className="sw-sub border-t px-3 py-2" style={{ borderColor: "var(--sw-line)" }}>{note}</p>
       )}
     </Panel>
   );
