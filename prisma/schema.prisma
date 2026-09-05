@@ -744,6 +744,19 @@ model Employee {
   leftOn           DateTime?     @db.Date
   /// Unlimited contracts accrue gratuity differently from limited ones.
   contractType     String        @default("UNLIMITED")
+  /// ISO country code, where it is known. Recorded for the WPS file and for
+  /// context; it does NOT decide the pension scheme, because eligibility is a
+  /// legal fact about the person rather than something a passport field
+  /// settles — a GCC national may or may not be enrolled, and a UAE national
+  /// may be registered late.
+  nationality      String?
+  /// NONE | GPSSA | GCC_HOME_STATE
+  ///
+  /// This is the field that matters. Article 51 of Federal Decree-Law 33/2021
+  /// gives end-of-service gratuity to the *foreign* worker; a UAE national is
+  /// covered by the pension scheme under Federal Law 7/1999 instead, and
+  /// accruing both would provide for the same service twice.
+  pensionScheme    String        @default("NONE")
   basicMinor       BigInt
   housingMinor     BigInt        @default(0)
   transportMinor   BigInt        @default(0)
@@ -820,8 +833,16 @@ model Payslip {
   overtimeMinor   BigInt   @default(0)
   deductionsMinor BigInt   @default(0)
   netMinor        BigInt
-  /// Gratuity accrued for this month, charged to the provision.
+  /// Gratuity accrued for this month, charged to the provision. Nil for an
+  /// employee in a pension scheme: Article 51 gives the gratuity to the
+  /// foreign worker, and providing for both would cover the same service
+  /// twice.
   gratuityMinor   BigInt   @default(0)
+  /// Withheld from the employee and owed to the pension authority.
+  pensionEmployeeMinor BigInt @default(0)
+  /// The employer's own share, which is a cost of employment rather than a
+  /// deduction from pay.
+  pensionEmployerMinor BigInt @default(0)
   status          String   @default("draft") // draft | posted | paid
   entryId         String?
   createdAt       DateTime @default(now())

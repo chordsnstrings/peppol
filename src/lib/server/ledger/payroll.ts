@@ -31,6 +31,7 @@ const SALARY_EXPENSE = "6000";
 const EOSB_EXPENSE = "6050";
 const SALARY_PAYABLE = "2200";
 const EOSB_PROVISION = "2250";
+const PENSION_PAYABLE = "2230";
 const BANK = "1010";
 /**
  * Deductions are, overwhelmingly, recovery of a salary advance — Article 25 of
@@ -81,6 +82,127 @@ function decimal(minor: bigint): string {
   const abs = neg ? -minor : minor;
   const s = abs.toString().padStart(3, "0");
   return `${neg ? "-" : ""}${s.slice(0, -2)}.${s.slice(-2)}`;
+}
+
+/* --------------------------------------------------------- pension schemes */
+
+export type PensionScheme = "NONE" | "GPSSA" | "GCC_HOME_STATE";
+
+/**
+ * Who is provided for by a pension rather than by a gratuity.
+ *
+ * Article 51 of Federal Decree-Law 33/2021 gives end-of-service gratuity to the
+ * *foreign* worker. A UAE national in the private sector is covered instead by
+ * the pension and social security scheme under Federal Law 7/1999, and a GCC
+ * national by their own home state's scheme under the Insurance Protection
+ * Extension Programme. Accruing a gratuity as well as contributing to a pension
+ * provides for the same service twice; accruing neither of the contributions
+ * understates what it costs to employ them every month. This module used to do
+ * both.
+ *
+ * Membership is declared on the employee, never inferred from nationality.
+ * Eligibility is a legal fact about a person — a GCC national may or may not be
+ * enrolled, a UAE national may be registered late, and a dual national is a
+ * question for somebody who knows the case. The nationality field is recorded
+ * for context and decides nothing, which is the same stance the related-party
+ * note takes: declared, never detected.
+ */
+export const accruesGratuity = (scheme: PensionScheme) => scheme === "NONE";
+
+/**
+ * The contribution rates, and the fact that they are inputs.
+ *
+ * These are the private-sector rates in force at the time of writing and they
+ * are a starting point, not law this module can vouch for: they have been
+ * amended more than once, they differ for an employee who joined after a
+ * particular date, and the government's own share is not the employer's to pay.
+ * So they are arguments with documented defaults, exactly as the deferred tax
+ * module takes a depreciation rate — the structure is the rule here, the
+ * percentages are a policy input the business confirms.
+ *
+ * The contribution salary is not gross pay. It is defined by the scheme, is
+ * generally the basic wage plus the allowances named in the contract, and is
+ * bounded — which is why the floor and the cap are here rather than left to
+ * whoever calls this.
+ */
+export interface PensionRates {
+  /** Withheld from the employee, in basis points. 5% is 500. */
+  employeeBps: number;
+  /** The employer's own share, in basis points. */
+  employerBps: number;
+  /** The least the contribution salary may be, in minor units. */
+  floorMinor: bigint;
+  /** The most it may be. */
+  capMinor: bigint;
+}
+
+export const GPSSA_DEFAULT_RATES: PensionRates = {
+  employeeBps: 500,
+  employerBps: 1_250,
+  floorMinor: 100_000n,      // AED 1,000 a month
+  capMinor: 5_000_000n,      // AED 50,000 a month
+};
+
+export interface PensionContribution {
+  scheme: PensionScheme;
+  /** What the rate was applied to, after the floor and the cap. */
+  contributionSalaryMinor: bigint;
+  employeeMinor: bigint;
+  employerMinor: bigint;
+  totalMinor: bigint;
+  /** Why the salary was moved, where it was. */
+  note: string | null;
+}
+
+/**
+ * One month's contributions.
+ *
+ * Rounded once per side, half away from zero. Rounding a total and splitting it
+ * would put a fil in whichever side the arithmetic happened to favour, and the
+ * employee's half is withheld from their pay — a fil there is a figure somebody
+ * queries.
+ */
+export function pensionContribution(opts: {
+  scheme: PensionScheme;
+  /** Basic plus the allowances the contract makes pensionable. */
+  contributionSalaryMinor: bigint | number | string;
+  rates?: PensionRates;
+}): PensionContribution {
+  const scheme = opts.scheme;
+  if (scheme === "NONE") {
+    return { scheme, contributionSalaryMinor: 0n, employeeMinor: 0n, employerMinor: 0n, totalMinor: 0n, note: null };
+  }
+
+  const rates = opts.rates ?? GPSSA_DEFAULT_RATES;
+  const raw = BigInt(opts.contributionSalaryMinor);
+  if (raw < 0n) throw new LedgerError("A contribution salary cannot be negative.");
+
+  let salary = raw;
+  let note: string | null = null;
+  if (raw < rates.floorMinor) {
+    salary = rates.floorMinor;
+    note = `The contribution salary was raised to the scheme's floor of ${decimal(rates.floorMinor)}.`;
+  } else if (raw > rates.capMinor) {
+    salary = rates.capMinor;
+    note = `The contribution salary was capped at ${decimal(rates.capMinor)}; pay above the cap does not contribute.`;
+  }
+
+  const share = (bps: number) => {
+    const n = salary * BigInt(bps);
+    const q = n / 10_000n;
+    return n % 10_000n * 2n >= 10_000n ? q + 1n : q;
+  };
+  const employeeMinor = share(rates.employeeBps);
+  const employerMinor = share(rates.employerBps);
+
+  return {
+    scheme,
+    contributionSalaryMinor: salary,
+    employeeMinor,
+    employerMinor,
+    totalMinor: employeeMinor + employerMinor,
+    note,
+  };
 }
 
 /* -------------------------------------------------------- the gratuity rule */
@@ -219,6 +341,32 @@ export interface NewEmployee {
    * less, which is what the database holds.
    */
   leaveDaysPerYear?: number;
+  /** ISO country code, where it is known. Recorded for context; decides nothing. */
+  nationality?: string;
+  /**
+   * NONE | GPSSA | GCC_HOME_STATE. The field that decides whether this employee
+   * accrues an Article 51 gratuity or contributes to a pension — never both.
+   */
+  pensionScheme?: PensionScheme;
+}
+
+
+/**
+ * A scheme this module knows, or a refusal naming the three.
+ *
+ * Refused rather than defaulted: a mistyped scheme silently becoming NONE would
+ * accrue a gratuity for somebody who should be contributing to a pension, which
+ * is the exact error this whole field exists to stop.
+ */
+function checkScheme(v: string | undefined, who: string): PensionScheme | undefined {
+  if (v === undefined) return undefined;
+  const s = v.trim().toUpperCase();
+  if (s === "NONE" || s === "GPSSA" || s === "GCC_HOME_STATE") return s;
+  throw new LedgerError(
+    `"${v}" is not a pension scheme this ledger knows for ${who}. Use NONE, GPSSA or GCC_HOME_STATE. ` +
+      `A UAE national in the private sector is normally GPSSA; a foreign worker is NONE and accrues the ` +
+      `Article 51 gratuity instead.`,
+  );
 }
 
 const UAE_IBAN = /^AE\d{21}$/;
@@ -334,6 +482,8 @@ export async function addEmployee(opts: { orgId: string; entityId: string; emplo
       transportMinor: pay.transport,
       otherMinor: pay.other,
       ...(e.leaveDaysPerYear === undefined ? {} : { leaveDaysPerYear: checkLeaveDays(e.leaveDaysPerYear, who)! }),
+      nationality: (e.nationality ?? "").trim().toUpperCase() || null,
+      ...(checkScheme(e.pensionScheme, who) === undefined ? {} : { pensionScheme: checkScheme(e.pensionScheme, who)! }),
     },
   });
 }
@@ -357,6 +507,13 @@ export interface EmployeeChanges {
    * less, which is what the database holds.
    */
   leaveDaysPerYear?: number;
+  /** ISO country code, where it is known. Recorded for context; decides nothing. */
+  nationality?: string;
+  /**
+   * NONE | GPSSA | GCC_HOME_STATE. The field that decides whether this employee
+   * accrues an Article 51 gratuity or contributes to a pension — never both.
+   */
+  pensionScheme?: PensionScheme;
 }
 
 /**
@@ -439,6 +596,8 @@ export async function updateEmployee(opts: {
       transportMinor: pay.transport,
       otherMinor: pay.other,
       leaveDaysPerYear: checkLeaveDays(c.leaveDaysPerYear, who),
+      nationality: c.nationality === undefined ? current.nationality : (c.nationality.trim().toUpperCase() || null),
+      pensionScheme: checkScheme(c.pensionScheme, who) ?? current.pensionScheme,
     },
   });
 }
@@ -543,6 +702,12 @@ export async function runPayroll(opts: {
   period: string;
   entries?: PayrollEntry[];
   actorId?: string;
+  /**
+   * The pension rates in force for this entity. Defaults to the private-sector
+   * GPSSA rates documented on GPSSA_DEFAULT_RATES, which are a starting point
+   * rather than law this module can vouch for.
+   */
+  pensionRates?: PensionRates;
 }): Promise<PayrollRunResult> {
   const period = assertPeriod(opts.period);
   const start = monthStart(period);
@@ -609,6 +774,7 @@ export async function runPayroll(opts: {
     deductions: bigint;
     net: bigint;
     gratuity: bigint;
+    pension: PensionContribution;
   }[] = [];
 
   for (const e of employees) {
@@ -656,10 +822,28 @@ export async function runPayroll(opts: {
       );
     }
 
-    const { accrualMinor } = gratuityAccrual(
-      { basicMinor: e.basicMinor, joinedOn: e.joinedOn, leftOn: e.leftOn },
-      end,
-    );
+    const scheme = (e.pensionScheme ?? "NONE") as PensionScheme;
+
+    // Article 51 gives the gratuity to the foreign worker. An employee in a
+    // pension scheme is provided for by the scheme, and accruing both would
+    // provide for the same service twice.
+    const { accrualMinor } = accruesGratuity(scheme)
+      ? gratuityAccrual({ basicMinor: e.basicMinor, joinedOn: e.joinedOn, leftOn: e.leftOn }, end)
+      : { accrualMinor: 0n };
+
+    /*
+     * The contribution salary is the basic wage plus the allowances the
+     * contract makes pensionable. Nothing in this schema records which
+     * allowances those are, so basic plus housing is taken — the common case —
+     * and that is said here rather than presented as the scheme's own
+     * definition. Overtime is excluded, which is not a judgement call: it is
+     * not part of the wage.
+     */
+    const pension = pensionContribution({
+      scheme,
+      contributionSalaryMinor: BigInt(e.basicMinor) + BigInt(e.housingMinor ?? 0n),
+      rates: opts.pensionRates,
+    });
 
     drafts.push({
       employee: e,
@@ -668,8 +852,11 @@ export async function runPayroll(opts: {
       allowances,
       overtime,
       deductions,
-      net: gross - deductions,
+      // The employee's share is withheld, so it reduces what reaches their bank
+      // and belongs in what the WPS file carries as paid.
+      net: gross - deductions - pension.employeeMinor,
       gratuity: accrualMinor,
+      pension,
     });
   }
 
@@ -702,6 +889,8 @@ export async function runPayroll(opts: {
           deductionsMinor: d.deductions,
           netMinor: d.net,
           gratuityMinor: d.gratuity,
+          pensionEmployeeMinor: d.pension.employeeMinor,
+          pensionEmployerMinor: d.pension.employerMinor,
         },
         update: {
           basicMinor: d.basic,
@@ -710,6 +899,8 @@ export async function runPayroll(opts: {
           deductionsMinor: d.deductions,
           netMinor: d.net,
           gratuityMinor: d.gratuity,
+          pensionEmployeeMinor: d.pension.employeeMinor,
+          pensionEmployerMinor: d.pension.employerMinor,
         },
       }),
     );
@@ -807,11 +998,29 @@ export async function postPayroll(opts: {
   const deductions = drafts.reduce((a, p) => a + p.deductionsMinor, 0n);
   const net = drafts.reduce((a, p) => a + p.netMinor, 0n);
   const gratuity = drafts.reduce((a, p) => a + p.gratuityMinor, 0n);
+  const pensionEmployee = drafts.reduce((a, p) => a + p.pensionEmployeeMinor, 0n);
+  const pensionEmployer = drafts.reduce((a, p) => a + p.pensionEmployerMinor, 0n);
 
   const lines: PostLine[] = [];
   if (gross > 0n) lines.push({ account: SALARY_EXPENSE, debit: gross, memo: `Payroll ${period} — ${drafts.length} employee${drafts.length === 1 ? "" : "s"}` });
   if (gratuity > 0n) lines.push({ account: EOSB_EXPENSE, debit: gratuity, memo: `Gratuity accrued for ${period}` });
+  /*
+   * The employer's share is a cost of employing somebody and is charged; the
+   * employee's is withheld out of the gross already charged above, so it is
+   * moved from net pay to the authority rather than charged again. Both are
+   * owed to the same authority and settle as one payment, so both credit 2230.
+   */
+  if (pensionEmployer > 0n) {
+    lines.push({ account: SALARY_EXPENSE, debit: pensionEmployer, memo: `Employer pension contributions for ${period}` });
+  }
   if (net > 0n) lines.push({ account: SALARY_PAYABLE, credit: net, memo: `Net pay for ${period}` });
+  if (pensionEmployee + pensionEmployer > 0n) {
+    lines.push({
+      account: PENSION_PAYABLE,
+      credit: pensionEmployee + pensionEmployer,
+      memo: `Pension contributions for ${period} — ${decimal(pensionEmployee)} withheld, ${decimal(pensionEmployer)} employer`,
+    });
+  }
   if (gratuity > 0n) lines.push({ account: EOSB_PROVISION, credit: gratuity, memo: `Gratuity provision for ${period}` });
   if (deductions > 0n) {
     lines.push({

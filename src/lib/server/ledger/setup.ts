@@ -85,6 +85,9 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "2150", name: "Provisions", nameAr: "المخصصات", type: "LIABILITY", parent: "20", subtype: "PROVISION" },
   { code: "2200", name: "Salaries payable", nameAr: "رواتب مستحقة", type: "LIABILITY", parent: "20", subtype: "PAYROLL" },
   { code: "2260", name: "Untaken leave provision", nameAr: "مخصص الإجازات غير المستخدمة", type: "LIABILITY", parent: "20", subtype: "LEAVE_PROVISION" },
+  // Employee and employer contributions together: the authority is paid one
+  // amount and reconciles one liability.
+  { code: "2230", name: "Pension contributions payable", nameAr: "اشتراكات التقاعد المستحقة", type: "LIABILITY", parent: "20", subtype: "PAYROLL" },
   { code: "2250", name: "End-of-service benefits provision", nameAr: "مخصص مكافأة نهاية الخدمة", type: "LIABILITY", parent: "20", subtype: "EOSB" },
   { code: "2300", name: "Customer deposits and advances", nameAr: "دفعات مقدمة من العملاء", type: "LIABILITY", parent: "20" },
   { code: "2320", name: "Deferred tax liability", nameAr: "التزام ضريبي مؤجل", type: "LIABILITY", parent: "25", subtype: "DEFERRED_TAX_LIABILITY" },
