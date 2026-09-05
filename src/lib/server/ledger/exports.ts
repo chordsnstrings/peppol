@@ -207,6 +207,16 @@ function digestOf(tables: { key: string; columns: string[]; rows: string[][] }[]
 
 /* -------------------------------------------------------------- the export */
 
+/**
+ * The most entries one export may carry. A year of a busy ledger is a few
+ * thousand; this is generous by an order of magnitude and exists only to turn
+ * an out-of-memory kill into a sentence.
+ */
+export const MAX_EXPORT_ENTRIES = 50_000;
+
+/** Ids per `IN` clause. PostgreSQL's wire protocol carries at most 65,535 bind parameters. */
+const ID_CHUNK = 5_000;
+
 export async function exportLedger(opts: {
   orgId: string;
   entityId: string;
@@ -216,6 +226,12 @@ export async function exportLedger(opts: {
   format: ExportFormat;
   /** Stamped into the manifest; defaults to now. Tests pin it. */
   generatedAt?: Date | string;
+  /**
+   * The most entries this export may carry. Defaults to MAX_EXPORT_ENTRIES.
+   * An argument rather than only a constant because how much can be held in
+   * memory is a property of where this runs, not of the ledger.
+   */
+  maxEntries?: number;
 }): Promise<LedgerExportBundle> {
   if (opts.format !== "csv" && opts.format !== "json") {
     throw new LedgerError(`"${String(opts.format)}" is not an export format. Ask for csv or json.`);
@@ -302,12 +318,42 @@ export async function exportLedger(opts: {
   // that offsets the original; both happened, and an export that shows only the
   // surviving half is an export that has been tidied.
   const dateWhere = from || to ? { entryDate: { ...(from ? { gte: from } : {}), lte: to } } : {};
+  /*
+   * The whole export is assembled in memory and returned as one object, so the
+   * size of it is bounded here rather than discovered by the process dying.
+   *
+   * An export with no `from` covers the book from inception, which is the
+   * default, so on any ledger that has been running a few years this is
+   * everything. A hundred thousand entries carry perhaps a quarter of a million
+   * lines, each with its account and its dimensions, and the failure is not a
+   * slow response — it is the request being killed with nothing said, which
+   * looks to the user exactly like the button not working.
+   *
+   * Counting first costs one cheap query and turns that into a sentence
+   * somebody can act on. The cap is deliberately generous: a real audit extract
+   * of a year is thousands of entries, not tens of thousands, and anybody who
+   * genuinely needs more can take it a year at a time — which is how an auditor
+   * asks for it anyway.
+   */
+  const entryWhere = {
+    orgId: opts.orgId, entityId: opts.entityId, bookId: book.id,
+    status: { in: ["posted", "reversed"] },
+    ...dateWhere,
+  };
+
+  const maxEntries = opts.maxEntries ?? MAX_EXPORT_ENTRIES;
+  const entryCount = await prisma.journalEntry.count({ where: entryWhere });
+  if (entryCount > maxEntries) {
+    throw new LedgerError(
+      `That range covers ${entryCount.toLocaleString("en")} journal entries, and an export is built whole in ` +
+        `memory before it is handed over — beyond ${MAX_EXPORT_ENTRIES.toLocaleString("en")} it would not finish. ` +
+        `${fromIso ? "Narrow the dates" : "Give a start date"} and take it a year at a time, which is how an ` +
+        `auditor asks for it in any case.`,
+    );
+  }
+
   const entries = await prisma.journalEntry.findMany({
-    where: {
-      orgId: opts.orgId, entityId: opts.entityId, bookId: book.id,
-      status: { in: ["posted", "reversed"] },
-      ...dateWhere,
-    },
+    where: entryWhere,
     orderBy: [{ entryDate: "asc" }, { series: "asc" }, { number: "asc" }],
   });
   const entryById = new Map(entries.map((e) => [e.id, e]));
@@ -332,13 +378,27 @@ export async function exportLedger(opts: {
   };
 
   const lines = entries.length
-    ? await prisma.journalLine.findMany({
-        where: { orgId: opts.orgId, entryId: { in: entries.map((e) => e.id) } },
-        include: {
-          account: { select: { code: true, name: true } },
-          dimensions: { include: { value: { include: { dimension: true } } } },
-        },
-      })
+    ? await (async () => {
+        /*
+         * Chunked, because `entryId: { in: [...] }` becomes one bind parameter
+         * per id and PostgreSQL's protocol carries a hard limit of 65,535 of
+         * them. Past that the query does not slow down, it fails — and it fails
+         * on exactly the export somebody needed most, the big one.
+         */
+        const ids = entries.map((e) => e.id);
+        const chunk = (batch: string[]) => prisma.journalLine.findMany({
+          where: { orgId: opts.orgId, entryId: { in: batch } },
+          include: {
+            account: { select: { code: true, name: true } },
+            dimensions: { include: { value: { include: { dimension: true } } } },
+          },
+        });
+        const out: Awaited<ReturnType<typeof chunk>> = [];
+        for (let i = 0; i < ids.length; i += ID_CHUNK) {
+          out.push(...(await chunk(ids.slice(i, i + ID_CHUNK))));
+        }
+        return out;
+      })()
     : [];
 
   // Deterministic order: an export regenerated tomorrow over the same range has

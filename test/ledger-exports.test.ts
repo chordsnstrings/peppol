@@ -5,6 +5,7 @@ import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import {
   exportLedger, verifyExport, previewImport, importTrialBalance,
   type LedgerExportBundle,
+  MAX_EXPORT_ENTRIES,
 } from "@/lib/server/ledger/exports";
 
 const db = new PrismaClient();
@@ -221,6 +222,25 @@ d("ledger export and migration", () => {
   afterAll(async () => { await wipe(); await db.$disconnect(); });
 
   /* ------------------------------------------------------------ the export */
+
+  it("refuses a range too large to build in memory, and says what to do", async () => {
+    // The whole export is assembled as one object before it is handed over, so
+    // the size is bounded here rather than discovered by the process being
+    // killed — which looks to the user exactly like the button not working.
+    // The cap is an argument as well as a constant, because how much can be
+    // held in memory is a property of where this runs.
+    await expect(exportLedger({ orgId: ORG, entityId: ENT, format: "csv", maxEntries: 0 }))
+      .rejects.toThrow(/journal entries, and an export is built whole in memory/);
+    await expect(exportLedger({ orgId: ORG, entityId: ENT, format: "csv", maxEntries: 0 }))
+      .rejects.toThrow(/Give a start date/);
+  });
+
+  it("carries the whole range when it is inside the cap", async () => {
+    const bundle = await exportLedger({ orgId: ORG, entityId: ENT, format: "csv", maxEntries: MAX_EXPORT_ENTRIES });
+    expect(bundle.files.some((f) => f.name.includes("entries"))).toBe(true);
+    expect(bundle.manifest.tables.find((t) => t.key === "entries")!.rowCount).toBeGreaterThan(0);
+  });
+
 
   it("exports the chart, the calendar, the journals and every register as named tables", async () => {
     const b = await exportLedger({ orgId: ORG, entityId: ENT, ...FULL, format: "json" });
