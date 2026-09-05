@@ -513,8 +513,9 @@ export async function cashFlowStatement(opts: {
     warnings.push(
       `Account ${m.code} ${m.name} moved by ${money(m.movement, currency)} in this period and is not classified ` +
         `into an operating, investing or financing activity, so it is missing from this statement. ` +
-        `Add it to the cash flow classification — or, if it is a bank or cash account, to the list of cash ` +
-        `and cash equivalents.`,
+        `Add it to the cash flow classification — or, if it is a bank or cash account, give it a bank or cash ` +
+        `subtype, which is what makes an account cash and cash equivalents here. There is no list to edit: the ` +
+        `answer is read from this entity's own chart.`,
     );
   }
 

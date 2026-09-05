@@ -3,7 +3,8 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount, toInput } from "@/lib/ledger/format";
+import { useAsk } from "@/components/ledger/ask";
+import { fmtMinor, parseAmount, toInput } from "@/lib/ledger/format";
 
 interface Obligation {
   seq: number; description: string; timing: string;
@@ -33,6 +34,7 @@ const pct = (bps: number) => `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2)}%`;
 
 export default function RevenuePage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const { data, error, loading, reload } = useLedgerQuery<Register>(
     entityId ? `/api/ledger/revenue?entityId=${entityId}` : null,
   );
@@ -67,6 +69,48 @@ export default function RevenuePage() {
       n === 0
         ? `Nothing to move as at ${on} — every contract is already presented correctly.`
         : `Recognised across ${n} contract${n === 1 ? "" : "s"} as at ${on}, moving ${toInput(String(r.revenueMinor))} of revenue.`,
+    );
+  };
+
+  /**
+   * A variation order — the ordinary event in a construction or services
+   * contract, and until now impossible from this screen.
+   *
+   * `recordBilling` refuses anything past the original price and tells the
+   * reader to "modify the contract first", which was an instruction with no
+   * control behind it. IFRS 15.21: a modification that is not a separate
+   * contract reallocates the price over what remains and catches revenue up in
+   * this period rather than restating an earlier one.
+   */
+  const modify = async (c: Contract, priceMinor: string) => {
+    const r = await act(`modify:${c.code}`, { action: "modify", code: c.code, priceMinor });
+    if (!r) return;
+    setMsg(
+      `${c.code} now has a transaction price of ${fmtMinor(priceMinor, c.currency, { zero: "zero" })}. It has been ` +
+        `reallocated across the obligations on their standalone selling prices, and what each has earned is ` +
+        `recomputed against its new allocation — a half-finished obligation has earned half of what it is now ` +
+        `allocated, not half of what it used to be. Recognise to move the difference.`,
+    );
+  };
+
+  const cancel = async (c: Contract) => {
+    const answer = await ask({
+      title: `Cancel ${c.code}?`,
+      detail:
+        `Revenue already earned stays earned — the work was done — so this freezes the contract where it stands ` +
+        `rather than unwinding it. Nothing further is recognised and nothing more can be billed against it. ` +
+        `Anything owed back to the customer is a credit note, which is a document rather than a change to what ` +
+        `this contract measured.`,
+      confirmLabel: "Cancel the contract",
+      cancelLabel: "Leave it active",
+      destructive: true,
+    });
+    if (answer === null) return;
+    const r = await act(`cancel:${c.code}`, { action: "cancel", code: c.code });
+    if (!r) return;
+    setMsg(
+      `${c.code} is cancelled. The ${fmtMinor(c.earnedMinor, c.currency, { zero: "zero" })} earned to date stays ` +
+        `recognised; only the backlog stops.`,
     );
   };
 
@@ -253,6 +297,8 @@ export default function RevenuePage() {
                                   const r = await act(`run:${c.code}`, { action: "run", code: c.code, on });
                                   if (r) setMsg(`${c.code}: ${String(r.note)}`);
                                 }}
+                                onModify={(priceMinor) => modify(c, priceMinor)}
+                                onCancel={() => cancel(c)}
                               />
                             </td>
                           </tr>
@@ -317,16 +363,20 @@ function Compare({ label, account, a, b, pending }: {
   );
 }
 
-function Obligations({ contract, busy, onSatisfy, onProgress, onBill, onRun }: {
+function Obligations({ contract, busy, onSatisfy, onProgress, onBill, onRun, onModify, onCancel }: {
   contract: Contract;
   busy: string | null;
   onSatisfy: (seq: number) => void;
   onProgress: (seq: number, bps: number) => void;
   onBill: (amountMinor: string) => void;
   onRun: () => void;
+  onModify: (priceMinor: string) => void;
+  onCancel: () => void;
 }) {
   const [bill, setBill] = React.useState("");
   const [billErr, setBillErr] = React.useState<string | null>(null);
+  const [price, setPrice] = React.useState(() => toInput(contract.priceMinor, contract.currency));
+  const [priceErr, setPriceErr] = React.useState<string | null>(null);
   const live = contract.status === "active";
 
   return (
@@ -435,6 +485,62 @@ function Obligations({ contract, busy, onSatisfy, onProgress, onBill, onRun }: {
       <p className="sw-sub mt-2 max-w-[70ch]">
         Billed is net of tax, because tax is not revenue. The invoice itself already reached the ledger through
         receivables — recording it here only tells the contract how much of its price has been charged.
+      </p>
+
+      {/* A variation order and an abandoned contract: the two things that
+          happen to a live contract and could not be recorded from here. */}
+      <div className="mt-3 flex flex-wrap items-end gap-3" style={{ borderTop: "1px solid var(--sw-line)", paddingTop: "0.75rem" }}>
+        <label className="flex items-center gap-1.5">
+          <span className="sw-label">Transaction price</span>
+          <input
+            className="sw-input sw-num"
+            style={{ width: "10rem" }}
+            value={price}
+            onChange={(e) => { setPrice(e.target.value); setPriceErr(null); }}
+            aria-label={`Transaction price on ${contract.code}`}
+            aria-invalid={priceErr ? true : undefined}
+            disabled={!live}
+          />
+        </label>
+        <button
+          type="button"
+          className="sw-btn sw-btn-sm"
+          disabled={!live || busy === `modify:${contract.code}`}
+          aria-disabled={!live || busy === `modify:${contract.code}` || undefined}
+          data-testid={`modify-${contract.code}`}
+          onClick={() => {
+            const v = parseAmount(price, contract.currency);
+            if (v === null) { setPriceErr("That is not an amount I can read."); return; }
+            if (v <= 0n) { setPriceErr("A modification cannot take the price to nil — cancel the contract instead."); return; }
+            if (v.toString() === contract.priceMinor) { setPriceErr("That is the price it already has."); return; }
+            onModify(v.toString());
+          }}
+        >
+          Modify
+        </button>
+        <button
+          type="button"
+          className="sw-btn sw-btn-sm sw-btn-danger"
+          disabled={!live || busy === `cancel:${contract.code}`}
+          aria-disabled={!live || busy === `cancel:${contract.code}` || undefined}
+          data-testid={`cancel-${contract.code}`}
+          onClick={onCancel}
+        >
+          Cancel contract
+        </button>
+        {priceErr && <span className="sw-error" role="alert">{priceErr}</span>}
+      </div>
+
+      <p className="sw-sub mt-2 max-w-[75ch]">
+        {live ? (
+          <>
+            A variation order changes the price, and the change is spread across the obligations on their standalone
+            selling prices — IFRS 15.21, for a modification that is not a separate contract. Billing is refused above
+            the price, so a variation has to be recorded here before the invoice for it can be.
+          </>
+        ) : (
+          <>This contract is {contract.status}, so nothing further is recognised and nothing more can be billed against it.</>
+        )}
       </p>
     </div>
   );

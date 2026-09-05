@@ -700,19 +700,26 @@ export async function withdraw(opts: {
 /**
  * The guard a posting path calls before it writes to the ledger.
  *
- * INTENDED CALL SITES — deliberately not wired in from here, because those
- * files own their own control flow and a guard that appears in a module's
- * imports but not in its code is worse than no guard at all:
+ * CALL SITES. The call is made from each posting path rather than from here,
+ * because those files own their own control flow and know their own amount and
+ * document id — which is all this needs. Where they stand:
  *
- *   - postClaim() in expenses.ts, after its own approved-status check;
- *   - postBill() and postSupplierPayment() in ap.ts, before post();
- *   - the payroll run in payroll.ts, before it posts the WPS batch;
- *   - the manual journal route, for entities that approve journals.
+ *   - postClaim() in expenses.ts, after its own approved-status check — wired;
+ *   - postBill() in ap.ts, before post() — wired;
+ *   - postSupplierPayment() in ap.ts, before post() — wired;
+ *   - the manual journal route (api/ledger/journals), which names the subject
+ *     the decisions were collected against — wired;
+ *   - the payroll run in payroll.ts, before it posts the WPS batch — NOT yet
+ *     wired, so payroll rules configured on the screen do not bind;
+ *   - releaseRun() in payment-runs.ts, which posts a batch of supplier
+ *     payments — NOT wired either, and see the note in that file for why it
+ *     keeps a control of its own regardless.
  *
- * Each of those knows its own amount and its own document id, which is all this
- * needs. Where no rule covers the amount it returns quietly, so it is safe to
- * call on every posting rather than only on the large ones — a guard people
- * remember to call only sometimes is a guard that protects nothing.
+ * Where no rule covers the amount it returns quietly, so it is safe to call on
+ * every posting rather than only on the large ones — a guard people remember to
+ * call only sometimes is a guard that protects nothing. Keep this list honest:
+ * a posting path missing from it is a rule an organisation can see on its
+ * approvals screen and watch every document sail past.
  */
 export async function assertApproved(opts: {
   orgId: string;

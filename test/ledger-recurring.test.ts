@@ -127,7 +127,9 @@ d("recurring journals", () => {
     await expect(T({
       code: "BAD-BAL",
       lines: [{ account: "6100", debit: 1_500_000 }, { account: "1010", credit: 1_400_000 }],
-    })).rejects.toThrow(/does not balance.*out by 1000\.00/s);
+      // Grouped, and to the book currency's own number of decimals: the
+      // message comes from the one formatter that knows a dinar has three.
+    })).rejects.toThrow(/does not balance.*out by 1,000\.00/s);
     // And nothing was stored: the failure is at save time, not every month at
     // midnight for the rest of the year.
     expect(await db.recurringJournal.count({ where: { orgId: ORG, code: "BAD-BAL" } })).toBe(0);

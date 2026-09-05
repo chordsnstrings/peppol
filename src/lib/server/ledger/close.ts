@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { profitAndLoss } from "./statements";
 
@@ -136,6 +137,8 @@ async function splitByDimension(opts: {
   accountCode: string;
   dimensionCode: string;
   closingMinor: bigint;
+  /** The book's currency, so the figures in the refusals below have its decimals. */
+  currency: string;
 }): Promise<{ valueCode: string; closingMinor: bigint }[]> {
   const lines = await prisma.journalLine.findMany({
     where: {
@@ -164,7 +167,7 @@ async function splitByDimension(opts: {
 
   if (undimensioned !== 0n) {
     throw new LedgerError(
-      `${opts.accountCode} requires a ${opts.dimensionCode} on every posting, but ${fmt(undimensioned)} of its ` +
+      `${opts.accountCode} requires a ${opts.dimensionCode} on every posting, but ${fmt(undimensioned, opts.currency)} of its ` +
         `balance was posted without one — from before the requirement was added, most likely. Those postings cannot ` +
         `be closed with a value and cannot be closed without one. Reverse and repost them with a ${opts.dimensionCode}, ` +
         `or take the requirement off the account.`,
@@ -179,21 +182,22 @@ async function splitByDimension(opts: {
   const total = split.reduce((a, x) => a + x.closingMinor, 0n);
   if (total !== opts.closingMinor) {
     throw new LedgerError(
-      `The ${opts.dimensionCode} split of ${opts.accountCode} comes to ${fmt(total)} against a balance of ` +
-        `${fmt(opts.closingMinor)}. Closing on that would move the difference into retained earnings without a ` +
+      `The ${opts.dimensionCode} split of ${opts.accountCode} comes to ${fmt(total, opts.currency)} against a balance of ` +
+        `${fmt(opts.closingMinor, opts.currency)}. Closing on that would move the difference into retained earnings without a ` +
         `cost centre behind it. Please report it.`,
     );
   }
   return split;
 }
 
-/** Minor units as a figure, for a message about a difference. */
-function fmt(minor: bigint): string {
-  const neg = minor < 0n;
-  const body = (neg ? -minor : minor).toString().padStart(3, "0");
-  const shown = `${body.slice(0, -2)}.${body.slice(-2)}`;
-  return neg ? `(${shown})` : shown;
-}
+/**
+ * Minor units as a figure, for a message about a difference.
+ *
+ * Through `fmtMinor`, which knows how many decimals a currency has. Splitting
+ * the digits two from the right is right for a dirham and wrong by a factor of
+ * ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const fmt = (minor: bigint, currency: string) => fmtMinor(minor, currency, { zero: "zero" });
 
 export interface CloseResult {
   fiscalYear: string;
@@ -286,6 +290,7 @@ export async function closeYear(opts: {
       orgId: opts.orgId, entityId: opts.entityId,
       from: year.startsOn, to: year.endsOn,
       accountCode: l.code, dimensionCode, closingMinor: BigInt(l.closingMinor),
+      currency: preview.currency,
     });
     for (const part of split) {
       closingLines.push({

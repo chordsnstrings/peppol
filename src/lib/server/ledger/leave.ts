@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
 
 /**
@@ -86,12 +87,22 @@ function assertPeriod(period: string, what = "A leave provision period"): string
   return period;
 }
 
-/** Minor units as a decimal string, by string surgery. Money never becomes a float. */
-function decimal(minor: bigint): string {
-  const neg = minor < 0n;
-  const abs = neg ? -minor : minor;
-  const s = abs.toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${s.slice(0, -2)}.${s.slice(-2)}`;
+/**
+ * Minor units as a decimal string, in the currency the wage is paid in. Money
+ * never becomes a float, and the decimals are the currency's own: this used to
+ * split the digits two from the right, which is right for a dirham and wrong by
+ * a factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const decimalIn = (currency: string) => (minor: bigint) =>
+  fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
+
+/** The currency this entity keeps its books in, which is the one salaries are in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }
 
 /** Tenths of a day as a decimal string, by the same surgery. */
@@ -638,6 +649,7 @@ export async function encashLeave(opts: {
   actorId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<EncashLeaveResult> {
+  const decimal = decimalIn(await bookCurrency(opts.orgId, opts.entityId));
   const e = await employeeByCode(opts.orgId, opts.entityId, opts.code);
   const who = `${e.name} (${e.code})`;
   const on = asDay(opts.on, `The date leave was paid out to ${who}`);
@@ -783,6 +795,7 @@ export async function provisionForPeriod(opts: {
   actorId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<ProvisionForPeriodResult> {
+  const decimal = decimalIn(await bookCurrency(opts.orgId, opts.entityId));
   const period = assertPeriod(opts.period);
   const end = monthEnd(period);
 

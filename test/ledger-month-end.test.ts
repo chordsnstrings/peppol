@@ -149,6 +149,28 @@ d("the month-end checklist", () => {
     expect(registers!.detail).not.toMatch(/Every subledger register agrees/);
   });
 
+  it("reads the two registers that grew a reconciliation after the check was written", async () => {
+    // Neither 1255 nor 1330 is a control account, so the ledger accepts a
+    // hand-keyed journal into both — and both support a disclosure. 1255 is
+    // restricted cash under IAS 7.48, tied to the margin the banks hold; 1330
+    // is work in progress, tied to the timesheets. Nothing on the register
+    // moved, so both now disagree with the ledger by the amount posted.
+    await post({
+      ...S, entryDate: "2026-02-20", source: "manual", memo: "Margin and WIP by hand",
+      lines: [
+        { account: "1255", debit: 100_000 },
+        { account: "1330", debit: 50_000 },
+        { account: "1010", credit: 150_000 },
+      ],
+    });
+
+    const m = await monthEnd({ ...S, period: "2026-02" });
+    const registers = check(m, "registers")!;
+    expect(registers.severity).toBe("blocker");
+    expect(registers.detail).toMatch(/margin held against guarantees/);
+    expect(registers.detail).toMatch(/work in progress/);
+  });
+
   it("does not read another organisation's month", async () => {
     await expect(monthEnd({ orgId: "someone-else", entityId: ENT, period: "2026-01" }))
       .rejects.toThrow(/no accounting period 2026-01/i);

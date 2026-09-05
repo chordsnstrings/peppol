@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { capitaliseCost, receiptsUnder, type ReceiptLot } from "./inventory";
 
@@ -70,12 +71,22 @@ export function fmtQty(milli: bigint): string {
   return `${neg ? "-" : ""}${body || "0"}`;
 }
 
-/** Minor units as a figure a bookkeeper would recognise in a refusal. */
-function fmtMoney(minor: bigint): string {
-  const neg = minor < 0n;
-  const s = (neg ? -minor : minor).toString().padStart(3, "0");
-  const whole = s.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${neg ? "-" : ""}${whole}.${s.slice(-2)}`;
+/**
+ * Minor units as a figure a bookkeeper would recognise in a refusal, in the
+ * currency of the book the voucher sits in. `fmtMinor` knows each currency's
+ * exponent; splitting the digits two from the right is right for a dirham and
+ * wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const fmtMoneyIn = (currency: string) => (minor: bigint) =>
+  fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
+
+/** The currency this entity keeps its books in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }
 
 function readBasis(value: string | undefined | null): AllocationBasis {
@@ -601,6 +612,7 @@ export interface Plan {
  * emptied last week is worth nothing.
  */
 async function planVoucher(v: VoucherRow): Promise<Plan> {
+  const fmtMoney = fmtMoneyIn(await bookCurrency(v.orgId, v.entityId));
   if (!v.charges.length) throw new LedgerError(`Voucher ${v.number} has no charges on it.`);
   if (!v.lines.length) throw new LedgerError(`Voucher ${v.number} names no goods.`);
 

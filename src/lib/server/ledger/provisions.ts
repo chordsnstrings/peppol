@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 
 /**
@@ -357,12 +358,24 @@ function parseDate(value: string | Date, what: string): Date {
   return d;
 }
 
-/** Minor units as a plain figure for a message — not a financial statement. */
-function plain(minor: bigint): string {
-  const neg = minor < 0n;
-  const abs = (neg ? -minor : minor).toString().padStart(3, "0");
-  const whole = abs.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${neg ? "-" : ""}${whole}.${abs.slice(-2)}`;
+/**
+ * Minor units as a plain figure for a message — not a financial statement.
+ *
+ * Bound to the book's currency at the point of use. It used to split the digits
+ * two from the right whatever the book was kept in, which is right for a dirham
+ * and wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an Omani
+ * rial; `fmtMinor` knows each currency's exponent.
+ */
+const plainIn = (currency: string) => (minor: bigint) =>
+  fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
+
+/** The currency this entity keeps its books in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }
 
 /**
@@ -508,6 +521,7 @@ export async function recordProvision(opts: {
   note?: string;
   actorId?: string;
 }): Promise<RecordProvisionResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const code = opts.code.trim();
   const name = opts.name.trim();
   if (!code) throw new LedgerError("A provision needs a code.");
@@ -720,6 +734,7 @@ export async function remeasure(opts: {
   note?: string;
   actorId?: string;
 }): Promise<RemeasureResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const p = await loadProvision(opts.orgId, opts.entityId, opts.code);
   assertOpen(p, "remeasured");
 
@@ -905,6 +920,7 @@ export async function unwindDiscount(opts: {
   actorId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<UnwindResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   if (!/^\d{4}-\d{2}$/.test(opts.period)) throw new LedgerError("A provision period looks like 2026-03.");
 
   const p = await loadProvision(opts.orgId, opts.entityId, opts.code);
@@ -1051,6 +1067,7 @@ export async function utilise(opts: {
   note?: string;
   actorId?: string;
 }): Promise<UtiliseResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const p = await loadProvision(opts.orgId, opts.entityId, opts.code);
   assertRecognised(p, "charge expenditure against");
   assertOpen(p, "charged against");
@@ -1153,6 +1170,7 @@ export async function release(opts: {
   reason: string;
   actorId?: string;
 }): Promise<ReleaseResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const p = await loadProvision(opts.orgId, opts.entityId, opts.code);
   assertRecognised(p, "release");
   assertOpen(p, "released");
@@ -1249,6 +1267,7 @@ export async function promote(opts: {
   on: string | Date;
   actorId?: string;
 }): Promise<PromoteResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const p = await loadProvision(opts.orgId, opts.entityId, opts.code);
 
   if (p.kind === "PROVISION") {

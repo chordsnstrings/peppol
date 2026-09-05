@@ -4,7 +4,8 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { useAsk } from "@/components/ledger/ask";
+import { fmtMinor, parseAmount, toInput } from "@/lib/ledger/format";
 
 interface Payslip {
   employeeId: string; code: string; name: string;
@@ -34,6 +35,7 @@ const thisMonth = () => new Date().toISOString().slice(0, 7);
 
 export default function PayrollPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [period, setPeriod] = React.useState(thisMonth);
   const { data, error, loading, reload } = useLedgerQuery<Summary>(
     entityId ? `/api/ledger/payroll?entityId=${entityId}&period=${period}` : null,
@@ -45,6 +47,8 @@ export default function PayrollPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [skipped, setSkipped] = React.useState<{ code: string; reason: string }[]>([]);
   const [adding, setAdding] = React.useState(false);
+  /** Which employee row is open, and for which of the two per-row forms. */
+  const [openRow, setOpenRow] = React.useState<{ code: string; mode: "amend" | "settle" } | null>(null);
   const [sif, setSif] = React.useState<{ filename: string; csv: string; records: number } | null>(null);
   const [employer, setEmployer] = React.useState({ id: "", agent: "" });
 
@@ -109,6 +113,61 @@ export default function PayrollPage() {
     a.download = sif.filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  /**
+   * A pay rise, a corrected IBAN, a name spelled properly.
+   *
+   * The alternative before this existed was a second employee code, which
+   * restarts the gratuity clock — the record would then show two people with
+   * one person's service, and Article 51 is computed from the joining date.
+   */
+  const amend = async (code: string, changes: Record<string, unknown>) => {
+    const r = await act<{ employee: { code: string; name: string } }>("update-employee", {
+      action: "update-employee", employeeCode: code, changes,
+    });
+    if (!r) return;
+    setOpenRow(null);
+    setMsg(
+      `Amended ${r.employee.code} ${r.employee.name}. A pay change takes effect from the next run — every posted ` +
+        `payslip stays exactly as it was, for the same reason a change in estimate does not rewrite last year.`,
+    );
+  };
+
+  /**
+   * Settling a leaver, which is the only thing that ever writes a leaving date.
+   *
+   * Without it a person who left in March keeps drawing a full salary, a WPS
+   * record, a gratuity increment and a leave provision every month afterwards —
+   * and because the payslips and the ledger both carry the same wrong figure,
+   * the reconciliation above cannot detect it. Article 53 of Federal
+   * Decree-Law 33/2021 gives fourteen days from the end of the contract.
+   */
+  const settle = async (e: EmployeeRow, leftOn: string, settlementAccount: string) => {
+    const answer = await ask({
+      title: `Settle ${e.name} (${e.code})?`,
+      detail:
+        `This posts the end-of-service settlement dated ${leftOn}, releases the gratuity held at 2250, and marks ` +
+        `${e.code} as left so no further run pays them. A settlement is made once. Article 53 of Federal ` +
+        `Decree-Law 33/2021 requires it within fourteen days of the contract ending.`,
+      confirmLabel: "Settle",
+      destructive: true,
+    });
+    if (answer === null) return;
+
+    const r = await act<{
+      entitlementMinor: string; provisionHeldMinor: string; differenceMinor: string;
+      serviceDays: number; reference: string | null;
+    }>("settle", { action: "settle", employeeCode: e.code, leftOn, settlementAccount });
+    if (!r) return;
+    setOpenRow(null);
+    setMsg(
+      r.reference
+        ? `Settled ${e.code} on ${leftOn}: ${r.serviceDays} days of service, ${fmtMinor(r.entitlementMinor, "AED", { zero: "zero" })} ` +
+          `owed against ${fmtMinor(r.provisionHeldMinor, "AED", { zero: "zero" })} already provided. Posted as ${r.reference}.`
+        : `${e.code} left on ${leftOn} after ${r.serviceDays} days. Nothing was owed and nothing had been provided, ` +
+          `so there was no entry to post.`,
+    );
   };
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
@@ -322,24 +381,74 @@ export default function PayrollPage() {
                     <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Gratuity to date</th>
                     <th style={{ width: "8rem" }}>WPS</th>
                     <th style={{ width: "6rem" }}>Status</th>
+                    <th style={{ width: "11rem" }}><span className="sr-only">Actions</span></th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.employees.map((e) => (
-                    <tr key={e.code}>
-                      <td className="sw-code">{e.code}</td>
-                      <td className="max-w-0 truncate">{e.name}</td>
-                      <td>{e.joinedOn}</td>
-                      <td className="hidden md:table-cell">{e.leftOn ?? "—"}</td>
-                      <td className="sw-num"><Figure minor={e.basicMinor} colour={false} /></td>
-                      <td className="sw-num"><Figure minor={e.gratuityToDateMinor} zero="zero" colour={false} /></td>
-                      <td>
-                        <span className={`sw-chip ${e.wpsReady ? "sw-chip-ok" : "sw-chip-bad"}`}>
-                          {e.wpsReady ? "ready" : "details missing"}
-                        </span>
-                      </td>
-                      <td><StatusChip status={e.status} /></td>
-                    </tr>
+                    <React.Fragment key={e.code}>
+                      <tr>
+                        <td className="sw-code">{e.code}</td>
+                        <td className="max-w-0 truncate">{e.name}</td>
+                        <td>{e.joinedOn}</td>
+                        <td className="hidden md:table-cell">{e.leftOn ?? "—"}</td>
+                        <td className="sw-num"><Figure minor={e.basicMinor} colour={false} /></td>
+                        <td className="sw-num"><Figure minor={e.gratuityToDateMinor} zero="zero" colour={false} /></td>
+                        <td>
+                          <span className={`sw-chip ${e.wpsReady ? "sw-chip-ok" : "sw-chip-bad"}`}>
+                            {e.wpsReady ? "ready" : "details missing"}
+                          </span>
+                        </td>
+                        <td><StatusChip status={e.status} /></td>
+                        <td>
+                          <span className="flex flex-wrap items-center gap-1 py-1">
+                            <button
+                              type="button"
+                              className="sw-btn sw-btn-sm"
+                              aria-expanded={openRow?.code === e.code && openRow.mode === "amend"}
+                              onClick={() => setOpenRow((o) =>
+                                o?.code === e.code && o.mode === "amend" ? null : { code: e.code, mode: "amend" })}
+                            >
+                              <span aria-hidden="true">Amend</span>
+                              <span className="sr-only">{`Amend ${e.name}`}</span>
+                            </button>
+                            {e.status === "active" && (
+                              <button
+                                type="button"
+                                className="sw-btn sw-btn-sm"
+                                aria-expanded={openRow?.code === e.code && openRow.mode === "settle"}
+                                onClick={() => setOpenRow((o) =>
+                                  o?.code === e.code && o.mode === "settle" ? null : { code: e.code, mode: "settle" })}
+                              >
+                                <span aria-hidden="true">Settle</span>
+                                <span className="sr-only">{`Settle end of service for ${e.name}`}</span>
+                              </button>
+                            )}
+                          </span>
+                        </td>
+                      </tr>
+                      {openRow?.code === e.code && (
+                        <tr>
+                          <td colSpan={9} style={{ background: "var(--sw-ground)" }}>
+                            {openRow.mode === "amend" ? (
+                              <AmendEmployee
+                                employee={e}
+                                busy={busy === "update-employee"}
+                                onSave={(changes) => amend(e.code, changes)}
+                                onCancel={() => setOpenRow(null)}
+                              />
+                            ) : (
+                              <SettleEmployee
+                                employee={e}
+                                busy={busy === "settle"}
+                                onSettle={(leftOn, account) => settle(e, leftOn, account)}
+                                onCancel={() => setOpenRow(null)}
+                              />
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
@@ -446,6 +555,162 @@ function AddEmployee({ busy, onAdd }: {
         {blocker && <span className="sw-sub" role="status" data-testid="employee-blocker">{blocker}</span>}
       </div>
     </Panel>
+  );
+}
+
+/**
+ * Amending an employment record.
+ *
+ * Only what changed is sent. `updateEmployee` reads an omitted field as "leave
+ * it alone" and an explicit null as "clear it", so a blank bank field here has
+ * to mean unchanged — otherwise opening this form on somebody and pressing Save
+ * would wipe the WPS details the file cannot be built without.
+ *
+ * The joining date is deliberately not offered: the module refuses to move it
+ * once a payslip is posted, because the gratuity already charged to 6050 was
+ * measured from it, and a control that only ever refuses is a control better
+ * expressed as an absent field.
+ */
+function AmendEmployee({ employee, busy, onSave, onCancel }: {
+  employee: EmployeeRow;
+  busy: boolean;
+  onSave: (changes: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const [f, setF] = React.useState({
+    name: employee.name,
+    basic: toInput(employee.basicMinor),
+    mol: "", routing: "", iban: "",
+  });
+  const set = (k: keyof typeof f, v: string) => setF((x) => ({ ...x, [k]: v }));
+
+  const basic = parseAmount(f.basic);
+  const iban = f.iban.replace(/\s+/g, "");
+
+  const blocker =
+    !f.name.trim() ? "An employee cannot be left without a name." :
+    basic === null || basic <= 0n ? "Gratuity is computed on basic pay, so the basic salary has to stay above nil." :
+    f.mol && !/^\d{14}$/.test(f.mol) ? "A MOL person id is 14 digits." :
+    f.routing && !/^\d{9}$/.test(f.routing) ? "A routing code is 9 digits." :
+    iban && !/^AE\d{21}$/.test(iban) ? "A UAE IBAN is AE followed by 21 digits." :
+    null;
+
+  const changes = () => {
+    const c: Record<string, unknown> = {};
+    if (f.name.trim() !== employee.name) c.name = f.name.trim();
+    if ((basic as bigint).toString() !== employee.basicMinor) c.basicMinor = (basic as bigint).toString();
+    if (f.mol) c.molPersonId = f.mol;
+    if (f.routing) c.routingCode = f.routing;
+    if (iban) c.iban = iban;
+    return c;
+  };
+  const nothing = Object.keys(changes()).length === 0;
+
+  return (
+    <div className="p-3">
+      <div className="sw-label">Amend {employee.code}</div>
+      <p className="sw-sub mt-1 max-w-[75ch]">
+        A pay change applies from the next run and leaves every posted payslip alone. The bank fields are blank
+        because a blank one is left as it is — fill one in only to set or correct it.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <Field label="Name">
+          <input className="sw-input" value={f.name} onChange={(e) => set("name", e.target.value)}
+            aria-label={`Name for ${employee.code}`} />
+        </Field>
+        <Field label="Basic salary">
+          <input className="sw-input sw-cell-num" inputMode="decimal" value={f.basic}
+            onChange={(e) => set("basic", e.target.value)} aria-label={`Basic salary for ${employee.code}`} />
+        </Field>
+        <Field label="MOL person id">
+          <input className="sw-input" inputMode="numeric" value={f.mol} placeholder="unchanged"
+            onChange={(e) => set("mol", e.target.value)} aria-label={`MOL person id for ${employee.code}`} />
+        </Field>
+        <Field label="Routing code">
+          <input className="sw-input" inputMode="numeric" value={f.routing} placeholder="unchanged"
+            onChange={(e) => set("routing", e.target.value)} aria-label={`Routing code for ${employee.code}`} />
+        </Field>
+        <Field label="IBAN">
+          <input className="sw-input" value={f.iban} placeholder="unchanged"
+            onChange={(e) => set("iban", e.target.value)} aria-label={`IBAN for ${employee.code}`} />
+        </Field>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className="sw-btn sw-btn-primary"
+          disabled={blocker !== null || nothing || busy}
+          aria-disabled={blocker !== null || nothing || busy || undefined}
+          data-testid={`amend-${employee.code}`}
+          onClick={() => onSave(changes())}
+        >
+          {busy ? "Saving…" : "Save changes"}
+        </button>
+        <button type="button" className="sw-btn" onClick={onCancel}>Cancel</button>
+        {(blocker || nothing) && (
+          <span className="sw-sub" role="status">{blocker ?? "Nothing has been changed yet."}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The end-of-service settlement.
+ *
+ * The date is asked for rather than assumed: the contract ended when it ended,
+ * and settling on today's date would measure service and the fourteen-day
+ * Article 53 window from the wrong day.
+ */
+function SettleEmployee({ employee, busy, onSettle, onCancel }: {
+  employee: EmployeeRow;
+  busy: boolean;
+  onSettle: (leftOn: string, settlementAccount: string) => void;
+  onCancel: () => void;
+}) {
+  const [leftOn, setLeftOn] = React.useState(() => new Date().toISOString().slice(0, 10));
+  const [account, setAccount] = React.useState("1010");
+  const tooEarly = leftOn < employee.joinedOn;
+
+  return (
+    <div className="p-3">
+      <div className="sw-label">Settle {employee.code} — {employee.name}</div>
+      <p className="sw-sub mt-1 max-w-[75ch]">
+        Gratuity to date is <Figure minor={employee.gratuityToDateMinor} zero="zero" colour={false} />, which is what
+        would be owed if they left today; the settlement is measured on the date below, not on this figure. What has
+        already been provided at 2250 is released, the difference goes to 6050, and the entitlement is credited to
+        wherever it is being paid from.
+      </p>
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <Field label="Last day">
+          <input type="date" className="sw-input" style={{ width: "10rem" }} value={leftOn}
+            onChange={(e) => setLeftOn(e.target.value)} aria-label={`Last day for ${employee.code}`} />
+        </Field>
+        <Field label="Settle from">
+          <select className="sw-select" style={{ width: "16rem" }} value={account}
+            onChange={(e) => setAccount(e.target.value)} aria-label={`Settle from — the account paying ${employee.code}`}>
+            <option value="1010">1010 Bank — paid now</option>
+            <option value="2200">2200 Salaries payable — pay with the next run</option>
+          </select>
+        </Field>
+        <button
+          type="button"
+          className="sw-btn sw-btn-danger"
+          disabled={tooEarly || busy}
+          aria-disabled={tooEarly || busy || undefined}
+          data-testid={`settle-${employee.code}`}
+          onClick={() => onSettle(leftOn, account)}
+        >
+          {busy ? "Settling…" : "Settle end of service"}
+        </button>
+        <button type="button" className="sw-btn" onClick={onCancel}>Cancel</button>
+      </div>
+      {tooEarly && (
+        <p className="sw-sub mt-2" style={{ color: "var(--sw-neg)" }} role="status">
+          {employee.code} joined on {employee.joinedOn} and cannot leave before that.
+        </p>
+      )}
+    </div>
   );
 }
 

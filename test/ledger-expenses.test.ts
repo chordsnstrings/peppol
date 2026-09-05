@@ -6,6 +6,7 @@ import {
   postClaim, payClaim, claimList, claimDetail,
   type NewClaimLine,
 } from "@/lib/server/ledger/expenses";
+import { setRule, decide } from "@/lib/server/ledger/approvals";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -22,6 +23,8 @@ const TRN = "100123456700003";
 async function wipe() {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "ExpenseClaimLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "ExpenseClaim" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
@@ -307,6 +310,106 @@ d("employee expense claims", () => {
     const filtered = await claimList({ orgId: ORG, entityId: ENT, status: "paid" });
     expect(filtered.claims.every((c) => c.status === "paid")).toBe(true);
     expect(filtered.summary.approvedUnpaidMinor).toBe(list.summary.approvedUnpaidMinor);
+  });
+
+  /*
+   * The entity's approval rules, as they bind on this subledger.
+   *
+   * approveClaim() is a single signature from somebody who is not the claimant,
+   * and that is all it will ever be. The rules in approvals.ts are the other
+   * half — how many signatures, from whom, above what amount — and until
+   * postClaim() called the guard an organisation could see "claims over 50,000
+   * need a director" on its own approvals screen while every one of them posted
+   * on a line manager's tick.
+   *
+   * The threshold is set far above every fixture above so the rest of the file
+   * is untouched by it, which is itself the point: a claim under every
+   * threshold posts exactly as it always did.
+   */
+  it("holds a claim over the threshold until the rules are satisfied, and posts it after", async () => {
+    // Claims over AED 50,000 need a director, on top of the line manager.
+    await setRule({
+      orgId: ORG, entityId: ENT, subjectType: "EXPENSE_CLAIM",
+      thresholdMinor: 5_000_000, approverRole: "DIRECTOR", approversRequired: 1,
+    });
+
+    const claim = await draft(
+      [taxi({ description: "Relocation shipping", netMinor: 6_000_000, vatMinor: 300_000 })],
+      { reference: "EXP-RULE" },
+    );
+    await submitClaim({ orgId: ORG, claimId: claim.id });
+    // The subledger's own control, fully satisfied: submitted, and approved by
+    // somebody other than the claimant.
+    const ok = await approveClaim({ orgId: ORG, claimId: claim.id, approverId: "M-900" });
+    expect(ok.status).toBe("approved");
+
+    // And still refused, because a line manager's tick is not what the business
+    // wrote down for a claim this size.
+    await expect(postClaim({ orgId: ORG, claimId: claim.id })).rejects.toThrow(LedgerError);
+    await expect(postClaim({ orgId: ORG, claimId: claim.id })).rejects.toThrow(/Expense claim EXP-RULE has not been approved/i);
+    await expect(postClaim({ orgId: ORG, claimId: claim.id })).rejects.toThrow(/one more approval from a director/i);
+
+    // Refused before anything was written: no entry, and the claim is left
+    // exactly where it was rather than half-moved to posted.
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `expense-claim:${claim.id}` } })).toBe(0);
+    const held = await db.expenseClaim.findUniqueOrThrow({ where: { id: claim.id } });
+    expect(held.status).toBe("approved");
+    expect(held.entryId).toBeNull();
+
+    await decide({
+      orgId: ORG, entityId: ENT, subjectType: "EXPENSE_CLAIM", subjectId: claim.id,
+      decision: "APPROVED", decidedBy: "u-dir-1",
+      // Net plus ALL the VAT — what the employee is out of pocket, which is the
+      // figure postClaim() tests and the figure the approvals screen shows.
+      amountMinor: 6_300_000,
+      submittedBy: claim.employeeCode,
+    });
+
+    const posted = await postClaim({ orgId: ORG, claimId: claim.id });
+    expect(posted.alreadyPosted).toBe(false);
+    expect(posted.payableMinor).toBe("6300000");
+    expect(await linesOf(posted.entryId)).toEqual({
+      "6400": 6_000_000n,   // Dr travel — net
+      "1350": 300_000n,     // Dr recoverable input VAT
+      "2200": -6_300_000n,  // Cr owed to the employee
+    });
+    expect((await db.expenseClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe("posted");
+  });
+
+  it("lets a claim under every threshold post with no decisions on file at all", async () => {
+    // The rule above is still in force. A 1,050.00 taxi claim meets none of it,
+    // so the guard returns quietly and nothing about the everyday claim
+    // changes — which is what makes it safe to call the guard on every posting
+    // rather than only on the large ones.
+    const claim = await draft([taxi()], { reference: "EXP-UNDER" });
+    await submitClaim({ orgId: ORG, claimId: claim.id });
+    await approveClaim({ orgId: ORG, claimId: claim.id, approverId: "M-900" });
+
+    const posted = await postClaim({ orgId: ORG, claimId: claim.id });
+    expect(posted.payableMinor).toBe("105000");
+    expect(await db.approvalDecision.count({ where: { orgId: ORG, subjectId: claim.id } })).toBe(0);
+  });
+
+  it("does not count a decision recorded against some other figure", async () => {
+    // The failure the whole workflow exists to catch: a claim signed at one
+    // amount and posted at another. The signature on file is for a claim that
+    // no longer exists, so it counts for nothing and the refusal says so.
+    const claim = await draft(
+      [taxi({ description: "Conference", netMinor: 6_000_000, vatMinor: 300_000 })],
+      { reference: "EXP-REKEYED" },
+    );
+    await submitClaim({ orgId: ORG, claimId: claim.id });
+    await approveClaim({ orgId: ORG, claimId: claim.id, approverId: "M-900" });
+    // Signed while the claim came to 52,500.00; a receipt was added afterwards
+    // and it now comes to 63,000.00.
+    await decide({
+      orgId: ORG, entityId: ENT, subjectType: "EXPENSE_CLAIM", subjectId: claim.id,
+      decision: "APPROVED", decidedBy: "u-dir-1", amountMinor: 5_250_000,
+      submittedBy: claim.employeeCode,
+    });
+
+    await expect(postClaim({ orgId: ORG, claimId: claim.id })).rejects.toThrow(/An approval on file was given when this expense claim was/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `expense-claim:${claim.id}` } })).toBe(0);
   });
 
   it("keeps the trial balance tied after everything above", async () => {

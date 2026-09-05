@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { ledgerBalances } from "./balances";
 
@@ -337,6 +338,7 @@ export async function runWip(opts: {
   if (!/^\d{4}-\d{2}$/.test(opts.period)) {
     throw new LedgerError(`"${opts.period}" is not a month. Give it as 2026-03.`);
   }
+  const fmt = fmtIn(await bookCurrency(opts.orgId, opts.entityId));
   const [y, m] = opts.period.split("-").map(Number);
   const endsOn = new Date(Date.UTC(y, m, 0));
 
@@ -510,9 +512,18 @@ export async function timesheetRegister(opts: {
   };
 }
 
-function fmt(v: bigint): string {
-  const neg = v < 0n;
-  const s = (neg ? -v : v).toString().padStart(3, "0");
-  const body = `${s.slice(0, -2)}.${s.slice(-2)}`;
-  return neg ? `(${body})` : body;
+/**
+ * A figure in the book's own currency. Through `fmtMinor`, which knows each
+ * currency's exponent: two decimals is right for a dirham and wrong by a
+ * factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const fmtIn = (currency: string) => (v: bigint) => fmtMinor(v, currency, { zero: "zero" });
+
+/** The currency this entity keeps its books in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }

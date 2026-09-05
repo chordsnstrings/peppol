@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
 
 /**
@@ -76,12 +77,37 @@ function assertPeriod(period: string, what = "A payroll period"): string {
   return period;
 }
 
-/** Minor units as a decimal string, by string surgery. Money never becomes a float. */
-function decimal(minor: bigint): string {
-  const neg = minor < 0n;
-  const abs = neg ? -minor : minor;
-  const s = abs.toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${s.slice(0, -2)}.${s.slice(-2)}`;
+/**
+ * Minor units as a decimal string, in the currency the wage is paid in. Money
+ * never becomes a float, and the number of decimals is the currency's own: this
+ * used to split the digits two from the right, which is right for a dirham and
+ * wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const decimalIn = (currency: string) => (minor: bigint) =>
+  fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
+
+/**
+ * The GPSSA floor and cap are dirham amounts set by law, not book figures, so
+ * they are read in dirhams whatever currency the entity keeps its books in.
+ * `pensionContribution` is handed rates and a salary and has no book to ask.
+ */
+const inDirhams = decimalIn("AED");
+
+/**
+ * An amount for the WPS SIF file: dirhams, and no thousands separator. The
+ * record itself ends with the literal AED, and the file is comma-delimited —
+ * a grouped figure would split one field into two and the bank would reject
+ * the whole file.
+ */
+const sifAmount = (minor: bigint) => inDirhams(minor).replace(/,/g, "");
+
+/** The currency this entity keeps its books in, which is the one wages are in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }
 
 /* --------------------------------------------------------- pension schemes */
@@ -181,10 +207,10 @@ export function pensionContribution(opts: {
   let note: string | null = null;
   if (raw < rates.floorMinor) {
     salary = rates.floorMinor;
-    note = `The contribution salary was raised to the scheme's floor of ${decimal(rates.floorMinor)}.`;
+    note = `The contribution salary was raised to the scheme's floor of ${inDirhams(rates.floorMinor)}.`;
   } else if (raw > rates.capMinor) {
     salary = rates.capMinor;
-    note = `The contribution salary was capped at ${decimal(rates.capMinor)}; pay above the cap does not contribute.`;
+    note = `The contribution salary was capped at ${inDirhams(rates.capMinor)}; pay above the cap does not contribute.`;
   }
 
   const share = (bps: number) => {
@@ -709,6 +735,7 @@ export async function runPayroll(opts: {
    */
   pensionRates?: PensionRates;
 }): Promise<PayrollRunResult> {
+  const decimal = decimalIn(await bookCurrency(opts.orgId, opts.entityId));
   const period = assertPeriod(opts.period);
   const start = monthStart(period);
   const end = monthEnd(period);
@@ -970,6 +997,7 @@ export async function postPayroll(opts: {
   actorId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<PostPayrollResult> {
+  const decimal = decimalIn(await bookCurrency(opts.orgId, opts.entityId));
   const period = assertPeriod(opts.period);
   const externalKey = payrollKey(opts.entityId, period);
 
@@ -1396,8 +1424,8 @@ export async function wpsFile(opts: {
         iso(from),
         iso(to),
         String(daysOnPayroll),
-        decimal(fixed),
-        decimal(variable),
+        sifAmount(fixed),
+        sifAmount(variable),
       ].join(","),
     );
   }
@@ -1415,7 +1443,7 @@ export async function wpsFile(opts: {
       createdAt,
       period,
       String(payslips.length),
-      decimal(total),
+      sifAmount(total),
       "AED",
     ].join(","),
   );

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
 
 /**
@@ -71,11 +72,12 @@ const minor = (v: number | bigint | string | undefined): bigint => {
   return BigInt(typeof v === "string" ? v.trim() : v);
 };
 
-const fmt = (v: bigint) => {
-  const neg = v < 0n;
-  const a = (neg ? -v : v).toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${a.slice(0, -2)}.${a.slice(-2)}`;
-};
+/**
+ * A figure in the book's own currency. `fmtMinor` knows each currency's
+ * exponent; splitting the digits two from the right is right for a dirham and
+ * wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const fmt = (v: bigint, currency: string) => fmtMinor(v, currency, { sign: "minus", zero: "zero" });
 
 /**
  * Check an import before it touches anything.
@@ -164,7 +166,7 @@ export async function previewOpeningBalances(opts: {
   if (difference !== 0n) {
     const side = difference > 0n ? "Credits" : "Debits";
     blockers.push(
-      `The trial balance does not balance: ${side.toLowerCase()} are short by ${fmt(difference > 0n ? difference : -difference)}. ` +
+      `The trial balance does not balance: ${side.toLowerCase()} are short by ${fmt(difference > 0n ? difference : -difference, book.functionalCurrency)}. ` +
         `Nothing has been posted. The difference is in the source, not here — a system that posts the gap to a suspense ` +
         `account gives you books that balance and are wrong, and the error becomes very hard to find because nothing looks broken.`,
     );

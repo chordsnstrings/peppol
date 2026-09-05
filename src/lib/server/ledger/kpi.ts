@@ -1,3 +1,4 @@
+import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { profitAndLoss, balanceSheet, type StatementLine } from "./statements";
 import { receivablesAgeing } from "./ar";
@@ -101,12 +102,17 @@ export const asPercent = (bps: bigint) => `${twoDp(bps, 100n)}%`;
 /** A ×10,000 figure as a plain multiple or day count: 25,000 reads as "2.50". */
 export const asTimes = (bps: bigint) => twoDp(bps, 10_000n);
 
-/** Minor units in a sentence: grouped, signed, no accounting parentheses. */
+/**
+ * Minor units in a sentence: grouped, signed, no accounting parentheses.
+ *
+ * The currency was already being passed in and then ignored: the digits were
+ * split two from the right whatever it said. That is right for a dirham and
+ * wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial,
+ * all of which have three decimals — and these sentences print the code
+ * immediately before the figure, so the reader had every reason to believe it.
+ */
 function money(minor: bigint, currency: string): string {
-  const neg = minor < 0n;
-  const abs = (neg ? -minor : minor).toString().padStart(3, "0");
-  const whole = abs.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${neg ? "-" : ""}${currency} ${whole}.${abs.slice(-2)}`;
+  return `${currency} ${fmtMinor(minor, currency, { sign: "minus", zero: "zero" })}`;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
 import { Prisma } from "@prisma/client";
+import { fmtMinor } from "@/lib/ledger/format";
 
 /**
  * The posting service — the ONLY path by which anything reaches the general
@@ -311,12 +312,12 @@ export async function post(input: PostInput) {
       const [cur] = [...currencies];
       const sum = prepared.reduce((a, p) => a + p.txnAmountMinor, 0n);
       if (sum !== 0n) {
-        throw new LedgerError(`Entry does not balance in ${cur}: it is out by ${fmt(sum)}. Debits must equal credits.`);
+        throw new LedgerError(`Entry does not balance in ${cur}: it is out by ${fmt(sum, cur)}. Debits must equal credits.`);
       }
     }
     const fnSum = prepared.reduce((a, p) => a + p.functionalAmountMinor, 0n);
     if (fnSum !== 0n) {
-      throw new LedgerError(`Entry does not balance in ${book.functionalCurrency} after conversion (out by ${fmt(fnSum)}). Check the exchange rates — a cross-currency entry balances once converted.`);
+      throw new LedgerError(`Entry does not balance in ${book.functionalCurrency} after conversion (out by ${fmt(fnSum, book.functionalCurrency)}). Check the exchange rates — a cross-currency entry balances once converted.`);
     }
 
     const [{ n: number }] = await tx.$queryRaw<{ n: string }[]>`
@@ -433,11 +434,19 @@ function iso(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
-function fmt(minor: bigint) {
-  const neg = minor < 0n;
-  const abs = neg ? -minor : minor;
-  const s = abs.toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${s.slice(0, -2)}.${s.slice(-2)}`;
+/**
+ * An amount in the currency it is an amount of.
+ *
+ * This used to split the digits two from the right whatever the currency was,
+ * which is right for a dirham and wrong by a factor of ten for a Kuwaiti or
+ * Bahraini dinar or an Omani rial — all three of which have three decimals.
+ * The two messages below name the currency in the same sentence, so an entry a
+ * fils out in KWD said "out by 0.01" two words after the word KWD, and the
+ * bookkeeper hunting a one-fils rounding difference was hunting the wrong
+ * figure. `fmtMinor` is the one function that knows each currency's exponent.
+ */
+function fmt(minor: bigint, currency: string) {
+  return fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
 }
 
 function tallyBy<T>(rows: T[], key: (r: T) => string, val: (r: T) => bigint) {

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
 import { monthlyCharge } from "./assets";
 import { ledgerBalances } from "./balances";
@@ -64,12 +65,23 @@ function asDate(v: Date | string, what: string): Date {
   return d;
 }
 
-const fmt = (v: bigint) => {
-  const neg = v < 0n;
-  const s = (neg ? -v : v).toString().padStart(3, "0");
-  const body = `${s.slice(0, -2)}.${s.slice(-2)}`;
-  return neg ? `(${body})` : body;
-};
+/**
+ * A figure in the currency the asset is carried in, which is the book's.
+ *
+ * Through `fmtMinor`, the one function that knows each currency's exponent:
+ * splitting the digits two from the right is right for a dirham and wrong by a
+ * factor of ten for a Kuwaiti or Bahraini dinar or an Omani rial.
+ */
+const fmtIn = (currency: string) => (v: bigint) => fmtMinor(v, currency, { zero: "zero" });
+
+/** The currency this entity keeps its books in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
+}
 
 async function assetOf(scope: { orgId: string; entityId: string }, code: string): Promise<AssetRow> {
   const a = await prisma.fixedAsset.findFirst({
@@ -180,8 +192,16 @@ export function splitMovement(opts: {
   impairedMinor: bigint;
   /** How much of an increase may go back to profit — the IAS 36.117 ceiling. */
   reversalRoomMinor: bigint;
+  /**
+   * The book's currency, for the figures in `reasoning`. This function is pure
+   * arithmetic and has no book to ask, so a caller that has one passes it;
+   * without it the reasoning reads in dirhams, which is what this ledger's
+   * books are kept in unless somebody said otherwise.
+   */
+  currency?: string;
 }): Split {
   const { movementMinor, surplusMinor, impairedMinor } = opts;
+  const fmt = fmtIn(opts.currency ?? "AED");
 
   if (movementMinor === 0n) {
     return {
@@ -273,6 +293,8 @@ export async function revalueAsset(opts: {
   basis?: string;
   actorId?: string;
 }): Promise<RevalueResult> {
+  const currency = await bookCurrency(opts.orgId, opts.entityId);
+  const fmt = fmtIn(currency);
   const asset = await assetOf(opts, opts.code);
   if (asset.status !== "active") {
     throw new LedgerError(
@@ -316,6 +338,7 @@ export async function revalueAsset(opts: {
     surplusMinor: asset.surplusMinor,
     impairedMinor: asset.impairedMinor,
     reversalRoomMinor: room,
+    currency,
   });
 
   if (movement === 0n) {
@@ -447,6 +470,7 @@ export async function releaseSurplus(opts: {
   amountMinor?: number | bigint | string;
   actorId?: string;
 }) {
+  const fmt = fmtIn(await bookCurrency(opts.orgId, opts.entityId));
   const asset = await assetOf(opts, opts.code);
   if (asset.surplusMinor <= 0n) {
     throw new LedgerError(`${asset.code} carries no revaluation surplus, so there is nothing to transfer.`);

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError, post } from "./post";
 import { CT_RATE_PERCENT, ZERO_BAND_MINOR, type MinorInput } from "./corptax";
 
@@ -291,6 +292,7 @@ export async function recordItems(opts: {
 }): Promise<RecordItemsResult> {
   const asOf = parseAsOf(opts.asOf);
   const warnings: string[] = [];
+  const plain = plainIn(await functionalCurrency(opts.orgId, opts.entityId));
 
   if (!Array.isArray(opts.items)) {
     throw new LedgerError("A deferred tax register needs a list of items, even if the list is empty.");
@@ -669,6 +671,7 @@ export async function position(opts: {
   const lines = movementLines(fromNet, here.netMinor, opts.asOf);
 
   const currency = await functionalCurrency(opts.orgId, opts.entityId);
+  const plain = plainIn(currency);
 
   if (here.items.length === 0 && !previous) {
     warnings.push(
@@ -711,7 +714,7 @@ export async function position(opts: {
   if (recognised > 0n) {
     warnings.push(
       `Measured at a flat rate. Article 3 of Federal Decree-Law 47/2022 charges nil on the first ` +
-        `${plain(ZERO_BAND_MINOR)} of taxable income, so an entity whose profits sit near that band will reverse ` +
+        `${inDirhams(ZERO_BAND_MINOR)} of taxable income, so an entity whose profits sit near that band will reverse ` +
         `these differences at less than the headline rate, and both the asset and the liability here are an upper ` +
         `bound. Small Business Relief under Ministerial Decision 73/2023 would reduce them further still.`,
     );
@@ -830,6 +833,7 @@ export async function postDeferredTax(opts: {
 }): Promise<PostDeferredTaxResult> {
   const asOf = parseAsOf(opts.asOf);
   const warnings: string[] = [];
+  const plain = plainIn(await functionalCurrency(opts.orgId, opts.entityId));
 
   const later = await prisma.deferredTaxPosting.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, asOf: { gt: asOf } },
@@ -1062,6 +1066,7 @@ export async function deferredTaxNote(opts: {
   const previousDate = await previousRegisterDate(opts.orgId, opts.entityId, asOf);
   const previous = previousDate ? await measureAt(opts.orgId, opts.entityId, previousDate) : null;
   const currency = await functionalCurrency(opts.orgId, opts.entityId);
+  const plain = plainIn(currency);
 
   const categories = DEFERRED_TAX_CATEGORIES.filter(
     (c) => here.items.some((i) => i.category === c) || (previous?.items ?? []).some((i) => i.category === c),
@@ -1324,14 +1329,24 @@ function parseMinor(v: MinorInput, field: string): bigint {
 }
 
 /**
- * Minor units as a decimal, for messages a human reads. Grouped, unlike the
- * sibling module's: these sentences quote the AED 375,000 band beside a
- * measured balance, and an ungrouped 37500000 next to a grouped threshold is
- * how a reader miscounts a digit.
+ * Minor units as a decimal, for messages a human reads. Grouped: these
+ * sentences quote the AED 375,000 band beside a measured balance, and an
+ * ungrouped 37500000 next to a grouped threshold is how a reader miscounts a
+ * digit.
+ *
+ * The currency is bound at the point of use rather than written in. It used to
+ * print the letters AED and split the digits two from the right whatever the
+ * book was kept in — wrong on both counts for a book kept elsewhere, since a
+ * dinar has three decimals, and every measured figure below comes off this
+ * entity's own register. `fmtMinor` knows each currency's exponent.
  */
-function plain(minor: bigint): string {
+const plainIn = (currency: string) => (minor: bigint): string => {
   const neg = minor < 0n;
-  const abs = (neg ? -minor : minor).toString().padStart(3, "0");
-  const whole = abs.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `${neg ? "-" : ""}AED ${whole}.${abs.slice(-2)}`;
-}
+  return `${neg ? "-" : ""}${currency} ${fmtMinor(neg ? -minor : minor, currency, { zero: "zero" })}`;
+};
+
+/**
+ * The zero-rate band is a dirham figure in the law whatever currency the book
+ * is kept in, so it is written in dirhams and not in the book's currency.
+ */
+const inDirhams = plainIn("AED");

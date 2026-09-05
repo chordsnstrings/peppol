@@ -4,7 +4,7 @@ import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import {
-  declareRelatedParty, endRelationship, declareCompensation, attest,
+  declareRelatedParty, endRelationship, declareCompensation, attest, assessNotRelated,
   relatedPartyNote, RELATIONSHIPS, COMP_CATEGORIES,
   type Relationship, type CompCategory,
 } from "@/lib/server/ledger/related-parties";
@@ -39,11 +39,14 @@ export async function POST(req: Request) {
     await assertSameOrigin(req);
     const { orgId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
-      action?: "declare" | "end" | "compensation" | "attest";
+      action?: "declare" | "end" | "compensation" | "attest" | "assess";
       entityId?: string;
       party?: {
         partyKey: string; name?: string; relationship: Relationship;
         declaredBy: string; declaredOn?: string; startedOn: string; endedOn?: string | null; notes?: string;
+      };
+      assessment?: {
+        partyKey: string; name?: string; assessedBy: string; assessedOn?: string; notes?: string;
       };
       id?: string;
       endedOn?: string;
@@ -66,6 +69,13 @@ export async function POST(req: Request) {
       case "declare":
         if (!b.party) return json({ error: "There is nothing to declare." }, 400);
         return json(ledgerJson({ party: await declareRelatedParty({ ...scope, party: b.party }) }));
+
+      // Assessed and not related. It writes no disclosure and asserts no
+      // relationship — it only records that somebody looked, so the note can
+      // tell an answered question from an unasked one.
+      case "assess":
+        if (!b.assessment?.partyKey) return json({ error: "Which party?" }, 400);
+        return json(ledgerJson({ assessment: await assessNotRelated({ ...scope, party: b.assessment }) }));
 
       case "end":
         if (!b.id || !b.endedOn) return json({ error: "Which declaration, and from what date?" }, 400);

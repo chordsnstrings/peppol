@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError, type PostLine } from "./post";
+import { assertApproved } from "./approvals";
 
 /**
  * Employee expense claims — the subledger for money staff spent out of their
@@ -567,6 +568,48 @@ export async function postClaim(opts: {
       `Claim ${claim.reference} nets to nothing, so it owes the employee nothing and has nothing to post. Check the lines.`,
     );
   }
+
+  // The one approval this file knows about — approveClaim() above — is a single
+  // signature from somebody other than the claimant. That is the right control
+  // for a taxi receipt and nowhere near enough for a 200,000 relocation claim,
+  // which is what the rules in approvals.ts exist to say. So both apply: the
+  // claim has to be in `approved` (checked immediately above by
+  // assertTransition) AND it has to satisfy whatever the entity's rules ask
+  // for. Neither substitutes for the other, and dropping this call would leave
+  // an organisation reading "claims over 50,000 need a director" off its own
+  // screen while every one of them posted on a line manager's tick.
+  //
+  // Called on every claim, not only the big ones: where no rule covers the
+  // amount assertApproved returns quietly, which is what makes an unconditional
+  // call safe and what stops this becoming a guard somebody forgets.
+  //
+  // The amount is totalMinor — net plus ALL the VAT, recoverable or not, which
+  // is what the employee is actually out of pocket and what the business will
+  // reimburse. It is deliberately the same figure pendingFor() and the
+  // approvals route compute for this claim from totalsOf(), because an approval
+  // records the amount it was shown and counts for nothing if the two disagree:
+  // testing expenseMinor here instead would make every approval collected
+  // through the approvals screen look stale and nothing would ever post.
+  //
+  // Nothing has been written at this point — the entry and the status update
+  // both happen below — so a refusal leaves the claim exactly as it was, still
+  // approved and still postable once the signatures are in. And a claim whose
+  // entry already exists returned further up, so a rule written after the fact
+  // cannot block the repair path or a retry.
+  await assertApproved({
+    orgId: claim.orgId,
+    entityId: claim.entityId,
+    subjectType: "EXPENSE_CLAIM",
+    subjectId: claim.id,
+    amountMinor: totals.totalMinor,
+    reference: claim.reference,
+    // The claim's own currency, so the refusal quotes the figure in the unit
+    // the receipts were in. The thresholds are held in AED, so a claim in
+    // another currency is still compared against a dirham limit at its face
+    // value — the same known limitation postBill() carries, set out at length
+    // there. It is not fixed by converting on one path only.
+    currency: claim.currency,
+  });
 
   const fxRate = claim.currency === "AED" ? undefined : opts.fxRate;
   if (claim.currency !== "AED" && !(fxRate && fxRate > 0)) {

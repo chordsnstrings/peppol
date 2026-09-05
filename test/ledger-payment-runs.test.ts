@@ -85,6 +85,20 @@ async function approveBill(b: Invoice, who: string) {
   });
 }
 
+/**
+ * A bill received under the fixture's own approval rule.
+ *
+ * The rule in `beforeAll` says every bill needs one signature, and
+ * `assertApproved` now holds it — so a test that raises a bill of its own has
+ * to sign it, the same as the six raised up there. Posting without the
+ * signature is refused, which is the control working rather than the fixture
+ * being wrong.
+ */
+async function receiveApproved(b: Invoice, who = "farah") {
+  await approveBill(b, who);
+  return receive(b);
+}
+
 /** Everything a run posted, netted by account code. */
 async function linesOfRun(runId: string) {
   const rows = await db.journalLine.findMany({
@@ -346,7 +360,7 @@ d("supplier payment runs", () => {
   it("clears the payables ageing exactly as settling one bill at a time would", async () => {
     // The control bill is in the run; settle a bill of the same shape the old
     // way and the ageing has to treat them identically.
-    const solo = await receive(bill({
+    const solo = await receiveApproved(bill({
       number: "BILL-SOLO", issueDate: "2026-04-04", dueDate: "2026-04-20",
       seller: { nameEn: "Palm Tools LLC" },
     }, [line(12_000, 600)]));
@@ -545,7 +559,7 @@ d("supplier payment runs", () => {
 
     // The name on the face of the bill is not the counterparty's name; only
     // the TRN ties them together, and a folded-name match would miss it.
-    const b = await receive(bill({
+    const b = await receiveApproved(bill({
       id: `bill-trn-${Date.now()}`,
       number: `BILL-TRN-${Date.now()}`,
       issueDate: "2026-05-02", supplyDate: "2026-05-02", dueDate: "2026-06-01",

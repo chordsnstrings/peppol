@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { postBill, postSupplierPayment, payablesAgeing } from "@/lib/server/ledger/ap";
+import { setRule, decide } from "@/lib/server/ledger/approvals";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -15,6 +16,8 @@ const ENT = "t-ent-ap";
 async function wipe() {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
@@ -196,6 +199,112 @@ d("payables subledger", () => {
     expect(BigInt(credit!.outstandingMinor)).toBe(-105_000n);
     const detail = ageing.open.reduce((a, o) => a + BigInt(o.outstandingMinor), 0n);
     expect(detail.toString()).toBe(ageing.totalMinor);
+  });
+
+  /*
+   * The approval rules, as they bind on this subledger.
+   *
+   * Both thresholds sit far above every fixture above, so the rules written
+   * here catch only the documents these tests raise — the rest of the file goes
+   * on posting exactly as it did, which is itself the proof that a guard called
+   * on every bill costs nothing where no rule covers the amount.
+   */
+  it("refuses a bill over the approval threshold and posts it once it is signed", async () => {
+    // Bills over AED 50,000 need two directors.
+    await setRule({
+      orgId: ORG, entityId: ENT, subjectType: "BILL",
+      thresholdMinor: 5_000_000, approverRole: "DIRECTOR", approversRequired: 2,
+    });
+
+    const b = bill({ number: "BILL-APPROVAL" }, [line(6_000_000, 300_000)]);
+    const subject = {
+      orgId: ORG, entityId: ENT, subjectType: "BILL" as const, subjectId: b.id,
+      // The gross payable — what the supplier is owed, which is the figure the
+      // rule is written against and the figure the guard tests.
+      amountMinor: 6_300_000,
+    };
+
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(LedgerError);
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(/Supplier bill BILL-APPROVAL has not been approved/i);
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(/two more approvals from a director/i);
+    // Refused before anything was written: no entry, not even a half-made one.
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `bill:${b.id}` } })).toBe(0);
+
+    // One signature is not two. The rule asks for both, and the guard says so
+    // rather than letting the bill through on the first director's tick.
+    await decide({ ...subject, decision: "APPROVED", decidedBy: "u-dir-1" });
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(/one more approval from a director/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `bill:${b.id}` } })).toBe(0);
+
+    await decide({ ...subject, decision: "APPROVED", decidedBy: "u-dir-2" });
+    const posted = await postBill({ orgId: ORG, bill: b });
+    expect(posted.alreadyPosted).toBe(false);
+    expect(await linesOf(posted.entryId)).toEqual({
+      "6900": 6_000_000n,
+      "1350": 300_000n,
+      "2000": -6_300_000n,
+    });
+  });
+
+  it("lets a bill under every threshold through with nobody's signature on it", async () => {
+    // The BILL rule from the test above is still in force. A 1,050.00 bill
+    // meets none of it, so the guard returns quietly and the posting is exactly
+    // what it was before any of this existed — which is what makes it safe to
+    // call the guard on every bill rather than only on the large ones.
+    const r = await postBill({ orgId: ORG, bill: bill({ number: "BILL-SMALL" }) });
+    expect(r.alreadyPosted).toBe(false);
+    expect((await linesOf(r.entryId))["2000"]).toBe(-105_000n);
+  });
+
+  it("does not count an approval given at some other figure", async () => {
+    // The failure an approval workflow exists to catch: a bill signed at one
+    // amount and posted at another. The signature on file is for a document
+    // that no longer exists, so it counts for nothing.
+    const b = bill({ number: "BILL-REKEYED" }, [line(6_000_000, 300_000)]);
+    // Signed while the bill said 52,500.00, then re-keyed to 63,000.00 before
+    // anybody posted it.
+    await decide({
+      orgId: ORG, entityId: ENT, subjectType: "BILL", subjectId: b.id,
+      decision: "APPROVED", decidedBy: "u-dir-1", amountMinor: 5_250_000,
+    });
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(/An approval on file was given when this supplier bill was/i);
+    await expect(postBill({ orgId: ORG, bill: b })).rejects.toThrow(/two more approvals from a director/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `bill:${b.id}` } })).toBe(0);
+  });
+
+  it("refuses a supplier payment over the approval threshold until it is signed", async () => {
+    // Payments over AED 10,000 need a director. The bill being settled is well
+    // under the bill threshold, so nothing but the payment is under control here.
+    await setRule({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT",
+      thresholdMinor: 1_000_000, approverRole: "DIRECTOR", approversRequired: 1,
+    });
+
+    const b = bill({ number: "BILL-BIGPAY" }, [line(2_000_000, 100_000)]);
+    await postBill({ orgId: ORG, bill: b });
+
+    const pay = {
+      orgId: ORG, entityId: ENT, billId: b.id, billNumber: b.number,
+      paymentId: "sp-approval", paidOn: "2026-04-22", bankAmountMinor: 2_100_000,
+    };
+    await expect(postSupplierPayment(pay)).rejects.toThrow(/Payment BILL-BIGPAY has not been approved/i);
+    await expect(postSupplierPayment(pay)).rejects.toThrow(/one more approval from a director/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: "supplier-payment:sp-approval" } })).toBe(0);
+
+    await decide({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "sp-approval",
+      decision: "APPROVED", decidedBy: "u-dir-1", amountMinor: 2_100_000,
+    });
+    const posted = await postSupplierPayment(pay);
+    expect(await linesOf(posted.entryId)).toEqual({ "2000": 2_100_000n, "1010": -2_100_000n });
+
+    // A retry is not a second payment. It returns the original entry without
+    // being sent back through the rules — refusing it would tell the caller the
+    // money never moved when it has.
+    await db.approvalDecision.deleteMany({ where: { orgId: ORG, subjectType: "PAYMENT", subjectId: "sp-approval" } });
+    const again = await postSupplierPayment(pay);
+    expect(again.alreadyPosted).toBe(true);
+    expect(again.entryId).toBe(posted.entryId);
   });
 
   it("keeps the trial balance tied after everything above", async () => {

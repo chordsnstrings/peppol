@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError, post } from "./post";
 import { profitAndLoss, type ProfitAndLoss } from "./statements";
 
@@ -209,6 +210,9 @@ export async function corporateTaxComputation(opts: {
   const warnings: string[] = [];
 
   const pl = await profitAndLoss({ orgId: opts.orgId, entityId: opts.entityId, from: opts.from, to: opts.to });
+  // Every figure quoted below is one of this book's own, so it is read in this
+  // book's currency.
+  const plain = plainIn(pl.currency);
   const accountingProfit = BigInt(pl.netProfitMinor);
   // Revenue for the Small Business Relief test. This is the statements' revenue
   // total, which is net of the credit notes in 4800 — Ministerial Decision
@@ -233,7 +237,7 @@ export async function corporateTaxComputation(opts: {
   // added back on the strength of the account alone — that would overstate tax
   // on every entity that renews a licence. The account is named in a warning
   // instead, which is the honest version of "we could not tell".
-  const fines = readSupplied(supplied.finesAndPenaltiesMinor, "finesAndPenaltiesMinor");
+  const fines = readSupplied(supplied.finesAndPenaltiesMinor, "finesAndPenaltiesMinor", pl.currency);
   const governmentFees = fromStatement(pl, ACC_GOVERNMENT_FEES);
   adjustments.push({
     key: "fines_and_penalties",
@@ -261,7 +265,7 @@ export async function corporateTaxComputation(opts: {
   // The derived figure is therefore an upper bound, taken because leaving the
   // adjustment out entirely would understate tax, and flagged so the preparer
   // can narrow it with the real split.
-  const entertainmentSupplied = readSupplied(supplied.entertainmentMinor, "entertainmentMinor");
+  const entertainmentSupplied = readSupplied(supplied.entertainmentMinor, "entertainmentMinor", pl.currency);
   const travelAndEntertainment = fromStatement(pl, ACC_TRAVEL_AND_ENTERTAINMENT);
   const entertainmentSpend = entertainmentSupplied.supplied ? entertainmentSupplied.value : travelAndEntertainment;
   // Half of an odd number of fils rounds up, against the taxpayer, because the
@@ -293,7 +297,7 @@ export async function corporateTaxComputation(opts: {
   // Article 33(1). No account in the UAE SMB chart isolates donations — they
   // land in 6200 marketing or 6900 other expenses — so this one can only be
   // supplied.
-  const donations = readSupplied(supplied.nonQualifyingDonationsMinor, "nonQualifyingDonationsMinor");
+  const donations = readSupplied(supplied.nonQualifyingDonationsMinor, "nonQualifyingDonationsMinor", pl.currency);
   adjustments.push({
     key: "non_qualifying_donations",
     label: "Donations to non-qualifying recipients",
@@ -329,7 +333,7 @@ export async function corporateTaxComputation(opts: {
   // Articles 22-23. Dividends from a UAE resident juridical person are exempt,
   // as are qualifying foreign participations. The chart posts them to 4900
   // "Other income" alongside everything else, so this too can only be supplied.
-  const exempt = readSupplied(supplied.exemptIncomeMinor, "exemptIncomeMinor");
+  const exempt = readSupplied(supplied.exemptIncomeMinor, "exemptIncomeMinor", pl.currency);
   const otherIncome = fromStatement(pl, ACC_OTHER_INCOME);
   // Exempt income is a slice of income the books already recorded, not a new
   // number. If it is bigger than all the income there was, something has been
@@ -365,7 +369,7 @@ export async function corporateTaxComputation(opts: {
   // TAXABLE income — so every other adjustment has to be in before the cap can
   // be measured.
   const beforeInterest = accountingProfit + adjustments.reduce((a, x) => a + BigInt(x.amountMinor), 0n);
-  const netInterest = readSupplied(supplied.netInterestExpenditureMinor, "netInterestExpenditureMinor");
+  const netInterest = readSupplied(supplied.netInterestExpenditureMinor, "netInterestExpenditureMinor", pl.currency);
   const depreciation = fromStatement(pl, ACC_DEPRECIATION);
   // Adjusted EBITDA floors at zero (Ministerial Decision 126/2023): a loss-making
   // period does not get a negative allowance.
@@ -409,6 +413,7 @@ export async function corporateTaxComputation(opts: {
     to: opts.to,
     revenue,
     elected: opts.smallBusinessRelief === true,
+    currency: pl.currency,
   });
   if (relief.elected && !relief.eligible) {
     warnings.push(
@@ -530,7 +535,10 @@ async function assessSmallBusinessRelief(opts: {
   to: string;
   revenue: bigint;
   elected: boolean;
+  /** The book's currency; the AED thresholds below are the law's, not the book's. */
+  currency: string;
 }): Promise<SmallBusinessRelief> {
+  const plain = plainIn(opts.currency);
   const priorYears = await prisma.fiscalYear.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId, endsOn: { lt: opts.from } },
     orderBy: { startsOn: "asc" },
@@ -625,6 +633,7 @@ export async function postTaxProvision(opts: {
   amountMinor: MinorInput;
   actorId?: string;
 }): Promise<TaxProvisionResult> {
+  const plain = plainIn(await bookCurrency(opts.orgId, opts.entityId));
   const amount = parseMinor(opts.amountMinor, "amountMinor");
   if (amount <= 0n) {
     throw new LedgerError(
@@ -811,21 +820,47 @@ function parseMinor(v: MinorInput, field: string): bigint {
  * fines" is different from "nobody said" — so the flag comes from whether the
  * caller passed the field, not from whether the value is non-zero.
  */
-function readSupplied(v: MinorInput | undefined, field: string): { value: bigint; supplied: boolean } {
+function readSupplied(
+  v: MinorInput | undefined,
+  field: string,
+  /** The book's currency, so the refusal quotes the figure as the book reads it. */
+  currency: string,
+): { value: bigint; supplied: boolean } {
   if (v === undefined || v === null) return { value: 0n, supplied: false };
   const value = parseMinor(v, field);
   if (value < 0n) {
     throw new LedgerError(
-      `${field} must not be negative; ${plain(value)} was given. Adjustments are entered as positive amounts and ` +
+      `${field} must not be negative; ${plainIn(currency)(value)} was given. Adjustments are entered as positive amounts and ` +
         `the computation applies them in the right direction.`,
     );
   }
   return { value, supplied: true };
 }
 
-/** Minor units as a decimal, for messages a human reads. */
-function plain(minor: bigint): string {
+/**
+ * Minor units as a decimal, for messages a human reads, in the currency the
+ * figure is actually in.
+ *
+ * This used to print the letters AED and split the digits two from the right
+ * whatever the book was kept in. Both halves were wrong for a book kept
+ * elsewhere: the amounts quoted below come off this entity's own profit and
+ * loss, and a dinar has three decimals rather than two, so the same helper
+ * mislabelled the currency and misplaced its point by a factor of ten at once.
+ * `fmtMinor` is the one function that knows each currency's exponent.
+ *
+ * The thresholds in the Corporate Tax Law are a separate matter: they are
+ * dirham figures whatever the book is kept in, and are written as such.
+ */
+const plainIn = (currency: string) => (minor: bigint): string => {
   const neg = minor < 0n;
-  const abs = (neg ? -minor : minor).toString().padStart(3, "0");
-  return `${neg ? "-" : ""}AED ${abs.slice(0, -2)}.${abs.slice(-2)}`;
+  return `${neg ? "-" : ""}${currency} ${fmtMinor(neg ? -minor : minor, currency, { zero: "zero" })}`;
+};
+
+/** The book's own currency, for the sentences a computation produces. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }

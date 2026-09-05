@@ -198,6 +198,31 @@ d("ledger", () => {
     })).rejects.toThrow(/does not balance/i);
   });
 
+  it("states the imbalance in the currency the entry is in, to its own decimals", async () => {
+    // A dinar has three decimals and a dirham has two (ISO 4217), and this
+    // message names the currency two words before it quotes the figure. It
+    // used to split the digits two from the right whatever the currency was,
+    // so a KWD entry one fils out — 100.000 against 99.999 — was reported as
+    // "out by 0.01", ten times the real difference, and the bookkeeper went
+    // looking for a one-fils rounding error in the wrong column entirely.
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-01-15", source: "bill",
+      lines: [
+        { account: "5000", debit: 100_000, currency: "KWD", fxRate: 12 },
+        { account: "2050", credit: 99_999, currency: "KWD", fxRate: 12 },
+      ],
+    })).rejects.toThrow(/does not balance in KWD: it is out by 0\.001\./);
+
+    // The same entry in dirhams is out by a fils, and a fils is 0.01.
+    await expect(post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-01-15", source: "bill",
+      lines: [
+        { account: "5000", debit: 100_000 },
+        { account: "2050", credit: 99_999 },
+      ],
+    })).rejects.toThrow(/does not balance in AED: it is out by 0\.01\./);
+  });
+
   it("refuses a manual journal against a control account", async () => {
     await expect(post({
       orgId: ORG, entityId: ENT, entryDate: "2026-01-15", source: "manual",

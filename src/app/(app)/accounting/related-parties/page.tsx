@@ -28,7 +28,12 @@ interface Note {
     present: boolean; parentName: string | null; ultimateControllingParty: string | null;
     noControllingParty: boolean; attestedBy: string | null; attestedOn: string | null;
   };
-  completeness: { unassessed: string[]; unassessedCount: number; complete: boolean; reasons: string[] };
+  completeness: {
+    unassessed: string[]; unassessedCount: number;
+    assessed: { partyKey: string; name: string; assessedBy: string; assessedOn: string; notes: string | null }[];
+    assessedCount: number;
+    complete: boolean; reasons: string[];
+  };
   basis: string;
   relationships: Record<string, string>;
   categories: Record<string, string>;
@@ -49,6 +54,10 @@ export default function RelatedPartiesPage() {
   const [msg, setMsg] = React.useState<string | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
   const [adding, setAdding] = React.useState(false);
+  // Who is doing the assessing. One name for the whole panel rather than one
+  // per row: somebody works down the list in a sitting, and typing their own
+  // name forty times is how a field ends up with a full stop in it.
+  const [assessor, setAssessor] = React.useState("");
 
   const act = async (label: string, body: Record<string, unknown>) => {
     setBusy(label); setErr(null); setMsg(null);
@@ -318,17 +327,77 @@ export default function RelatedPartiesPage() {
           </Panel>
 
           {data.completeness.unassessedCount > 0 && (
-            <Panel className="p-4">
+            <Panel className="mb-4 p-4">
               <div className="sw-label">
                 Never assessed — {data.completeness.unassessedCount}
               </div>
               <p className="sw-sub mt-1 max-w-[75ch]">
                 Counterparties the entity trades with that have been neither declared related nor declared unrelated.
-                The note cannot claim to be complete while anybody here is unaccounted for.
+                The note cannot claim to be complete while anybody here is unaccounted for. Recording one as not
+                related says nothing about them in the note — it records only that somebody looked, which is what
+                separates an assessed nil from an unasked question.
               </p>
-              <ul className="mt-2 grid gap-1 sm:grid-cols-3" data-testid="rp-unassessed">
+
+              <label className="mt-3 block max-w-xs">
+                <span className="sw-label">Assessed by</span>
+                <input className="sw-input mt-1" value={assessor} onChange={(e) => setAssessor(e.target.value)}
+                  placeholder="who is looking" aria-describedby="rp-assessor-hint" />
+              </label>
+              <p className="sw-sub mt-1" id="rp-assessor-hint">
+                Recorded against every assessment made from this panel, with today&rsquo;s date.
+              </p>
+
+              <ul className="mt-3 grid gap-1 sm:grid-cols-2" data-testid="rp-unassessed">
                 {data.completeness.unassessed.map((u) => (
-                  <li key={u} className="sw-sub">{u}</li>
+                  <li key={u} className="flex items-center justify-between gap-3 border-b py-1"
+                    style={{ borderColor: "var(--sw-line)" }}>
+                    <span className="truncate">{u}</span>
+                    <button type="button" className="sw-btn sw-btn-sm" disabled={busy === `assess:${u}`}
+                      aria-label={`Record ${u} as assessed and not a related party`}
+                      onClick={async () => {
+                        if (!assessor.trim()) {
+                          setErr("An assessment nobody owns is not an assessment. Say who is looking.");
+                          return;
+                        }
+                        const r = await act(`assess:${u}`, {
+                          action: "assess",
+                          assessment: { partyKey: u, assessedBy: assessor.trim() },
+                        });
+                        if (r) {
+                          setMsg(
+                            `${u} is recorded as assessed and not a related party. Nothing about them reaches the ` +
+                            `note — the record exists so the note can say the question was asked.`,
+                          );
+                        }
+                      }}>
+                      {busy === `assess:${u}` ? "Recording…" : "not related"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {data.completeness.unassessedCount > data.completeness.unassessed.length && (
+                <p className="sw-sub mt-2">
+                  The first {data.completeness.unassessed.length} of {data.completeness.unassessedCount} are listed.
+                </p>
+              )}
+            </Panel>
+          )}
+
+          {data.completeness.assessedCount > 0 && (
+            <Panel className="p-4">
+              <div className="sw-label">
+                Assessed and not related — {data.completeness.assessedCount}
+              </div>
+              <p className="sw-sub mt-1 max-w-[75ch]">
+                None of these appears anywhere in the note above, and none of them should: an assessment asserts no
+                relationship. Declaring one of them related withdraws the assessment, so a party can never be both.
+              </p>
+              <ul className="mt-2 grid gap-1 sm:grid-cols-2" data-testid="rp-assessed">
+                {data.completeness.assessed.map((a) => (
+                  <li key={a.partyKey} className="sw-sub">
+                    {a.name} — {a.assessedBy}, {a.assessedOn}
+                    {a.notes && <> — {a.notes}</>}
+                  </li>
                 ))}
               </ul>
             </Panel>

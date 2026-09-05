@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
-  setRate, ratesOnFile, revaluationPreview, runRevaluation, reverseRevaluation,
+  setRate, ratesOnFile, revaluationPreview, runRevaluation, reverseRevaluation, classify,
 } from "@/lib/server/ledger/revaluation";
-import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { openBooks, openFiscalYear, UAE_CHART } from "@/lib/server/ledger/setup";
 import { post } from "@/lib/server/ledger/post";
 import { trialBalance } from "@/lib/server/ledger/reports";
 
@@ -13,7 +13,13 @@ const d = process.env.DATABASE_URL ? describe : describe.skip;
 const ORG = "t-org-fx";
 const ENT = "t-ent-fx";
 
-async function wipe() {
+/** The cheque mirror runs on its own books, so it can count what was revalued. */
+const ORG2 = "t-org-fx-chq";
+const ENT2 = "t-ent-fx-chq";
+
+const wipe = () => wipeOrg(ORG);
+
+async function wipeOrg(ORG: string) {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     db.$executeRawUnsafe(`DELETE FROM "FxRate" WHERE "orgId" = '${ORG}'`),
@@ -85,7 +91,7 @@ d("period-end currency revaluation", () => {
     });
   });
 
-  afterAll(async () => { await wipe(); await db.$disconnect(); });
+  afterAll(async () => { await wipe(); });
 
   /* ── rates ── */
 
@@ -325,5 +331,162 @@ d("period-end currency revaluation", () => {
   it("refuses a date that is not a date", async () => {
     await expect(revaluationPreview({ orgId: ORG, entityId: ENT, asOf: "2026-03" }))
       .rejects.toThrow(/looks like 2026-03-31/);
+  });
+});
+
+describe("the monetary map against the chart", () => {
+  const postable = UAE_CHART.filter((a) => a.isPostable !== false);
+
+  it("decides every balance-sheet account the standard chart has", () => {
+    // An account this cannot decide is skipped, and a skipped account's whole
+    // unrealised difference is left out of profit or loss. The remedy the
+    // message prescribes — give it a subtype — cannot be carried out from any
+    // screen, so a gap here is a number nobody can fix. 1060 was exactly that:
+    // in the chart since the cheque subledger was written, monetary beyond any
+    // doubt, and absent from the map while its 2060 mirror was in it.
+    const undecided = postable
+      .filter((a) => ["ASSET", "LIABILITY"].includes(a.type))
+      .map((a) => ({ a, c: classify(a) }))
+      .filter(({ c }) => !c.monetary && /cannot be decided from the chart/.test(c.reason))
+      .map(({ a }) => `${a.code} ${a.name}`);
+    expect(undecided).toEqual([]);
+  });
+
+  it("treats a cheque the same whichever way it points", () => {
+    // IAS 21.16: the essential feature is a right to receive, or an obligation
+    // to deliver, a determinable number of units of currency. A cheque is that
+    // in both directions — the entity's own cheque in the supplier's drawer and
+    // the customer's cheque in the entity's.
+    expect(classify({ code: "1060", type: "ASSET" }).monetary).toBe(true);
+    expect(classify({ code: "2060", type: "LIABILITY" }).monetary).toBe(true);
+  });
+
+  it("leaves income, expense and contributed equity out of it", () => {
+    // Their effect is already at the transaction-date rate (IAS 21.21). A map
+    // entry for one of them would retranslate an event rather than a balance.
+    for (const a of postable.filter((x) => ["INCOME", "EXPENSE", "EQUITY"].includes(x.type))) {
+      const c = classify(a);
+      expect(c.monetary, `${a.code} ${a.name} should not be monetary`).toBe(false);
+    }
+  });
+});
+
+d("a foreign-currency cheque, held and issued", () => {
+  beforeAll(async () => {
+    await wipeOrg(ORG2);
+    await openFiscalYear({ orgId: ORG2, entityId: ENT2, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG2, entityId: ENT2 });
+
+    // A EUR 10,000 invoice, settled by a ninety-day cheque at the same rate,
+    // so the receivable is nil in euros and 1060 carries AED 39,000.00 alone.
+    await post({
+      orgId: ORG2, entityId: ENT2, entryDate: "2026-03-04", source: "invoice",
+      memo: "Invoice — EUR 10,000",
+      lines: [
+        { account: "1100", debit: 1_000_000, currency: "EUR", fxRate: 3.9 },
+        { account: "4000", credit: 1_000_000, currency: "EUR", fxRate: 3.9 },
+      ],
+    });
+    await post({
+      orgId: ORG2, entityId: ENT2, entryDate: "2026-03-05", source: "cheque",
+      memo: "PDC from customer — EUR 10,000",
+      lines: [
+        { account: "1060", debit: 1_000_000, currency: "EUR", fxRate: 3.9 },
+        { account: "1100", credit: 1_000_000, currency: "EUR", fxRate: 3.9 },
+      ],
+    });
+
+    // And the mirror: a EUR 5,000 bill settled with the entity's own cheque,
+    // leaving 2060 carrying AED 19,500.00 and the payable nil.
+    await post({
+      orgId: ORG2, entityId: ENT2, entryDate: "2026-03-06", source: "bill",
+      memo: "Bill — EUR 5,000",
+      lines: [
+        { account: "5000", debit: 500_000, currency: "EUR", fxRate: 3.9 },
+        { account: "2000", credit: 500_000, currency: "EUR", fxRate: 3.9 },
+      ],
+    });
+    await post({
+      orgId: ORG2, entityId: ENT2, entryDate: "2026-03-07", source: "cheque",
+      memo: "PDC to supplier — EUR 5,000",
+      lines: [
+        { account: "2000", debit: 500_000, currency: "EUR", fxRate: 3.9 },
+        { account: "2060", credit: 500_000, currency: "EUR", fxRate: 3.9 },
+      ],
+    });
+
+    await setRate({ orgId: ORG2, entityId: ENT2, currency: "EUR", rate: "4.0000", rateDate: "2026-03-31" });
+  });
+
+  afterAll(async () => { await wipeOrg(ORG2); await db.$disconnect(); });
+
+  it("revalues the cheque it holds as well as the cheque it wrote", async () => {
+    const p = await revaluationPreview({ orgId: ORG2, entityId: ENT2, asOf: "2026-03-31" });
+
+    // Held: EUR 10,000 booked at 3.9000 is carried at 39,000.00 and is worth
+    // 40,000.00 at 4.0000 — a gain of exactly AED 1,000.00. This is the row
+    // that was missing: 1060 was skipped as "carries no subtype" while 2060,
+    // the identical instrument pointing the other way, was revalued.
+    const held = p.rows.find((r) => r.account === "1060")!;
+    expect(held.currency).toBe("EUR");
+    expect(held.txnBalanceMinor).toBe("1000000");
+    expect(held.carryingMinor).toBe("3900000");
+    expect(held.revaluedMinor).toBe("4000000");
+    expect(held.differenceMinor).toBe("100000");
+    expect(held.gain).toBe(true);
+
+    // Issued: EUR 5,000 owed, carried at 19,500.00, now costs 20,000.00 to
+    // honour — a loss of AED 500.00.
+    const issued = p.rows.find((r) => r.account === "2060")!;
+    expect(issued.txnBalanceMinor).toBe("-500000");
+    expect(issued.carryingMinor).toBe("-1950000");
+    expect(issued.revaluedMinor).toBe("-2000000");
+    expect(issued.differenceMinor).toBe("-50000");
+    expect(issued.gain).toBe(false);
+
+    expect(p.skipped.some((sk) => sk.account === "1060")).toBe(false);
+    expect(p.blockers).toEqual([]);
+  });
+
+  it("posts both halves, so profit carries the net 500.00 it should", async () => {
+    const r = await runRevaluation({ orgId: ORG2, entityId: ENT2, asOf: "2026-03-31" });
+    // The two cheque accounts only: the receivable and the payable were both
+    // discharged in euros by the cheques and are skipped as nil.
+    expect(r.accountsRevalued).toBe(2);
+    expect(r.totalGainMinor).toBe("100000");   // 1,000.00 on the cheque held
+    expect(r.totalLossMinor).toBe("50000");    // 500.00 on the cheque written
+    expect(r.netDifferenceMinor).toBe("50000");
+
+    const byCode = await linesByCode(r.entryId!);
+    expect(byCode["1060"]).toBe(100_000n);     // Dr the held cheque up to 40,000.00
+    expect(byCode["2060"]).toBe(-50_000n);     // Cr the written cheque up to 20,000.00
+    expect(byCode["4950"]).toBe(-100_000n);    // Cr unrealised gain
+    expect(byCode["6800"]).toBe(50_000n);      // Dr unrealised loss
+
+    // Before 1060 was classified, only the 500.00 loss reached profit: the
+    // whole 1,000.00 gain on paper the entity was holding went nowhere.
+    const tb = await db.journalLine.aggregate({
+      where: { orgId: ORG2, entryId: r.entryId! }, _sum: { functionalAmountMinor: true },
+    });
+    expect(tb._sum.functionalAmountMinor).toBe(0n);
+  });
+
+  it("does not touch the euros themselves", async () => {
+    // A revaluation restates a carrying amount. The cheque is still for the
+    // same EUR 10,000 it was written for, and the adjustment is in AED.
+    const held = await db.account.findFirst({ where: { orgId: ORG2, entityId: ENT2, code: "1060" } });
+    const eur = await db.journalLine.aggregate({
+      where: { orgId: ORG2, accountId: held!.id, txnCurrency: "EUR" },
+      _sum: { txnAmountMinor: true },
+    });
+    expect(eur._sum.txnAmountMinor).toBe(1_000_000n);
+    // At the period end it is carried at 40,000.00 — and on 1 April the
+    // adjustment reverses, because the next event is a bank credit at the rate
+    // on the day the cheque clears, not at March's.
+    const aed = await db.journalLine.aggregate({
+      where: { orgId: ORG2, accountId: held!.id, entry: { entryDate: { lte: new Date("2026-03-31") } } },
+      _sum: { functionalAmountMinor: true },
+    });
+    expect(aed._sum.functionalAmountMinor).toBe(4_000_000n); // 39,000.00 + 1,000.00
   });
 });

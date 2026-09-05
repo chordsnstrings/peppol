@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
 import { receive as receiveStock } from "./inventory";
 
@@ -108,12 +109,17 @@ function qty(m: bigint): string {
   return `${neg ? "-" : ""}${whole}${frac ? "." + frac : ""}`;
 }
 
-/** Minor units as a human reads them, for a message rather than a report. */
-function money(m: bigint): string {
-  const neg = m < 0n;
-  const abs = (neg ? -m : m).toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${abs.slice(0, -2)}.${abs.slice(-2)}`;
-}
+/**
+ * Minor units as a human reads them, for a message rather than a report.
+ *
+ * Bound to a currency at the point of use, because `fmtMinor` is the one
+ * function that knows how many decimals a currency has: two is right for a
+ * dirham and wrong by a factor of ten for a Kuwaiti or Bahraini dinar or an
+ * Omani rial. An order is refused unless it is in the book's own currency
+ * (see `bookFor`), so the order's currency is the right one to read these in.
+ */
+const moneyIn = (currency: string) => (m: bigint) =>
+  fmtMinor(m, currency, { sign: "minus", zero: "zero" });
 
 /**
  * What a quantity is worth at a unit price.
@@ -856,6 +862,7 @@ export async function matchInvoice(opts: {
         orderPrice: line.unitPriceMinor,
         invoicePrice,
         priceVariance,
+        currency: order.currency,
       }),
     };
   });
@@ -905,6 +912,7 @@ export async function matchInvoice(opts: {
       withinTolerance,
       variance,
       headerVariance,
+      currency: order.currency,
     }),
   };
 }
@@ -923,7 +931,10 @@ function reasonFor(a: {
   orderPrice: bigint;
   invoicePrice: bigint;
   priceVariance: bigint;
+  /** The order's currency, which is also the book's. */
+  currency: string;
 }): string {
+  const money = moneyIn(a.currency);
   const where = `Line ${a.lineNo} (${a.description})`;
   if (a.findings.length === 0) {
     return `${where} agrees: ${qty(a.orderedMilli)} ordered, ${qty(a.receivedMilli)} received, ${qty(a.invoicedMilli)} invoiced at the ordered price of ${money(a.orderPrice)}.`;
@@ -975,7 +986,10 @@ function summaryFor(a: {
   withinTolerance: boolean;
   variance: bigint;
   headerVariance: bigint;
+  /** The order's currency, which is also the book's. */
+  currency: string;
 }): string {
+  const money = moneyIn(a.currency);
   const doc = a.invoiceNumber ? `Invoice ${a.invoiceNumber}` : "The invoice";
   if (a.matched) {
     return `${doc} agrees with ${a.orderNumber} and with what was received: ${a.rows.length} line${a.rows.length === 1 ? "" : "s"}, no variance.`;
@@ -1110,7 +1124,7 @@ export async function postMatchedInvoice(opts: {
   const vat = BigInt(match.vatMinor);
   const gross = BigInt(match.invoiceTotalMinor);
   if (gross <= 0n) {
-    throw new LedgerError(`Invoice ${invoiceNumber} has a total of ${money(gross)}. A supplier invoice for nothing is not a document this ledger can post; a negative one is a credit note.`);
+    throw new LedgerError(`Invoice ${invoiceNumber} has a total of ${moneyIn(order.currency)(gross)}. A supplier invoice for nothing is not a document this ledger can post; a negative one is a credit note.`);
   }
 
   // Whatever the invoice asks for beyond what the receipts accrued. On a clean

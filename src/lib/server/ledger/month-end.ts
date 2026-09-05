@@ -15,6 +15,8 @@ import { fundList } from "./petty-cash";
 import { revaluationRegister } from "./asset-revaluation";
 import { payrollSummary } from "./payroll";
 import { borrowingRegister } from "./borrowings";
+import { contingentLiabilities } from "./trade-finance";
+import { timesheetRegister } from "./timesheets";
 
 /**
  * The month-end checklist.
@@ -194,7 +196,7 @@ const registersAgree: Check = {
     const asOf = ctx.endsOn;
     const disagreeing: string[] = [];
 
-    const [assets, leases, revenue, provisions, surplus, petty, loans] = await Promise.allSettled([
+    const [assets, leases, revenue, provisions, surplus, petty, loans, facilities, wip] = await Promise.allSettled([
       assetRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
       leaseRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
       contractRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
@@ -212,6 +214,14 @@ const registersAgree: Check = {
         // This register takes the date as a string where the others take a Date.
         asOf: asOf instanceof Date ? asOf.toISOString().slice(0, 10) : String(asOf).slice(0, 10),
       }),
+      // Two more registers that grew their own reconciliation after this check
+      // was written, and were not added to it. Trade finance ties the margin
+      // the banks hold to 1255, which is restricted cash under IAS 7.48; work
+      // in progress ties the timesheets to 1330. Neither is a control account,
+      // so a hand-keyed journal into either is accepted by the ledger and
+      // silently breaks the register that supports the disclosure.
+      contingentLiabilities({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
+      timesheetRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
     ]);
 
     const say = (name: string, ok: boolean | undefined) => {
@@ -239,6 +249,8 @@ const registersAgree: Check = {
     }
     if (surplus.status === "fulfilled") say("revaluation surplus", surplus.value.reconciliation.agrees);
     if (loans.status === "fulfilled") say("borrowings", loans.value.ledger.agrees);
+    if (facilities.status === "fulfilled") say("margin held against guarantees", facilities.value.restrictedCash.agrees);
+    if (wip.status === "fulfilled") say("work in progress", wip.value.reconciliation.agrees);
     if (petty.status === "fulfilled" && petty.value.summary.outOfBalanceCount > 0) {
       disagreeing.push("petty cash floats");
     }

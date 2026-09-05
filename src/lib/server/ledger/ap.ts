@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError, type PostLine } from "./post";
+import { assertApproved } from "./approvals";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
 /**
@@ -186,6 +187,52 @@ export async function postBill(opts: {
     });
   }
 
+  // The approval rules the business actually wrote down, enforced. Everything
+  // above this line is arithmetic and validation — nothing has been written —
+  // so a bill that fails here leaves no trace, and the guard cannot fire after
+  // a partial write. A bill that was already posted returned at the top of the
+  // function long before this, which is what stops a rule introduced after the
+  // fact from turning a harmless retry into a refusal.
+  //
+  // It is called on every bill, not only the large ones. Where no rule covers
+  // the amount assertApproved returns quietly, and that is the whole point: a
+  // guard somebody has to remember to call is a guard that gets forgotten on
+  // the one document it was written for.
+  //
+  // THE AMOUNT IS THE GROSS PAYABLE, not the net and not the VAT. "Bills over
+  // fifty thousand need two signatures" is a sentence about what the business
+  // will have to pay the supplier, which is the figure printed on the bottom of
+  // the supplier's document and the figure credited to payables below. Testing
+  // the net instead would let a 52,500 bill through a 50,000 rule on the
+  // technicality that 50,000 of it was net and the rest was tax.
+  //
+  // It is signed, so a supplier credit note arrives here negative. That is
+  // deliberate — the rules rank on size rather than sign, because a 500,000
+  // credit moves exactly as much money as a 500,000 bill — but it does mean an
+  // approval recorded against a credit note has to carry the same negative
+  // figure, or it is an approval of a document that does not exist.
+  //
+  // The currency is the bill's own, and it is passed so the refusal quotes the
+  // amount in the unit the document is in rather than silently calling euros
+  // dirhams. KNOWN LIMITATION, said out loud rather than papered over: the
+  // thresholds are stored in AED, so a foreign-currency bill is measured
+  // against a dirham limit at its face value, and a EUR 20,000 bill therefore
+  // reads as 20,000 against a 50,000 rule when it is nearer 80,000 of them.
+  // Converting on this one path would not fix it and would break something
+  // that works — the approvals screen records a decision at the document's face
+  // value, so a converted figure here would make every foreign bill look
+  // approved at the wrong amount and nothing would post. The fix belongs in
+  // approvals.ts, which has to learn what currency a threshold is in.
+  await assertApproved({
+    orgId,
+    entityId: bill.entityId,
+    subjectType: "BILL",
+    subjectId: bill.id,
+    amountMinor: gross,
+    reference: bill.number,
+    currency,
+  });
+
   const entry = await post({
     orgId,
     entityId: bill.entityId,
@@ -241,6 +288,28 @@ export async function postSupplierPayment(opts: {
   const bank = BigInt(opts.bankAmountMinor);
   const cleared = opts.clearedAmountMinor === undefined ? bank : BigInt(opts.clearedAmountMinor);
   if (bank <= 0n) throw new LedgerError("A supplier payment has to be a positive amount.");
+
+  // What leaves the bank is what a payment approval limit is about, so that is
+  // the figure tested — not `cleared`, which is what the payable happened to be
+  // carried at. The two differ only by a realised exchange difference, and a
+  // rate movement is not a reason to need one more or one fewer signature on
+  // the same payment. Both are already in the functional currency, so unlike a
+  // bill there is no unit mismatch with the threshold here.
+  //
+  // Placed after the idempotency check above, so re-running a payment that has
+  // already posted still returns the original entry rather than being refused
+  // by a rule written since — a retry is not a second payment, and refusing it
+  // would leave a caller believing the money never moved.
+  await assertApproved({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    subjectType: "PAYMENT",
+    subjectId: opts.paymentId,
+    amountMinor: bank,
+    // The bill number is what every memo this function writes names the payment
+    // by, so it is what somebody reading the refusal will look for.
+    reference: opts.billNumber,
+  });
 
   const lines: PostLine[] = [
     { account: AP_CONTROL, debit: cleared, memo: `Settles ${opts.billNumber}` },

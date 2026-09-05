@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 
 /**
@@ -79,11 +80,22 @@ const lastDayOf = (i: number) => new Date(Date.UTC(Math.floor(i / 12), (i % 12) 
 /** First day of the month with that ordinal, as YYYY-MM-DD. */
 const firstDayOf = (i: number) => new Date(Date.UTC(Math.floor(i / 12), i % 12, 1)).toISOString().slice(0, 10);
 
-function fmt(minor: bigint) {
-  const neg = minor < 0n;
-  const abs = neg ? -minor : minor;
-  const s = abs.toString().padStart(3, "0");
-  return `${neg ? "-" : ""}${s.slice(0, -2)}.${s.slice(-2)}`;
+/**
+ * A figure in the book's own currency, through the one formatter that knows how
+ * many decimals a currency has. Splitting the digits two from the right is
+ * right for a dirham and wrong by a factor of ten for a Kuwaiti or Bahraini
+ * dinar or an Omani rial.
+ */
+const fmtIn = (currency: string) => (minor: bigint) =>
+  fmtMinor(minor, currency, { sign: "minus", zero: "zero" });
+
+/** The currency this entity keeps its books in. */
+async function bookCurrency(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
 }
 
 const requirePeriod = (period: string) => {
@@ -221,6 +233,7 @@ export async function checkLinesAgainstChart(opts: {
   where: string;
 }) {
   const { lines, where } = opts;
+  const fmt = fmtIn(await bookCurrency(opts.orgId, opts.entityId));
 
   if (lines.length < 2) {
     throw new LedgerError(`${cap(where)} needs at least two lines — a journal with one line cannot balance.`);

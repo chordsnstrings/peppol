@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
-  declareRelatedParty, endRelationship, declareCompensation, attest,
+  declareRelatedParty, endRelationship, declareCompensation, attest, assessNotRelated,
   relatedPartyNote, inPeriod, partyKeyOf, RELATIONSHIPS, COMP_CATEGORIES,
 } from "@/lib/server/ledger/related-parties";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
@@ -19,6 +19,7 @@ async function wipe() {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     db.$executeRawUnsafe(`DELETE FROM "RelatedParty" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "PartyAssessment" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "KeyManagementComp" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "RelatedPartyAttestation" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Counterparty" WHERE "orgId" = '${ORG}'`),
@@ -276,24 +277,99 @@ d("related parties", () => {
     expect(a.noControllingParty).toBe(true);
   });
 
+  /* ── assessed, and not related ──────────────────────────────────────────── */
+
+  it("refuses an assessment nobody owns", async () => {
+    await expect(assessNotRelated({ ...S, party: { partyKey: "BETA", assessedBy: "   " } }))
+      .rejects.toThrow(/nobody owns is not an assessment/);
+  });
+
+  it("refuses to assess a party as not related while a declaration says otherwise", async () => {
+    // Acme is declared the parent from 2025-01-01 with no end date, so on any
+    // day the assessment could be made the two statements contradict.
+    await expect(assessNotRelated({ ...S, party: { partyKey: "ACME", assessedBy: "R. Khan" } }))
+      .rejects.toThrow(/is declared parent from 2025-01-01/i);
+  });
+
+  it("records an assessment that reaches no note and asserts no relationship", async () => {
+    const before = await relatedPartyNote({ ...S, ...P });
+    expect(before.completeness.unassessedCount).toBe(1);
+
+    const a = await assessNotRelated({
+      ...S,
+      party: {
+        partyKey: "BETA", assessedBy: "R. Khan", assessedOn: "2026-11-30",
+        notes: "Ordinary supplier. No common control, no key management link.",
+      },
+    });
+    // The counterparty's own name, the same way a declaration takes it.
+    expect(a.name).toBe("Beta Trading LLC");
+    expect(a.partyKey).toBe("beta");
+
+    const n = await relatedPartyNote({ ...S, ...P });
+    // The whole point: it is off the unassessed list and in no disclosure.
+    expect(n.completeness.unassessedCount).toBe(0);
+    expect(n.completeness.assessedCount).toBe(1);
+    expect(n.completeness.assessed[0]).toMatchObject({
+      name: "Beta Trading LLC", assessedBy: "R. Khan", assessedOn: "2026-11-30",
+    });
+    expect(n.parties.some((p) => p.partyKey === "beta")).toBe(false);
+    expect(n.byRelationship.some((g) => g.relationship === "OTHER")).toBe(false);
+    // Beta traded 900,000 minor units in the period, and none of it is here.
+    expect(n.parties.reduce((t, p) => t + p.salesMinor, 0n)).toBe(700_000n);
+  });
+
+  it("replaces an assessment rather than keeping two answers about one party", async () => {
+    await assessNotRelated({
+      ...S, party: { partyKey: "Beta Trading LLC", assessedBy: "S. Aziz", assessedOn: "2026-12-01" },
+    });
+    const n = await relatedPartyNote({ ...S, ...P });
+    expect(n.completeness.assessedCount).toBe(1);
+    expect(n.completeness.assessed[0].assessedBy).toBe("S. Aziz");
+  });
+
   it("becomes complete once everybody has been assessed and every category answered", async () => {
     for (const c of ["OTHER_LONG_TERM", "TERMINATION", "SHARE_BASED"] as const) {
       await declareCompensation({ ...S, period: "2026", category: c, amountMinor: 0, headcount: 0, declaredBy: "R. Khan" });
     }
-    // Beta is assessed and found unrelated — recorded as OTHER with an end date
-    // before the period, which is how "looked at, not related" is said here.
-    await declareRelatedParty({
-      ...S,
-      party: {
-        partyKey: "BETA", relationship: "OTHER", declaredBy: "R. Khan",
-        startedOn: "2020-01-01", endedOn: "2020-01-01", notes: "Assessed: not a related party.",
-      },
-    });
     const n = await relatedPartyNote({ ...S, ...P });
+    // Acme declared, the spouse declared and ended, Beta assessed and not
+    // related. Three active counterparties, nobody unaccounted for, and the
+    // note says so without a false line in it.
     expect(n.completeness.unassessedCount).toBe(0);
     expect(n.completeness.reasons).toEqual([]);
     expect(n.completeness.complete).toBe(true);
     expect(n.basis).toContain("IAS 24");
+  });
+
+  it("withdraws the assessment when the party is later declared related", async () => {
+    // The two can never both be true, and a declaration is the later and the
+    // stronger statement: it goes into a note a reader relies on.
+    await declareRelatedParty({
+      ...S,
+      party: { partyKey: "BETA", relationship: "ASSOCIATE", declaredBy: "R. Khan", startedOn: "2026-12-15" },
+    });
+    const n = await relatedPartyNote({ ...S, ...P });
+    expect(n.completeness.assessedCount).toBe(0);
+    expect(n.completeness.unassessedCount).toBe(0);
+    expect(n.parties.some((p) => p.partyKey === "beta")).toBe(true);
+    expect(await db.partyAssessment.count({ where: { orgId: ORG, partyKey: "beta" } })).toBe(0);
+  });
+
+  it("takes the assessment once the relationship has been ended", async () => {
+    const row = await db.relatedParty.findFirst({ where: { orgId: ORG, partyKey: "beta" } });
+    await endRelationship({ ...S, id: row!.id, endedOn: "2026-12-31" });
+    // Ended on 31 December, assessed on 1 January: nothing stands on that day.
+    const a = await assessNotRelated({
+      ...S, party: { partyKey: "BETA", assessedBy: "R. Khan", assessedOn: "2027-01-01" },
+    });
+    expect(a.partyKey).toBe("beta");
+    // 2026 keeps the disclosure it made; 2027 has an assessment and no note row.
+    const y2026 = await relatedPartyNote({ ...S, ...P });
+    expect(y2026.parties.some((p) => p.partyKey === "beta")).toBe(true);
+    const y2027 = await relatedPartyNote({ ...S, period: "2027", from: "2027-01-01", to: "2027-12-31" });
+    expect(y2027.parties.some((p) => p.partyKey === "beta")).toBe(false);
+    expect(y2027.completeness.assessedCount).toBe(1);
   });
 
   it("keeps one organisation out of another's declarations", async () => {
