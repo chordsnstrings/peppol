@@ -23,12 +23,14 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Salaries are not a general read. The shipped VIEWER role's own
-     * description says so, and a Viewer could call this. */
-    await requirePermission({ orgId, userId, permission: "payroll.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Salaries are not a general read. The shipped VIEWER role's own
+     * description says so, and a Viewer could call this. Nor are they a read
+     * that travels between companies: seeing one entity's payroll is not
+     * authority over a sister company's, so the grant has to name this one. */
+    await requirePermission({ orgId, userId, entityId, permission: "payroll.read" });
     // Absent a month, the current one is the only defensible default — payroll
     // is a monthly cycle and "now" is the month somebody is looking at.
     const period = url.searchParams.get("period") ?? new Date().toISOString().slice(0, 7);
@@ -51,8 +53,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Running, posting and paying a payroll, and settling a leaver. */
-    await requirePermission({ orgId, userId, permission: "payroll.run" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "add-employee" | "update-employee" | "run" | "post" | "pay" | "settle" | "wps";
       entityId?: string;
@@ -71,6 +71,9 @@ export async function POST(req: Request) {
       employerAgentId?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Running, posting and paying a payroll, and settling a leaver — for the
+     * one employer named in the body, which is why the guard waits for it. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "payroll.run" });
 
     switch (b.action) {
       case "add-employee": {

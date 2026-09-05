@@ -14,8 +14,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Posting a bill or a supplier payment. */
-    await requirePermission({ orgId, userId, permission: "ap.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       billId?: string;
       kind?: "bill" | "payment";
@@ -32,6 +30,21 @@ export async function POST(req: Request) {
     const row = await prisma.record.findUnique({ where: { store_id: { store: "invoices", id: b.billId } } });
     if (!row || row.orgId !== orgId) return json({ error: "That bill does not exist." }, 404);
     const bill = JSON.parse(row.data) as Invoice;
+
+    /* Posting a bill or a supplier payment.
+     *
+     * Checked after the bill is loaded, because until then there is no entity
+     * to check against: the request names a bill id and nothing else, and the
+     * books the posting lands in are the ones on the bill. Reading the entity
+     * off the document rather than off the request is the same rule the
+     * reversal route follows — a caller who could name the entity could name
+     * one they hold `ap.manage` on and post into another.
+     *
+     * The 404 above stays above this on purpose. If the permission were
+     * checked first, a bill somebody may not touch and a bill that does not
+     * exist would answer differently, and the difference would tell an
+     * outsider which bill ids are real. */
+    await requirePermission({ orgId, userId, entityId: bill.entityId, permission: "ap.manage" });
 
     if (b.kind === "payment") {
       if (!b.paymentId || b.bankAmountMinor === undefined) {

@@ -70,8 +70,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Preparing and locking a tax computation. */
-    await requirePermission({ orgId, userId, permission: "tax.file" });
     const b = (await req.json().catch(() => ({}))) as {
       entityId?: string;
       fiscalYear?: string;
@@ -80,6 +78,10 @@ export async function POST(req: Request) {
     if (!b.entityId || !b.fiscalYear || b.amountMinor === undefined || b.amountMinor === null) {
       return json({ error: "entityId, fiscalYear and amountMinor are required." }, 400);
     }
+    /* Preparing and locking a tax computation. A taxable person is an entity,
+     * so the guard waits for the body that names which one — the provision is
+     * posted into that entity's ledger and answers to a grant held there. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "tax.file" });
     return json(
       ledgerJson(
         await postTaxProvision({

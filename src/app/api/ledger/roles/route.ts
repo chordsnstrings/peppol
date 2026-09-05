@@ -49,6 +49,17 @@ export async function POST(req: Request) {
       entityId?: string;
     };
 
+    /* `assign` and `revoke` do carry an entity, but it is the entity the grant
+     * is FOR, not the entity this act happens in. Seeding, creating and
+     * updating a role name none at all and change what every entity's roles
+     * mean.
+     *
+     * org-wide: deciding who may do what administers the whole workspace, not
+     * one set of books. Narrowing to the entity in the body would ask whether
+     * you may administer the company you are handing somebody a role on, which
+     * is the weaker question — it would let a grant on one subsidiary be
+     * enough to give somebody a role covering every entity, since a role can
+     * be assigned on "*". */
     await requirePermission({ orgId, userId, permission: "roles.manage" });
 
     switch (b.action) {

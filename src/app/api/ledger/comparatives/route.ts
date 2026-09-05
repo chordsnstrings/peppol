@@ -41,13 +41,14 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Two periods of statements side by side is still a read of the statements. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
     if (!entityId || !from || !to) return json({ error: "entityId, from and to are required." }, 400);
+    /* Two periods of statements side by side is still a read of the statements,
+     * and both columns are the same entity's. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const mode = url.searchParams.get("against") ?? "prior_year";
     const priorFrom = url.searchParams.get("priorFrom");

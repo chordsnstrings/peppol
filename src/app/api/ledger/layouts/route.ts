@@ -24,11 +24,12 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Listing layouts, and rendering one, are both reads of the statements. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* Listing layouts, and rendering one, are both reads of the statements —
+     * of the entity's statements, so the grant has to cover that entity. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (q.get("view") === "render") {
       const code = q.get("code");
@@ -86,15 +87,19 @@ export async function POST(req: Request) {
       status?: "active" | "archived";
       overwrite?: boolean;
     };
+    if (!b.entityId) return json({ error: "entityId is required." }, 400);
     /* Saving, copying, seeding or archiving a layout decides how the statements
      * are shown to everybody afterwards, so it goes with setting the books up.
      * A preview is the exception: it renders the rows in the body and writes
-     * nothing, so it is a report request and takes the read key. */
-    await requirePermission({
-      orgId, userId,
-      permission: b.action === "preview" ? "ledger.read" : "setup.manage",
-    });
-    if (!b.entityId) return json({ error: "entityId is required." }, 400);
+     * nothing, so it is a report request and takes the read key.
+     *
+     * Either way it is one entity's statements being shaped or drawn, and the
+     * entity is in the body, so the guard waits for the body. `duplicate` is
+     * the one to watch: it reads a layout out of `entityId` and writes it into
+     * `toEntityId`, and only the source is checked here — the copy can still
+     * land in an entity the caller holds nothing on. */
+    const key = b.action === "preview" ? "ledger.read" : "setup.manage";
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {
       case "preview": {

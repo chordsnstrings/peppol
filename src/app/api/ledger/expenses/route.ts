@@ -42,10 +42,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Approving somebody else's claim is the control this module exists
-     * for. Refusing self-approval, which the module already does, is a
-     * different question from who may approve at all. */
-    await requirePermission({ orgId, userId, permission: "expense.approve" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "addLine" | "removeLine" | "update" | "submit" | "approve" | "reject" | "reopen" | "post" | "pay";
       entityId?: string;
@@ -60,6 +56,21 @@ export async function POST(req: Request) {
       paymentId?: string;
       fxRate?: number;
     };
+
+    /* Approving somebody else's claim is the control this module exists
+     * for. Refusing self-approval, which the module already does, is a
+     * different question from who may approve at all.
+     *
+     * The guard waits for the body so that raising a claim is checked against
+     * the entity it is being raised in. Only `create` carries one: every other
+     * action addresses a claim by id, and the entity is on the claim rather
+     * than in the request, so `b.entityId` is undefined and the check falls
+     * back to the org-wide answer it gave before. That is a real gap and it is
+     * stated rather than papered over — approving a claim still only asks
+     * whether you may approve claims somewhere in this workspace. Closing it
+     * means reading the claim's own entity here, the way `ap/post` reads the
+     * bill's. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "expense.approve" });
 
     switch (b.action) {
       case "create": {

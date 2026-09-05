@@ -11,14 +11,15 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The same statement by the other method, and the same read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     const from = q.get("from");
     const to = q.get("to");
     if (!entityId) return json({ error: "entityId required" }, 400);
     if (!from || !to) return json({ error: "A cash flow statement needs the dates it covers." }, 400);
+    /* The same statement by the other method, and the same read — of the one
+     * entity named in the query. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     return json(ledgerJson(await directCashFlow({
       orgId, entityId, from, to, bookCode: q.get("bookCode") ?? undefined,

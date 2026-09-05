@@ -20,9 +20,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Putting an invoice or a receipt into the books is the sales ledger, and
-     * it is the mirror of the guard on /api/ledger/ap/post. */
-    await requirePermission({ orgId, userId, permission: "ar.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       invoiceId?: string;
       kind?: "invoice" | "receipt";
@@ -39,6 +36,19 @@ export async function POST(req: Request) {
     });
     if (!row || row.orgId !== orgId) return json({ error: "That invoice does not exist." }, 404);
     const invoice = JSON.parse(row.data) as Invoice;
+
+    /* Putting an invoice or a receipt into the books is the sales ledger, and
+     * it is the mirror of the guard on /api/ledger/ap/post.
+     *
+     * Checked after the invoice is loaded, for the reason the file already
+     * gives for reading the invoice from the store instead of the body: the
+     * document is the authority, not the caller. The entity on it is the
+     * entity the revenue lands in, so it is the one the grant has to cover.
+     *
+     * The 404 above stays above this. Answering "no such invoice" and "not
+     * your invoice" differently would let somebody map which invoice ids
+     * exist without ever being allowed to see one. */
+    await requirePermission({ orgId, userId, entityId: invoice.entityId, permission: "ar.manage" });
 
     if (b.kind === "receipt") {
       if (!b.paymentId || b.bankAmountMinor === undefined) {

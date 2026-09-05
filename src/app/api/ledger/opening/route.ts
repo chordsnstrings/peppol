@@ -21,9 +21,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Loading the balances the books start from — and previewing or parsing what
-     * would be loaded, which is the same screen a step earlier. */
-    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "preview" | "import" | "parse";
       entityId?: string;
@@ -31,6 +28,15 @@ export async function POST(req: Request) {
       lines?: OpeningLine[];
       text?: string;
     };
+
+    /* Loading the balances the books start from — and previewing or parsing what
+     * would be loaded, which is the same screen a step earlier.
+     *
+     * The guard waits for the body because the entity being opened is in it.
+     * Parsing pasted text names no entity and legitimately cannot: it reads a
+     * file and touches no books, so `b.entityId` is undefined there and the
+     * check falls back to the org-wide answer, exactly as it behaved before. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "setup.manage" });
 
     if (b.action === "parse") {
       if (!b.text) return json({ error: "There is nothing to read." }, 400);

@@ -10,12 +10,12 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The trial balance is the books in one page. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const period = url.searchParams.get("period");
     if (!entityId || !period) return json({ error: "entityId and period are required." }, 400);
+    /* The trial balance is one entity's books in one page. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json(ledgerJson(await trialBalance({ orgId, entityId, periodLabel: period })));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);

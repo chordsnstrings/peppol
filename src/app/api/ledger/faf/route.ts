@@ -24,10 +24,6 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Every transaction in the period in one file for the FTA. Like the export,
-     * this is the widest read in the product rather than a narrow one, and the
-     * read key is what it takes. It files nothing; it only serves the file. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
@@ -35,6 +31,13 @@ export async function GET(req: Request) {
     if (!entityId || !from || !to) {
       return json({ error: "entityId, from and to are required to produce an audit file." }, 400);
     }
+    /* Every transaction in the period in one file for the FTA. Like the export,
+     * this is the widest read in the product rather than a narrow one, and the
+     * read key is what it takes. It files nothing; it only serves the file.
+     * Wide as it is, it is still one taxable person's file, so the grant has to
+     * cover that entity — a role held on a sister company is not authority to
+     * hand this one's every transaction to somebody. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const file = await ftaAuditFile({ orgId, entityId, from, to });
 

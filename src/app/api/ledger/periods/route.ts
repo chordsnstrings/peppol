@@ -49,10 +49,8 @@ export async function PATCH(req: Request) {
     // Closing a month and reopening one are different permissions. Reopening
     // undoes somebody else's decision, and is the one that lets a figure
     // already reported be changed underneath whoever reported it.
-    await requirePermission({
-      orgId, userId, entityId: period.entityId,
-      permission: b.status === "open" ? "period.reopen" : "period.close",
-    });
+    const key = b.status === "open" ? "period.reopen" : "period.close";
+    await requirePermission({ orgId, userId, entityId: period.entityId, permission: key });
 
     const allowed = NEXT[period.status] ?? [];
     if (!allowed.includes(b.status)) {

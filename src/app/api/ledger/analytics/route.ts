@@ -32,11 +32,11 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Every test in here reads the journals and writes nothing. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* Every test in here reads one entity's journals and writes nothing. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const from = url.searchParams.get("from") ?? undefined;
     const to = url.searchParams.get("to") ?? undefined;
 

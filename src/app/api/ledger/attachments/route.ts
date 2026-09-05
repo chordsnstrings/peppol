@@ -3,6 +3,7 @@ import { requirePermission, PermissionError } from "@/lib/server/ledger/permissi
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
+import { prisma } from "@/lib/server/prisma";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import {
   attach, listAttachments, getAttachment, removeAttachment, MAX_BYTES, type SubjectType,
@@ -39,13 +40,23 @@ export async function GET(req: Request) {
      * accepts — journal entry, invoice, bill, expense claim, asset, bank line
      * — is a record `ledger.read` already covers. If a payslip ever becomes a
      * subject type this has to branch on the subject instead of answering with
-     * one key, because a receipt and a payslip are not the same read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
+     * one key, because a receipt and a payslip are not the same read.
+     *
+     * The entity comes off the record and never off the request. Neither an
+     * attachment id nor a subject id is entity-scoped, so a caller naming one
+     * has told us nothing about which books it belongs to — the row has. Both
+     * branches therefore read the metadata first and check afterwards, which
+     * is the same order `journals/[id]/reverse` uses and for the same reason:
+     * a grant on one entity must not open another entity's evidence. Nothing
+     * is returned until the check passes. A row attached before the entity
+     * column was recorded carries none, and falls back to the org-wide answer
+     * this route gave before. */
     const url = new URL(req.url);
     const id = url.searchParams.get("id");
 
     if (id) {
       const doc = await getAttachment({ orgId, id });
+      await requirePermission({ orgId, userId, entityId: doc.entityId ?? undefined, permission: "ledger.read" });
       return json(ledgerJson({ attachment: doc }));
     }
 
@@ -55,6 +66,11 @@ export async function GET(req: Request) {
       return json({ error: "Say what the attachments belong to: subjectType and subjectId." }, 400);
     }
     const attachments = await listAttachments({ orgId, subjectType, subjectId });
+    // Everything attached to one subject sits in that subject's entity, so the
+    // first row that names one answers for the whole list. An empty list has no
+    // entity to check because it discloses nothing to check.
+    const listEntityId = attachments.find((a) => a.entityId)?.entityId ?? undefined;
+    await requirePermission({ orgId, userId, entityId: listEntityId, permission: "ledger.read" });
     return json(ledgerJson({ attachments }));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);
@@ -131,8 +147,19 @@ export async function DELETE(req: Request) {
      * the bookkeeper may add a receipt and only the accountant or the owner
      * may take one away, which is the right way round: as the module puts it,
      * removing evidence silently is how evidence stops being evidence, and the
-     * console line below is the only history there is. */
-    await requirePermission({ orgId, userId, permission: "ledger.reverse" });
+     * console line below is the only history there is.
+     *
+     * Which books the correction lands in is read off the row, because an
+     * attachment id says nothing about the entity it belongs to and a caller
+     * who could name that entity could name one they hold `ledger.reverse` on
+     * and then strip the evidence off another entity's bill. A row that is not
+     * there has no entity to check, and `removeAttachment` below is left to
+     * say so — the message for a missing attachment is the one it always was. */
+    const existing = await prisma.attachment.findFirst({
+      where: { id, orgId },
+      select: { entityId: true },
+    });
+    await requirePermission({ orgId, userId, entityId: existing?.entityId ?? undefined, permission: "ledger.reverse" });
 
     const removed = await removeAttachment({ orgId, id, removedBy: userId });
     console.info("[attachment removed]", {

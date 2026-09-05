@@ -116,10 +116,8 @@ export async function POST(req: Request) {
      * data — adding a SKU or naming a warehouse is not really posting — but the
      * catalogue has no such key, and `ledger.post` is the closest one held by
      * the people who keep stock records. */
-    await requirePermission({
-      orgId, userId, entityId: b.entityId,
-      permission: b.action === "receive" ? "ap.manage" : "ledger.post",
-    });
+    const key = b.action === "receive" ? "ap.manage" : "ledger.post";
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {
       case "add": {

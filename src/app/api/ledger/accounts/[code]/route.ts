@@ -10,12 +10,13 @@ export const runtime = "nodejs";
 export async function GET(req: Request, ctx: { params: Promise<{ code: string }> }) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The general ledger behind one account is a read of the books. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const { code } = await ctx.params;
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The general ledger behind one account is a read of the books, and it is
+     * read on one entity's chart — so the grant has to cover that entity. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
     return json(ledgerJson(await generalLedger({

@@ -13,12 +13,14 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Opening the books for an entity: a fiscal year, a book and a chart. */
-    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const body = (await req.json().catch(() => ({}))) as {
       entityId?: string; fiscalYear?: string; startsOn?: string; functionalCurrency?: string;
     };
     if (!body.entityId) return json({ error: "Choose which entity to open books for." }, 400);
+    /* Opening the books for an entity: a fiscal year, a book and a chart. The
+     * entity is in the body, so the guard waits for the body — otherwise a
+     * grant on one entity would open the books for any of them. */
+    await requirePermission({ orgId, userId, entityId: body.entityId, permission: "setup.manage" });
 
     const label = body.fiscalYear ?? String(new Date().getUTCFullYear());
     const startsOn = body.startsOn ?? `${label}-01-01`;

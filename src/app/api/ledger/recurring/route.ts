@@ -61,10 +61,8 @@ export async function POST(req: Request) {
      * put an entry in the ledger every month without ever holding the key to
      * post one, so the template actions cannot be guarded any more loosely than
      * the run they cause. */
-    await requirePermission({
-      orgId, userId, entityId,
-      permission: b.action === "due" ? "ledger.read" : "ledger.post",
-    });
+    const key = b.action === "due" ? "ledger.read" : "ledger.post";
+    await requirePermission({ orgId, userId, entityId, permission: key });
 
     switch (b.action) {
       case "create": {

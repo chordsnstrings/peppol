@@ -30,11 +30,12 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The IFRS 8 note, read-only by construction — there is no POST here. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The IFRS 8 note, read-only by construction — there is no POST here. The
+     * note is one entity's, so the grant has to be one on that entity. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const dimensions = await listDimensions({ orgId });
     const dimension = url.searchParams.get("dimension");

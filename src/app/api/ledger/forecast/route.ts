@@ -15,11 +15,11 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* A projection drawn from what is already on the ledger: a read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* A projection drawn from what is already on this entity's ledger: a read. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const scope = { orgId, entityId };
 
     if (q.get("view") === "behaviour") {

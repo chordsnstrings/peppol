@@ -24,12 +24,13 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The plan beside the actuals, and the actuals are the profit and loss: a read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const scenario = url.searchParams.get("scenario") ?? undefined;
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The plan beside the actuals, and the actuals are the profit and loss: a
+     * read, of the one entity the query names. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (url.searchParams.get("view") === "summary") {
       const fiscalYear = url.searchParams.get("fiscalYear");
@@ -58,10 +59,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Nothing here reaches the ledger — a budget is what somebody intends, not
-     * what happened. It is configuration of the books, so it sits with opening
-     * them rather than with posting into them. */
-    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "set" | "copy";
       entityId?: string;
@@ -76,6 +73,14 @@ export async function POST(req: Request) {
       note?: string;
     };
     if (!b.entityId || !b.fiscalYear) return json({ error: "entityId and fiscalYear are required." }, 400);
+    /* Nothing here reaches the ledger — a budget is what somebody intends, not
+     * what happened. It is configuration of the books, so it sits with opening
+     * them rather than with posting into them.
+     *
+     * The guard sits below the parse because the entity being budgeted is in
+     * the body, and a grant on one entity is not permission to write another
+     * entity's plan. `assertSameOrigin` and `requireSession` stay above it. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "setup.manage" });
 
     if (b.action === "copy") {
       if (!b.from || !b.to) return json({ error: "A copy needs a source scenario and a target scenario." }, 400);

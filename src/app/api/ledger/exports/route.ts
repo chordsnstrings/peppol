@@ -32,14 +32,17 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* An export is the widest read in the product: every journal, every account
-     * and every balance, in one bundle that then leaves the building. There is
-     * nothing narrower to give it, so it takes the read key — and anyone holding
-     * the read key can already see all of this a screen at a time. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required to export a ledger." }, 400);
+    /* An export is the widest read in the product: every journal, every account
+     * and every balance, in one bundle that then leaves the building. There is
+     * nothing narrower to give it, so it takes the read key — and anyone holding
+     * the read key on this entity can already see all of this a screen at a
+     * time. On this entity is the whole of it: the bundle is one entity's
+     * ledger, and the widest read is the last one that should answer to a grant
+     * somebody holds somewhere else. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const format = (url.searchParams.get("format") ?? "json") as ExportFormat;
     if (format !== "csv" && format !== "json") {
@@ -92,10 +95,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Migrating in loads a trial balance into an empty ledger, which is opening
-     * balances by another name. Parsing and previewing are guarded with it
-     * because they are the earlier steps of that same screen. */
-    await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "parse" | "preview" | "import";
       entityId?: string;
@@ -103,6 +102,16 @@ export async function POST(req: Request) {
       rows?: TrialBalanceRowInput[];
       text?: string;
     };
+
+    /* Migrating in loads a trial balance into an empty ledger, which is opening
+     * balances by another name. Parsing and previewing are guarded with it
+     * because they are the earlier steps of that same screen.
+     *
+     * The guard waits for the body because the entity being loaded is in it.
+     * Parsing pasted text names no entity and legitimately cannot — it reads a
+     * file and touches no books — so `b.entityId` is undefined there and the
+     * check falls back to the org-wide answer it gave before. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "setup.manage" });
 
     if (b.action === "parse") {
       if (!b.text) return json({ error: "There is nothing to read." }, 400);

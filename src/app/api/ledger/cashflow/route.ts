@@ -17,13 +17,13 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* A statement, drawn from entries already posted: a read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
     if (!entityId || !from || !to) return json({ error: "entityId, from and to are required." }, 400);
+    /* A statement, drawn from one entity's entries already posted: a read. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const cashFlow = await cashFlowStatement({ orgId, entityId, from, to });
     return json({ cashFlow });

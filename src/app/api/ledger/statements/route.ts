@@ -13,14 +13,14 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The statements are the books. A role that cannot read the books
-     * cannot read these. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
     if (!entityId || !from || !to) return json({ error: "entityId, from and to are required." }, 400);
+    /* The statements are the books. A role that cannot read the books cannot
+     * read these — and a role on one entity's books is not a role on another's. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const [pl, bs] = await Promise.all([
       profitAndLoss({ orgId, entityId, from, to }),

@@ -11,11 +11,12 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The chart is part of the books, so listing it is a read of them. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The chart is part of the books, so listing it is a read of them — of one
+     * entity's books, which is the entity the grant has to cover. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const q = url.searchParams.get("q")?.trim();
 
     const accounts = await prisma.account.findMany({
@@ -43,12 +44,17 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Adding an account changes the chart every future entry is coded against. */
-    await requirePermission({ orgId, userId, permission: "chart.edit" });
     const b = (await req.json().catch(() => ({}))) as Record<string, string | boolean | undefined>;
     if (!b.entityId || !b.code || !b.name || !b.type) {
       return json({ error: "An account needs an entity, a code, a name and a type." }, 400);
     }
+    /* Adding an account changes the chart every future entry is coded against
+     * — one entity's chart, named in the body, which is why the guard waits for
+     * the body to be read. A grant on entity A is not permission to put an
+     * account into entity B's chart, and the database's own `gl_line_guard`
+     * would not catch it: the account would be perfectly postable, just in
+     * books its author was never given. */
+    await requirePermission({ orgId, userId, entityId: String(b.entityId), permission: "chart.edit" });
     if (!["ASSET", "LIABILITY", "EQUITY", "INCOME", "EXPENSE"].includes(String(b.type))) {
       return json({ error: "Account type must be ASSET, LIABILITY, EQUITY, INCOME or EXPENSE." }, 400);
     }

@@ -31,12 +31,12 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The queue is assembled out of reads of the books, so it is one. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const q = new URL(req.url).searchParams;
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The queue is assembled out of reads of one entity's books, so it is one. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const asOf = q.get("asOf") ?? undefined;
 
     // One notification's history: who dealt with it, when, and why. Asked for
@@ -69,13 +69,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* This one writes: acknowledging or snoozing a row takes a finding off
-     * everybody's queue, not just the acknowledger's. There is no notifications
-     * key in the catalogue and "notifications.manage" is what this would have
-     * asked for. Of the twenty-one that exist the read key is the closest — the
-     * people who work this queue are bookkeepers and accountants, and putting it
-     * behind the setup key would lock the queue's own audience out of it. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "acknowledge" | "snooze" | "clear";
       entityId?: string;
@@ -87,6 +80,18 @@ export async function POST(req: Request) {
 
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
     if (!b.key) return json({ error: "Which notification?" }, 400);
+
+    /* This one writes: acknowledging or snoozing a row takes a finding off
+     * everybody's queue, not just the acknowledger's. There is no notifications
+     * key in the catalogue and "notifications.manage" is what this would have
+     * asked for. Of the twenty-one that exist the read key is the closest — the
+     * people who work this queue are bookkeepers and accountants, and putting it
+     * behind the setup key would lock the queue's own audience out of it.
+     *
+     * Checked after the body is read because the queue being cleared is one
+     * entity's: everybody's queue is everybody working on that entity, and a
+     * grant on a sister company is not one of them. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.read" });
 
     const act = {
       orgId,

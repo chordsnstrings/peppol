@@ -64,6 +64,19 @@ function decisionPermission(subjectType: SubjectType): string {
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
+    const q = new URL(req.url).searchParams;
+
+    const entityId = q.get("entityId");
+    if (!entityId) return json({ error: "entityId required" }, 400);
+
+    const subjectId = q.get("subjectId");
+    const subjectType = q.get("subjectType") as SubjectType | null;
+    // Read before the guard, not after it, so the check below can be made
+    // against the entity the document actually belongs to rather than the one
+    // the query string claimed — the same preference `decide` makes, for the
+    // same reason.
+    const facts = subjectId && subjectType ? await subjectFacts(orgId, subjectType, subjectId) : null;
+
     /* Reading the rules in force, and your own queue — `ledger.read`.
      *
      * Deliberately not `roles.manage`. An approver has to be able to see what
@@ -71,16 +84,13 @@ export async function GET(req: Request) {
      * that only administrators may read is a control people work around
      * because nobody can tell them why they are stuck. The queue is scoped to
      * the caller inside `pendingFor`, so this shows nobody anybody else's
-     * work; the rules are the same rules the blockers quote back on screen. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
-    const q = new URL(req.url).searchParams;
+     * work; the rules are the same rules the blockers quote back on screen.
+     *
+     * Scoped to the entity, because the rules in force and what is waiting on
+     * this entity are not what a grant on a sister company was given for. */
+    await requirePermission({ orgId, userId, entityId: facts?.entityId ?? entityId, permission: "ledger.read" });
 
-    const subjectId = q.get("subjectId");
-    const subjectType = q.get("subjectType") as SubjectType | null;
     if (subjectId && subjectType) {
-      const entityId = q.get("entityId");
-      if (!entityId) return json({ error: "entityId required" }, 400);
-      const facts = await subjectFacts(orgId, subjectType, subjectId);
       return json(ledgerJson({
         state: await approvalState({
           orgId,
@@ -91,9 +101,6 @@ export async function GET(req: Request) {
         }),
       }));
     }
-
-    const entityId = q.get("entityId");
-    if (!entityId) return json({ error: "entityId required" }, 400);
 
     // One request, because the screen is useless without both halves: the rules
     // say what the business asks for, the queue says what it is waiting on.
@@ -154,10 +161,19 @@ export async function POST(req: Request) {
         if (!b.ruleId) return json({ error: "Which rule?" }, 400);
         /* Switching a rule off is the same power as writing one, in the more
          * dangerous direction: a control that can be turned off by the people
-         * it constrains is not a control. The rule id is looked up inside the
-         * org by the module, and the request carries no entity, so this is
-         * checked org-wide. */
-        await requirePermission({ orgId, userId, permission: "roles.manage" });
+         * it constrains is not a control.
+         *
+         * The request carries no entity, so the rule is read for one — every
+         * approval rule belongs to exactly one entity, and turning off the
+         * control over one company's payments is not something a grant on
+         * another company should buy. A rule id that resolves to nothing has
+         * no entity, and `deactivateRule` below is left to say so, so the
+         * message for a rule that is not there is the one it always was. */
+        const rule = await prisma.approvalRule.findFirst({
+          where: { id: b.ruleId, orgId },
+          select: { entityId: true },
+        });
+        await requirePermission({ orgId, userId, entityId: rule?.entityId, permission: "roles.manage" });
         return json(ledgerJson({ rule: await deactivateRule({ orgId, ruleId: b.ruleId }) }));
       }
 
@@ -179,12 +195,7 @@ export async function POST(req: Request) {
          * could name one it holds a role on and then decide on a document
          * belonging to another, which is the same trick the amount and the
          * claimant are read from the table to prevent. */
-        await requirePermission({
-          orgId,
-          userId,
-          entityId: facts?.entityId ?? b.entityId,
-          permission: decisionPermission(b.subjectType),
-        });
+        await requirePermission({ orgId, userId, entityId: facts?.entityId ?? b.entityId, permission: decisionPermission(b.subjectType) });
         // The approver is whoever is signed in — never a value the request
         // supplies. Letting the client name the approver would hand away the
         // one control this whole file exists to hold.
@@ -210,9 +221,16 @@ export async function POST(req: Request) {
         /* Withdrawing throws away every approval collected so far and starts
          * the round again, so it takes the same key as giving one: it is
          * un-deciding, an act on the document rather than on the rules.
-         * Checked org-wide because the request carries no entity — and the
-         * decisions it clears are keyed org-wide too. */
-        await requirePermission({ orgId, userId, permission: decisionPermission(b.subjectType) });
+         *
+         * The request carries no entity, so the document is asked for one —
+         * the same preference `decide` makes, and undoing a decision must not
+         * be checked more loosely than making it. Only an expense claim has a
+         * table of its own here, so for the other subject types `subjectFacts`
+         * returns nothing and the check falls back to the org-wide answer it
+         * has always given; see `subjectFacts` for why that is where the line
+         * currently falls. */
+        const facts = await subjectFacts(orgId, b.subjectType, b.subjectId);
+        await requirePermission({ orgId, userId, entityId: facts?.entityId, permission: decisionPermission(b.subjectType) });
         return json(ledgerJson(await withdraw({
           orgId, subjectType: b.subjectType, subjectId: b.subjectId, withdrawnBy: userId, reason: b.reason,
         })));

@@ -25,11 +25,11 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The statement of changes in equity and its notes: a read. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The statement of changes in equity and its notes, for this entity: a read. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     // Absent means the most recent year the ledger holds, which is what the
     // screen wants on first load.
     const fiscalYear = url.searchParams.get("fiscalYear")?.trim() || undefined;

@@ -43,9 +43,9 @@ export async function GET(req: Request) {
      * never to a member's ledger — so no posting key is needed, and adding one
      * would suggest a write exists.
      *
-     * Checked org-wide rather than per entity: a consolidation group spans
-     * entities by definition, and the report reads several of them at once, so
-     * there is no single entity to scope the grant to. A person with a
+     * org-wide: a consolidation group spans entities by definition, and the
+     * report reads several of them at once, so there is no single entity to
+     * scope the grant to. A person with a
      * `ledger.read` grant on one entity only would be shown the group's
      * matching, which is why the group picker is fed by `groupList` inside the
      * org and by nothing the client supplies. */

@@ -24,11 +24,11 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* The list is assembled out of reads of the books, so it is one. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The list is assembled out of reads of one entity's books, so it is one. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const asOf = url.searchParams.get("asOf") ?? undefined;
 
     return json(ledgerJson(await attentionList({ orgId, entityId, asOf })));

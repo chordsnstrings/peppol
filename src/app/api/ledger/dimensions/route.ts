@@ -27,11 +27,11 @@ const BASES = new Set(["expenses", "revenue", "netProfit"]);
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Cost-centre reporting reads the ledger and nothing else. */
-    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* Cost-centre reporting reads one entity's ledger and nothing else. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const dimensions = await listDimensions({ orgId });
     const dimension = url.searchParams.get("dimension");
@@ -71,11 +71,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Defining a dimension, adding a value to one, or making one mandatory on an
-     * account all change what the ledger will accept on a journal line from here
-     * on. That is the same kind of change as editing the chart, and it takes the
-     * same key. */
-    await requirePermission({ orgId, userId, permission: "chart.edit" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create-dimension" | "add-value" | "require-on-account";
       entityId?: string;
@@ -86,6 +81,20 @@ export async function POST(req: Request) {
       dimension?: string;
       accountCode?: string;
     };
+
+    /* Defining a dimension, adding a value to one, or making one mandatory on an
+     * account all change what the ledger will accept on a journal line from here
+     * on. That is the same kind of change as editing the chart, and it takes the
+     * same key.
+     *
+     * The guard waits for the body because only one of the three actions names
+     * an entity. A dimension and its values belong to the organisation — they
+     * are created with `orgId` alone and every entity shares them — so
+     * `b.entityId` is undefined for those two and the check is the org-wide one
+     * it has always been. Making a dimension mandatory on an account is a
+     * change to one entity's chart, and there the body names it, so the grant
+     * has to cover that entity. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "chart.edit" });
 
     switch (b.action) {
       case "create-dimension":

@@ -43,8 +43,6 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
-    /* Matching, unmatching and posting against a statement line. */
-    await requirePermission({ orgId, userId, permission: "bank.reconcile" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "import" | "match" | "unmatch" | "post";
       entityId?: string;
@@ -57,6 +55,10 @@ export async function POST(req: Request) {
       memo?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
+    /* Matching, unmatching and posting against a statement line — against one
+     * entity's bank account, which is named in the body, so the guard waits for
+     * the body rather than settling for the org-wide answer. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "bank.reconcile" });
 
     switch (b.action) {
       case "import":

@@ -29,7 +29,13 @@ export const runtime = "nodejs";
 export async function GET(req: Request) {
   try {
     const { orgId, userId } = await requireSession();
-    /* Group accounts are the members' own statements added together — a read. */
+    /* Group accounts are the members' own statements added together — a read.
+     *
+     * org-wide: a consolidation group spans entities by definition, so a grant
+     * on one member is not what decides whether somebody may see the group.
+     * There is no single entity to narrow to — the response adds several of
+     * them up — and the group is named by code, with its membership read from
+     * the organisation rather than from anything the client supplies. */
     await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const group = url.searchParams.get("group");
@@ -61,7 +67,14 @@ export async function POST(req: Request) {
     /* Nothing here posts, but deciding which entities are added together decides
      * what every group statement afterwards says. That is setting the books up
      * rather than keeping them, so it takes the setup key; a "consolidation.manage"
-     * key is what this would have asked for if the catalogue had one. */
+     * key is what this would have asked for if the catalogue had one.
+     *
+     * org-wide: a group spans entities by definition, and adding one to it or
+     * taking one out changes what the whole group reports. `add-member` does
+     * name an entity, but narrowing to it would be the wrong check twice over
+     * — it would let somebody with a grant on one small subsidiary rewrite the
+     * group every other entity is reported in, and it would ask nothing at all
+     * of `create`, which names no entity and decides the group exists. */
     await requirePermission({ orgId, userId, permission: "setup.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "add-member" | "remove-member";

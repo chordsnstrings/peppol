@@ -94,10 +94,8 @@ export async function POST(req: Request) {
      * purchase-ledger key. `bank.reconcile` would be wrong for it precisely
      * because no money moves.
      */
-    await requirePermission({
-      orgId, userId, entityId: b.entityId,
-      permission: b.action === "spend" ? "ap.manage" : "bank.reconcile",
-    });
+    const key = b.action === "spend" ? "ap.manage" : "bank.reconcile";
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {
       case "open":
