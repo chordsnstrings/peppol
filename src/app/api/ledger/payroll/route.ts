@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -21,7 +22,10 @@ export const runtime = "nodejs";
 /** The month's payslips, the employee register, and the ledger balances both have to agree with. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Salaries are not a general read. The shipped VIEWER role's own
+     * description says so, and a Viewer could call this. */
+    await requirePermission({ orgId, userId, permission: "payroll.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
@@ -30,6 +34,7 @@ export async function GET(req: Request) {
     const period = url.searchParams.get("period") ?? new Date().toISOString().slice(0, 7);
     return json(await payrollSummary({ orgId, entityId, period }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -46,6 +51,8 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Running, posting and paying a payroll, and settling a leaver. */
+    await requirePermission({ orgId, userId, permission: "payroll.run" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "add-employee" | "update-employee" | "run" | "post" | "pay" | "settle" | "wps";
       entityId?: string;
@@ -122,6 +129,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

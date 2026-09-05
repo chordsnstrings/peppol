@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -58,6 +59,7 @@ export async function GET(req: Request) {
       ),
     );
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -68,6 +70,8 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Preparing and locking a tax computation. */
+    await requirePermission({ orgId, userId, permission: "tax.file" });
     const b = (await req.json().catch(() => ({}))) as {
       entityId?: string;
       fiscalYear?: string;
@@ -88,6 +92,7 @@ export async function POST(req: Request) {
       ),
     );
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

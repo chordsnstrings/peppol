@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -23,7 +24,9 @@ const ORDERS: DateOrder[] = ["DMY", "MDY", "YMD"];
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* Importing a statement is the start of reconciling it. */
+    await requirePermission({ orgId, userId, permission: "bank.reconcile" });
 
     const b = (await req.json().catch(() => ({}))) as {
       text?: unknown;

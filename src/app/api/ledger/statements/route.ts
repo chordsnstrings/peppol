@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { json, handleError } from "@/lib/server/http";
 import { profitAndLoss, balanceSheet } from "@/lib/server/ledger/statements";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -11,7 +12,10 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
+    /* The statements are the books. A role that cannot read the books
+     * cannot read these. */
+    await requirePermission({ orgId, userId, permission: "ledger.read" });
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
@@ -24,6 +28,7 @@ export async function GET(req: Request) {
     ]);
     return json({ profitAndLoss: pl, balanceSheet: bs });
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

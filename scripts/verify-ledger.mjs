@@ -25,6 +25,14 @@ const sales = await mk('4000', 'Sales', 'INCOME');
 const header = await mk('1', 'Assets', 'ASSET', { isPostable: false });
 const arCtl = await mk('1100', 'Trade receivables', 'ASSET', { isControl: true, subtype: 'AR' });
 const usdOnly = await mk('1010', 'USD bank', 'ASSET', { currency: 'USD', subtype: 'BANK' });
+const archived = await mk('1090', 'Old bank', 'ASSET', { status: 'archived' });
+// A second legal entity in the same organisation. gl_line_guard's cross-entity
+// branch is the one that stops one entity's journal reaching another's chart,
+// and nothing here had two entities to test it with.
+const OTHER_ENT = ENT + '-b';
+const otherEntityAccount = await db.account.create({
+  data: { orgId: ORG, entityId: OTHER_ENT, code: '1000', name: 'Cash', type: 'ASSET' },
+});
 
 const L = (accountId, minor, cur = 'AED') => ({ orgId: ORG, accountId, txnCurrency: cur, txnAmountMinor: BigInt(minor), functionalCurrency: 'AED', functionalAmountMinor: BigInt(minor) });
 const entry = (over = {}, lines = []) => db.journalEntry.create({
@@ -45,6 +53,15 @@ await rejects('header account is not postable', () => entry({}, [L(header.id, 50
 await rejects('manual journal to a control account is refused', () => entry({ source: 'manual' }, [L(arCtl.id, 500), L(sales.id, -500)]), 'control account');
 await allows('subledger may post to a control account', () => entry({ source: 'invoice' }, [L(arCtl.id, 500), L(sales.id, -500)]));
 await rejects('currency-restricted account refuses another currency', () => entry({}, [L(usdOnly.id, 500), L(sales.id, -500)]), 'only accepts');
+
+// The two branches of gl_line_guard nothing attacked. Both are also enforced
+// in application code with readable messages and are structurally unreachable
+// through the single write path — but the guard has been rewritten three times
+// by CREATE OR REPLACE, and the register claims these rules are held by the
+// database. A rule nobody attacks is a rule nobody knows is still there.
+await rejects('archived account refuses a posting', () => entry({}, [L(archived.id, 500), L(sales.id, -500)]), 'archived');
+await rejects("one entity's journal cannot reach another entity's chart",
+  () => entry({}, [L(otherEntityAccount.id, 500), L(sales.id, -500)]), 'another legal entity');
 // Cross-currency entries are legitimate; the invariant is the FUNCTIONAL balance.
 await rejects('cross-currency entry that does not balance functionally is refused',
   () => entry({}, [L(cash.id, 10000, 'AED'), L(sales.id, -10000, 'AED'), L(usdOnly.id, 700, 'USD')]), 'does not balance');

@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
@@ -30,6 +31,7 @@ export async function GET(req: Request) {
       employeeCode: q.get("employeeCode") ?? undefined,
     })));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }
@@ -40,6 +42,10 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Approving somebody else's claim is the control this module exists
+     * for. Refusing self-approval, which the module already does, is a
+     * different question from who may approve at all. */
+    await requirePermission({ orgId, userId, permission: "expense.approve" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "addLine" | "removeLine" | "update" | "submit" | "approve" | "reject" | "reopen" | "post" | "pay";
       entityId?: string;
@@ -122,6 +128,7 @@ export async function POST(req: Request) {
         return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

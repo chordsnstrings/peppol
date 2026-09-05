@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/session";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
@@ -13,6 +14,8 @@ export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
+    /* Posting a bill or a supplier payment. */
+    await requirePermission({ orgId, userId, permission: "ap.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       billId?: string;
       kind?: "bill" | "payment";
@@ -49,6 +52,7 @@ export async function POST(req: Request) {
       actorType: "HUMAN", actorId: userId,
     }));
   } catch (e) {
+    if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);
     return handleError(e);
   }

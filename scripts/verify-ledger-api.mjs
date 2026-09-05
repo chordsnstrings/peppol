@@ -170,6 +170,44 @@ for (const [path, body] of [
 //   parameters this sweep does not know (a date range, a period, a document
 //   id) and 400 is the right answer to that — but "400" on its own is not an
 //   answer anybody can act on.
+/*
+ * Every permission the catalogue publishes is enforced somewhere.
+ *
+ * `createRole` refuses an unknown permission key on the stated grounds that
+ * "a permission nobody can check is a permission nobody holds" — and seven of
+ * the twenty-one shipped keys were exactly that: present in the catalogue and
+ * in its own test, and in no route file. The shipped VIEWER role's description
+ * says "Payroll is not included: salaries are not a general read", and a
+ * Viewer could POST /api/ledger/payroll with action run.
+ *
+ * This reads the catalogue from source rather than importing it, because the
+ * suite runs against a built server and must not depend on the TypeScript
+ * being loadable.
+ */
+console.log('\nEVERY PERMISSION IS ENFORCED');
+const { readFileSync: readSrc, readdirSync: readDir, existsSync: hasPath } = await import('node:fs');
+const catalogue = readSrc('src/lib/server/ledger/permissions.ts', 'utf8');
+const keys = [...new Set(
+  [...catalogue.matchAll(/key:\s*"([a-z_]+\.[a-z_]+)"/g)].map((m) => m[1]),
+)];
+const routeSrc = readDir('src/app/api/ledger', { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .flatMap((e) => {
+    const walk = (d) => readDir(d, { withFileTypes: true }).flatMap((x) =>
+      x.isDirectory() ? walk(`${d}/${x.name}`) : [`${d}/${x.name}`]);
+    return walk(`src/app/api/ledger/${e.name}`);
+  })
+  .filter((f) => f.endsWith('.ts'))
+  .map((f) => readSrc(f, 'utf8'))
+  .join('\n');
+const unenforced = keys.filter((k) => !routeSrc.includes(`"${k}"`) && !routeSrc.includes(`'${k}'`));
+keys.length > 10
+  ? ok(`the permission catalogue was read`, `${keys.length} keys`)
+  : bad('permission catalogue', `only found ${keys.length} keys — the parse is wrong, not the code`);
+unenforced.length === 0
+  ? ok('every catalogued permission is checked by at least one route', `${keys.length} keys`)
+  : bad('permissions enforced nowhere', unenforced.join(', '));
+
 console.log('\nEVERY ROUTE ANSWERS');
 const { readdirSync, existsSync } = await import('node:fs');
 const routes = readdirSync('src/app/api/ledger', { withFileTypes: true })
