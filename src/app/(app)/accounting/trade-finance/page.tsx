@@ -3,7 +3,8 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { useAsk } from "@/components/ledger/ask";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 interface Event { kind: string; happenedOn: string; amountMinor: string; entryId: string | null; memo: string | null }
 interface Facility {
@@ -40,6 +41,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 export default function TradeFinancePage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [asOf, setAsOf] = React.useState(today);
   const [tab, setTab] = React.useState<"register" | "note">("register");
   const [open, setOpen] = React.useState<string | null>(null);
@@ -222,8 +224,34 @@ export default function TradeFinancePage() {
                                   <>
                                     <button type="button" className="sw-link-btn" disabled={busy === `draw:${f.reference}`}
                                       onClick={async () => {
-                                        const amt = window.prompt(`How much was drawn under ${f.reference}?`);
-                                        if (!amt) return;
+                                        const left = fmtMinor(f.availableMinor, f.currency, { zero: "zero" });
+                                        const amt = await ask({
+                                          title: `How much was drawn under ${f.reference}?`,
+                                          detail:
+                                            (f.kind === "BANK_GUARANTEE"
+                                              ? `The guarantee has been called, and a called guarantee is an expense rather than a ` +
+                                                `payable: the drawing debits 6900 and credits trust receipts 2470, because the entity ` +
+                                                `has paid for somebody else's failure to perform and gets nothing for the money. `
+                                              : `${f.bank} has paid ${f.beneficiary}, so the drawing debits trade payables 2000 and ` +
+                                                `credits trust receipts 2470 — the same debt, owed to the bank instead of the supplier, ` +
+                                                `bearing interest from here and not gone away. `) +
+                                            (f.expired
+                                              ? `${f.reference} ran out on ${f.expiresOn} and is already out of the contingent-liability ` +
+                                                `note — nobody can call a credit that has expired — so this posts against a facility ` +
+                                                `the disclosure has let go. Record it only if the bank really did pay out. `
+                                              : `The contingent liability disclosed for ${f.reference} falls by the same amount, because ` +
+                                                `that much of the promise has stopped being contingent. `) +
+                                            `${left} of the face is still undrawn and this comes off that; more than the face is refused.`,
+                                          reason: {
+                                            label: `Amount drawn, ${f.currency}`,
+                                            placeholder: left,
+                                            minLength: 1,
+                                            single: true,
+                                            hint: "Arithmetic is fine — 1200/3, or (450+80)*1.05 — and it is rounded to the minor unit.",
+                                          },
+                                          confirmLabel: "Record the drawing",
+                                        });
+                                        if (amt === null) return;
                                         const m = parseAmount(amt, f.currency);
                                         if (m === null) { setErr("That is not an amount I can read."); return; }
                                         const r = await act(`draw:${f.reference}`, {

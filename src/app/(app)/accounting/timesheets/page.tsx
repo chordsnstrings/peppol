@@ -3,7 +3,8 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { useAsk } from "@/components/ledger/ask";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 interface Entry {
   id: string;
@@ -94,6 +95,7 @@ function pct(bps: number | null): string {
 
 export default function TimesheetsPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [asOf, setAsOf] = React.useState(today);
   const [filter, setFilter] = React.useState("");
   const [tab, setTab] = React.useState<"register" | "utilisation">("register");
@@ -305,7 +307,31 @@ export default function TimesheetsPage() {
                     <button type="button" className="sw-btn sw-btn-sm" disabled={busy === "writeOff"}
                       data-testid="write-off-time"
                       onClick={async () => {
-                        const reason = window.prompt("Why is this time not being billed?");
+                        const rows = data.entries.filter((t) => picked.has(t.id));
+                        const mins = rows.reduce((a, t) => a + t.minutes, 0);
+                        const charge = rows.reduce((a, t) => a + BigInt(t.chargeableMinor), 0n);
+                        const reason = await ask({
+                          title:
+                            rows.length === 1
+                              ? `Why is this ${hoursOf(mins)} not being billed?`
+                              : `Why are these ${rows.length} entries — ${hoursOf(mins)} — not being billed?`,
+                          detail:
+                            "The time stops counting towards work in progress, so the next run takes its cost back out " +
+                            "of 1330 and leaves it in 5100: the firm carries what the work cost. The " +
+                            `${fmtMinor(charge, "AED", { zero: "zero" })} it would have been billed at was never revenue, ` +
+                            "so nothing reverses there. Nothing is deleted either — the entries stay on the record with " +
+                            "this reason against them, and it is the answer a client gets when they ask why an hour on " +
+                            "their matter was not charged.",
+                          reason: {
+                            label: "Reason",
+                            placeholder: "Quoted four hours, the migration took nine",
+                            minLength: 10,
+                            hint:
+                              "Written-off time is the only honest measure a firm has of how well it estimates. " +
+                              "A one-word reason teaches nobody anything.",
+                          },
+                          confirmLabel: "Write it off",
+                        });
                         if (reason === null) return;
                         const r = await act("writeOff", { action: "writeOff", ids: chosen, reason });
                         if (r) { setPicked(new Set()); setMsg(`Wrote off ${r.writtenOff} entr${Number(r.writtenOff) === 1 ? "y" : "ies"}. It stays on the record with its reason.`); }

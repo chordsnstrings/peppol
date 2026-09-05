@@ -3,6 +3,7 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 import { parseAmount } from "@/lib/ledger/format";
 
 interface Party {
@@ -37,6 +38,7 @@ const thisYear = () => String(new Date().getUTCFullYear());
 
 export default function RelatedPartiesPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [period, setPeriod] = React.useState(thisYear);
   const { data, error, loading, reload } = useLedgerQuery<Note>(
     entityId ? `/api/ledger/related-parties?entityId=${entityId}&period=${period}` : null,
@@ -207,8 +209,24 @@ export default function RelatedPartiesPage() {
                           {!p.endedOn && (
                             <button type="button" className="sw-link-btn" disabled={busy === `end:${p.id}`}
                               onClick={async () => {
-                                const on = window.prompt("From what date did the relationship end?", data.to);
-                                if (!on) return;
+                                const on = await ask({
+                                  title: `From what date is ${p.name} no longer a related party?`,
+                                  detail:
+                                    `${p.name} stays in the IAS 24 note for every period the relationship touches, up to and ` +
+                                    "including the one this date falls in, and drops out of the periods after it. Nothing is " +
+                                    "deleted: the transactions already attributed stay where they are and earlier years keep " +
+                                    `the disclosure as filed. A date before ${p.startedOn}, when the relationship was declared ` +
+                                    "to have started, is refused.",
+                                  reason: {
+                                    label: "Related until",
+                                    placeholder: data.to,
+                                    minLength: 1,
+                                    single: true,
+                                    hint: `A date, written year-month-day. The period on screen runs to ${data.to}.`,
+                                  },
+                                  confirmLabel: "Record the end date",
+                                });
+                                if (on === null) return;
                                 const r = await act(`end:${p.id}`, { action: "end", id: p.id, endedOn: on });
                                 if (r) setMsg(`${p.name} is related until ${on}. Earlier periods keep the disclosure.`);
                               }}>

@@ -3,7 +3,8 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount } from "@/lib/ledger/format";
+import { useAsk } from "@/components/ledger/ask";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 /* ------------------------------------------------------------------- shapes */
 
@@ -138,6 +139,7 @@ const EMPTY_CHARGE: ChargeDraft = { description: "", amount: "", accountCode: "5
 
 export default function LandedCostPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [tab, setTab] = React.useState<"vouchers" | "report" | "measures">("vouchers");
   const [from, setFrom] = React.useState(yearStart);
   const [to, setTo] = React.useState(today);
@@ -281,7 +283,25 @@ export default function LandedCostPage() {
                             }
                           }}
                           onCancel={async () => {
-                            const reason = window.prompt("Why is this voucher being cancelled?");
+                            const reason = await ask({
+                              title: `Why is ${v.number} being cancelled?`,
+                              detail:
+                                `${v.number} has not been applied, so the shares it puts against each lot are a working ` +
+                                "and not a posting: nothing has been capitalised, no item's unit cost has moved, and the " +
+                                `${fmtMinor(v.chargeMinor, "AED", { zero: "zero" })} of charges stays in the accounts the ` +
+                                "suppliers' invoices were coded to, still expensed. Cancelling drops the working and " +
+                                `takes ${v.number} off the landed-cost report altogether, so those charges stop showing ` +
+                                `as unallocated against ${v.shipmentRef} while the charge accounts go on carrying them — ` +
+                                "raise a replacement voucher if the cost still belongs on the goods. A cancelled voucher " +
+                                "cannot be applied or revived.",
+                              reason: {
+                                label: "Reason",
+                                placeholder: "Freight invoice was for a different container",
+                                hint: "Whoever finds this voucher later has only what is written here.",
+                              },
+                              confirmLabel: "Cancel the voucher",
+                              destructive: true,
+                            });
                             if (reason === null) return;
                             const r = await act(`cancel:${v.number}`, { action: "cancel", number: v.number, reason });
                             if (r) setMsg(`${v.number} is cancelled. Nothing was posted under it.`);

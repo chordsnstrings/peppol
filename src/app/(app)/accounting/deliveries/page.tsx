@@ -3,6 +3,7 @@
 import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
+import { useAsk } from "@/components/ledger/ask";
 
 interface NoteLine {
   lineNo: number; sku: string | null; description: string;
@@ -75,6 +76,7 @@ function qty(milli: string): string {
 
 export default function DeliveriesPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [from, setFrom] = React.useState(() => monthsBack(3));
   const [to, setTo] = React.useState(today);
   const [status, setStatus] = React.useState("");
@@ -289,10 +291,32 @@ export default function DeliveriesPage() {
                                     {" "}
                                     <button type="button" className="sw-link-btn" disabled={busy === `cancel:${n.number}`}
                                       onClick={async () => {
-                                        const reason = window.prompt("Why is this note being cancelled?");
+                                        const reason = await ask({
+                                          title: `Why is ${n.number} being cancelled?`,
+                                          detail:
+                                            `${n.number} is still a draft, so nothing has left inventory under it — there is no ` +
+                                            "stock movement to reverse and no cost to put back. Nothing can have been invoiced " +
+                                            "from it either, because only a dispatched note reaches the delivered-not-invoiced " +
+                                            "report. " +
+                                            (n.orderNumber
+                                              ? `The quantity on it stops being committed and goes back to what ${n.orderNumber} still has to deliver. `
+                                              : "") +
+                                            "The reason is kept on the note, and a cancelled note cannot be dispatched.",
+                                          reason: {
+                                            label: "Reason",
+                                            placeholder: "Raised against the wrong order",
+                                            hint: "Whoever finds this note later has only what is written here.",
+                                          },
+                                          confirmLabel: "Cancel the note",
+                                          destructive: true,
+                                        });
                                         if (reason === null) return;
                                         const r = await act(`cancel:${n.number}`, { action: "cancel", number: n.number, reason });
-                                        if (r) setMsg(`${n.number} is cancelled. The order has that quantity back.`);
+                                        if (r) setMsg(
+                                          n.orderNumber
+                                            ? `${n.number} is cancelled. ${n.orderNumber} has that quantity back.`
+                                            : `${n.number} is cancelled. Nothing had left under it.`,
+                                        );
                                       }}>
                                       cancel
                                     </button>
@@ -301,8 +325,24 @@ export default function DeliveriesPage() {
                                 {n.status === "dispatched" && (
                                   <button type="button" className="sw-link-btn" disabled={busy === `confirm:${n.number}`}
                                     onClick={async () => {
-                                      const who = window.prompt("Who signed for it?");
-                                      if (!who) return;
+                                      const who = await ask({
+                                        title: `Who signed for ${n.number}?`,
+                                        detail:
+                                          `The name goes on the note as the proof that ${n.customerName} took the goods, and ` +
+                                          `takes ${n.number} off the list of dispatched notes nobody ever signed for — the list ` +
+                                          "somebody reaches for the day a customer says the delivery never arrived. Nothing " +
+                                          "moves: the cost left inventory when the note was dispatched, and a signature is " +
+                                          "evidence, not a posting.",
+                                        reason: {
+                                          label: "Signed by",
+                                          placeholder: "R. Nair, storeman",
+                                          minLength: 2,
+                                          single: true,
+                                          hint: "The name as it was written on the note. A surname on its own is fine.",
+                                        },
+                                        confirmLabel: "Record the signature",
+                                      });
+                                      if (who === null) return;
                                       const r = await act(`confirm:${n.number}`, { action: "confirm", number: n.number, signedBy: who });
                                       if (r) setMsg(`${n.number} is signed for by ${who}. Nothing moved — a signature is evidence.`);
                                     }}>
