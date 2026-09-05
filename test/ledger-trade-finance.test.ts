@@ -357,6 +357,37 @@ d("trade finance", () => {
     }
   });
 
+  it("refuses a drawing dated after the credit expired, and allows one dated before it", async () => {
+    // Its own facility, so nothing above is disturbed: a drawing is a running
+    // total on the register and settling it pays the bank rather than undrawing
+    // it, so a drawing made here would follow the figures around this file.
+    await issueFacility({
+      ...S,
+      facility: {
+        reference: "BG-LAPSED", kind: "BANK_GUARANTEE", bank: "Mashreq",
+        beneficiary: "Sharjah Municipality", amountMinor: 2_000_000n,
+        issuedOn: "2026-11-01", expiresOn: "2026-11-30",
+      },
+    });
+
+    // The stored status is still "issued" — nothing moves it, and nothing
+    // should have to for this to be refused. contingentLiabilities() has
+    // already dropped this facility from the IAS 37 note, because it filters on
+    // expiresOn and not on status. A drawing that got past this posted against
+    // an exposure the disclosure had let go.
+    await expect(drawFacility({
+      ...S, reference: "BG-LAPSED", amountMinor: 500_000n, drawnOn: "2026-12-15",
+    })).rejects.toThrow(/expired on 2026-11-30 and this is dated 2026-12-15/);
+
+    // And the case that must NOT be refused: the bank paid on the 29th and the
+    // paperwork reached the ledger weeks later. Refusing that would only teach
+    // people to move the date to one that gets past the guard.
+    const ok = await drawFacility({
+      ...S, reference: "BG-LAPSED", amountMinor: 500_000n, drawnOn: "2026-11-29",
+    });
+    expect(ok.entryId).toBeTruthy();
+  });
+
   it("keeps one organisation out of another's facilities", async () => {
     await expect(drawFacility({
       orgId: "t-org-tf-2", entityId: ENT, reference: "LC-1", amountMinor: 1n, drawnOn: "2026-05-01",

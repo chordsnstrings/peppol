@@ -492,6 +492,59 @@ export async function filingFor(opts: {
   return row ? asFiling(row) : null;
 }
 
+/** The calendar-quarter stagger assumed for an entity that has not said. */
+export const ASSUMED_RULE: PeriodRule = { frequency: "QUARTERLY", firstPeriodEndMonth: 3 };
+
+export interface LastCompletedPeriod extends TaxPeriod {
+  /**
+   * True when no registration is recorded and calendar quarters were assumed.
+   *
+   * It has to travel with the answer. Three callers used to derive the quarter
+   * with `Math.floor(month / 3)` and present the result as fact, so a taxpayer
+   * on the February stagger was told, every quarter, what was payable for the
+   * wrong three months against a due date a month late — by the modules whose
+   * whole purpose is stopping somebody missing a VAT deadline. A monthly filer
+   * got one reminder per three returns. Saying "assumed" is what lets a screen
+   * offer the fix instead of quietly being wrong.
+   */
+  assumed: boolean;
+  frequency: TaxFrequency;
+}
+
+/**
+ * The last tax period that has ended, on the registration's own stagger.
+ *
+ * This is the question every reminder actually asks — "what is the return I
+ * should be looking at" — and the answer is a fact about the FTA's assignment,
+ * not about the calendar. Where a registration is recorded, the periods come
+ * from it. Where none is, calendar quarters are assumed and `assumed` says so.
+ */
+export async function lastCompletedPeriod(opts: {
+  orgId: string;
+  entityId: string;
+  regime?: TaxRegime;
+  /** The day to ask on. */
+  asOf: Date | string;
+}): Promise<LastCompletedPeriod> {
+  const asOf = parseDate(opts.asOf, "The date to read tax periods at");
+  const registration = await getRegistration({
+    orgId: opts.orgId, entityId: opts.entityId, regime: opts.regime ?? "VAT",
+  });
+  const rule: PeriodRule = registration
+    ? { frequency: registration.frequency, firstPeriodEndMonth: registration.firstPeriodEndMonth }
+    : ASSUMED_RULE;
+
+  // The period `asOf` falls in has not ended — unless `asOf` is its last day,
+  // in which case it has, and the return for it is the one to be filed.
+  const current = taxPeriodFor(rule, asOf);
+  const period =
+    current.to === iso(asOf)
+      ? current
+      : taxPeriodFor(rule, new Date(new Date(`${current.from}T00:00:00.000Z`).getTime() - DAY_MS));
+
+  return { ...period, assumed: registration === null, frequency: rule.frequency };
+}
+
 export interface OutstandingPeriod extends TaxPeriod {
   /** Days past the due date. Nought where it is due but not yet late. */
   daysOverdue: number;

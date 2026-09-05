@@ -13,6 +13,7 @@ import { testCovenants } from "./borrowings";
 import { adjustmentDue } from "./vat-schemes";
 import { contingentLiabilities } from "./trade-finance";
 import { dunningPlan } from "./credit-control";
+import { lastCompletedPeriod } from "./tax-periods";
 
 /**
  * The notification centre — one place for everything the books are trying to
@@ -237,35 +238,18 @@ function money(minor: bigint, currency: string): string {
 /** How far ahead the digest looks. A week is what "this week" means. */
 const DUE_SOON_DAYS = 7;
 
-/**
- * The FTA gives 28 days after the end of a tax period to file and pay
- * (Federal Decree-Law 8/2017, and the same constant `attention.ts` and
- * `forecast.ts` each state beside their own use of it).
+/*
+ * The tax period and its deadline both come from `tax-periods.ts`, which reads
+ * the registration.
  *
  * This module does not decide WHETHER a return is outstanding — `attention.ts`
- * does, from the period locks, and that inference stays there. All that is
- * derived here is WHEN the law wants it, which is a fact about the calendar and
- * the statute rather than about these books. The quarter is worked out the same
- * way `attention.ts` works it out, from the same `asOf`; if that ever changes
- * there, this date drifts, so the two are noted as a pair.
+ * does, from the period locks, and that inference stays there. What used to be
+ * derived here was WHEN the law wants it, from a calendar quarter and a
+ * 28-day constant stated separately in three modules. That was right only for
+ * a taxpayer the FTA happened to put on the calendar's own stagger. It is now
+ * one call, so the row this file raises and the date it carries cannot drift
+ * from each other or from the return itself.
  */
-const VAT_FILING_DAYS = 28;
-
-function vatFilingDeadline(asOf: Date): { label: string; from: Date; to: Date; deadline: Date } {
-  const quarter = Math.floor(asOf.getUTCMonth() / 3);
-  const year = quarter === 0 ? asOf.getUTCFullYear() - 1 : asOf.getUTCFullYear();
-  const previous = quarter === 0 ? 3 : quarter - 1;
-  const from = new Date(Date.UTC(year, previous * 3, 1));
-  const to = new Date(Date.UTC(year, previous * 3 + 3, 0));
-  return {
-    // This module's own scope string, not the attention list's prose one: it
-    // goes into a key and into a test id, so it is hyphenated.
-    label: `${year}-Q${previous + 1}`,
-    from,
-    to,
-    deadline: new Date(to.getTime() + VAT_FILING_DAYS * DAY),
-  };
-}
 
 /**
  * The longest anything may be put off. A month is the outside edge of a
@@ -374,13 +358,20 @@ const attentionSource: Source = {
   label: "Needs attention",
   async run(ctx) {
     const list = await attentionList({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    // Read from the registration, so the deadline attached here and the period
+    // attention.ts decided about are the same period. Both used to derive a
+    // calendar quarter independently, which agreed only for taxpayers the FTA
+    // happened to put on the calendar's own stagger.
+    const period = await lastCompletedPeriod({
+      orgId: ctx.orgId, entityId: ctx.entityId, regime: "VAT", asOf: ctx.asOf,
+    });
     const out: Raw[] = [];
 
     for (const f of list.findings) {
       // The VAT return is the one row on that list with a deadline set by
       // statute rather than by terms. `attention.ts` decides whether it is
       // outstanding; the date comes from the law.
-      const vat = f.key === "vat_return" ? vatFilingDeadline(ctx.asOf) : null;
+      const vat = f.key === "vat_return" ? period : null;
       out.push({
         source: "attention",
         topic: f.key,
@@ -391,7 +382,7 @@ const attentionSource: Source = {
         href: f.href,
         itemCount: f.count,
         amountMinor: f.amountMinor === undefined ? undefined : BigInt(f.amountMinor),
-        dueOn: vat ? isoDay(vat.deadline) : null,
+        dueOn: vat ? vat.dueOn : null,
         statutory: Boolean(vat),
       });
     }
@@ -500,16 +491,14 @@ const vatSource: Source = {
   key: "vat",
   label: "The VAT return",
   async run(ctx) {
-    // The same quarter the attention list reads, worked out once, so the row
-    // this source raises and the deadline that one carries cannot drift apart.
-    const { label, from, to } = vatFilingDeadline(ctx.asOf);
-
-    const ret = await vatReturn({
-      orgId: ctx.orgId,
-      entityId: ctx.entityId,
-      from: isoDay(from),
-      to: isoDay(to),
+    // The same period the attention list reads, from the same registration, so
+    // the row this source raises and the deadline that one carries cannot drift
+    // apart — and neither of them is a calendar quarter unless the FTA said so.
+    const { label, from, to } = await lastCompletedPeriod({
+      orgId: ctx.orgId, entityId: ctx.entityId, regime: "VAT", asOf: ctx.asOf,
     });
+
+    const ret = await vatReturn({ orgId: ctx.orgId, entityId: ctx.entityId, from, to });
     if (ret.warnings.length === 0) return [];
 
     // One row for the set, not one per string. The wording of each warning is

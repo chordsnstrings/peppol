@@ -244,6 +244,32 @@ export async function drawFacility(opts: {
   }
   const drawnOn = asDate(opts.drawnOn, "The date it was drawn");
 
+  /*
+   * Nobody can call a credit that has run out.
+   *
+   * The status check above is not enough on its own, because `status` is
+   * stored and nothing moves it: a facility that expired last month is still
+   * "issued" until somebody says otherwise, so the guard let a drawing through
+   * against a facility `contingentLiabilities()` had already dropped from the
+   * IAS 37 note — it filters on `expiresOn >= asOf`, not on the status. The
+   * register showed it lapsed, the disclosure had let it go, and the drawing
+   * posted anyway.
+   *
+   * The test is the DAY IT WAS DRAWN, not today. A bank that paid out on the
+   * 3rd against a credit expiring on the 5th did nothing wrong because the
+   * paperwork reached the ledger on the 20th, and refusing that would only
+   * teach people to backdate the entry to a day they can get past. What is
+   * refused is a drawing that claims to have happened after the credit was
+   * over.
+   */
+  if (drawnOn > f.expiresOn) {
+    throw new LedgerError(
+      `${f.reference} expired on ${iso(f.expiresOn)} and this is dated ${iso(drawnOn)}. A bank cannot pay under a ` +
+      `credit that has run out, so either the date is wrong or what happened is not a drawing under this facility. ` +
+      `A drawing that really did happen before expiry can still be recorded — date it the day it happened.`,
+    );
+  }
+
   if (!isOwnExposure(f.kind as FacilityKind)) {
     throw new LedgerError(
       `${f.reference} is an export credit — it is security the entity holds, not a promise it has made. Money ` +

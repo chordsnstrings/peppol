@@ -31,6 +31,7 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "NotificationEvent" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "NotificationAck" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "BankStatementLine" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TaxRegistration" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "BorrowingCovenant" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Borrowing" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "TradeFacilityEvent" WHERE "orgId" = '${ORG}'`),
@@ -136,7 +137,7 @@ async function seed() {
 
 const BANK = "attention:bank_unmatched";
 const PERIODS = "attention:periods_open";
-const VAT = "attention:vat_return@2026-Q1";
+const VAT = "attention:vat_return@Jan-Mar 2026";
 
 d("the notification centre", () => {
   beforeAll(async () => {

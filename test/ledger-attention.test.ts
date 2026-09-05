@@ -8,6 +8,7 @@ import { postBill } from "@/lib/server/ledger/ap";
 import { importStatement } from "@/lib/server/ledger/bank";
 import { createTemplate } from "@/lib/server/ledger/recurring";
 import { addAsset } from "@/lib/server/ledger/assets";
+import { recordRegistration } from "@/lib/server/ledger/tax-periods";
 import { createClaim, submitClaim } from "@/lib/server/ledger/expenses";
 import { createOrder, issueOrder, receiveGoods } from "@/lib/server/ledger/procurement";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
@@ -48,6 +49,7 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "RecurringJournal" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "FixedAsset" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "BankStatementLine" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TaxRegistration" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
@@ -294,11 +296,47 @@ d("the attention list", () => {
     const f = find((await read(ENT)).findings, "vat_return")!;
     expect(f).toBeDefined();
     expect(f.severity).toBe("urgent");
-    expect(f.title).toMatch(/2026 Q1/);
+    // The period the return actually covers, named the way the return and the
+    // filing record name it. No registration is recorded for this entity, so
+    // calendar quarters were assumed — and the finding says so, because being
+    // told the wrong three months confidently is the failure this check exists
+    // to prevent.
+    expect(f.title).toMatch(/Jan-Mar 2026/);
+    expect(f.detail).toMatch(/calendar quarters have been assumed/);
     // The March invoice's output tax, and nothing recoverable against it.
     expect(f.amountMinor).toBe("50000");
     expect(f.detail).toMatch(/2026-04-28/);
     expect(f.href).toBe("/accounting/vat");
+  });
+
+  it("reads the period from the FTA's stagger once one is recorded, not from the calendar", async () => {
+    // Before: no registration, so calendar quarters are assumed and the last
+    // one that ended at 15 June is January to March.
+    const before = find((await read(ENT)).findings, "vat_return")!;
+    expect(before.title).toMatch(/Jan-Mar 2026/);
+    expect(before.detail).toMatch(/2026-04-28/);
+
+    // A quarterly registrant the FTA put on February, May, August and
+    // November. The last period to end before 15 June is March to May, and it
+    // falls due on 28 June — not 28 April, which is the date the calendar
+    // arithmetic gave and which is a month early. Told the wrong figure for
+    // the wrong three months against the wrong deadline, every quarter, by the
+    // list whose purpose is stopping exactly that.
+    await recordRegistration({
+      orgId: ORG, entityId: ENT, regime: "VAT",
+      trn: "100000000000003", frequency: "QUARTERLY", firstPeriodEndMonth: 2,
+    });
+
+    const after = find((await read(ENT)).findings, "vat_return")!;
+    expect(after.title).toMatch(/Mar-May 2026/);
+    expect(after.detail).toMatch(/2026-06-28/);
+    // And the assumption footnote is gone, because nothing is being assumed.
+    expect(after.detail).not.toMatch(/calendar quarters have been assumed/);
+    // Not late: 15 June is before 28 June. The old arithmetic called it urgent.
+    expect(after.severity).toBe("soon");
+
+    // Put it back, so the tests after this one see the entity they seeded.
+    await db.$executeRawUnsafe(`DELETE FROM "TaxRegistration" WHERE "orgId" = '${ORG}'`);
   });
 
   it("treats a quarter whose months have been closed behind it as filed", async () => {

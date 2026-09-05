@@ -4,6 +4,7 @@ import { receivablesAgeing, type OpenItem } from "./ar";
 import { payablesAgeing } from "./ap";
 import { templateStatus, parseTemplateLines, templateTotal } from "./recurring";
 import { cashCodes } from "./cash";
+import { lastCompletedPeriod } from "./tax-periods";
 
 /**
  * A cash flow forecast.
@@ -362,15 +363,18 @@ const vatOut: Source = {
     const net = -lines.reduce((a, l) => a + l.functionalAmountMinor, 0n);
     if (net <= 0n) return [];
 
-    const q = Math.floor(from.getUTCMonth() / 3);
-    const quarterEnd = new Date(Date.UTC(from.getUTCFullYear(), q * 3 + 3, 0));
-    const due = addDays(quarterEnd, VAT_FILING_DAYS);
+    // The FTA's period, not the calendar's. This was `Math.floor(month / 3)`,
+    // which put a February-stagger taxpayer's VAT payment a month out — in a
+    // cash forecast, where the whole value is knowing which week the money
+    // leaves.
+    const period = await lastCompletedPeriod({ orgId, entityId, regime: "VAT", asOf: from });
+    const due = new Date(`${period.dueOn}T00:00:00.000Z`);
     if (due > to) return [];
 
     return [{
-      on: iso(due),
+      on: period.dueOn,
       amountMinor: -net,
-      label: `VAT for the quarter to ${iso(quarterEnd)}`,
+      label: `VAT for the period to ${period.to}`,
       source: "vat",
       firmness: "estimated" as Firmness,
       ref: null,

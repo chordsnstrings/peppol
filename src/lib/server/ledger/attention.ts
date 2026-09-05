@@ -5,6 +5,7 @@ import { receivablesAgeing } from "./ar";
 import { payablesAgeing } from "./ap";
 import { reconcile } from "./bank";
 import { vatReturn } from "./vat";
+import { lastCompletedPeriod } from "./tax-periods";
 import { templateStatus } from "./recurring";
 import { assetRegister } from "./assets";
 import { claimList } from "./expenses";
@@ -156,15 +157,6 @@ function money(minor: bigint, currency: string): string {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-/** The quarter before the one `asOf` falls in — the last one that has ended. */
-function lastCompletedQuarter(asOf: Date): { from: Date; to: Date; label: string } {
-  const quarter = Math.floor(asOf.getUTCMonth() / 3);
-  const year = quarter === 0 ? asOf.getUTCFullYear() - 1 : asOf.getUTCFullYear();
-  const previous = quarter === 0 ? 3 : quarter - 1;
-  const from = new Date(Date.UTC(year, previous * 3, 1));
-  const to = new Date(Date.UTC(year, previous * 3 + 3, 0));
-  return { from, to, label: `${year} Q${previous + 1}` };
-}
 
 interface Ctx {
   orgId: string;
@@ -340,12 +332,22 @@ const vatReturnOutstanding: Check = {
   key: "vat_return",
   label: "The VAT return",
   async run({ orgId, entityId, asOf, currency }) {
-    const quarter = lastCompletedQuarter(asOf);
+    // The FTA's own period, not the calendar's. This used to be
+    // `Math.floor(month / 3)` here and in two other modules, which told a
+    // taxpayer on the February stagger what was payable for the wrong three
+    // months against a due date a month late — from the check whose entire
+    // purpose is stopping somebody missing a VAT deadline.
+    const period = await lastCompletedPeriod({ orgId, entityId, regime: "VAT", asOf });
+    const quarter = {
+      from: new Date(`${period.from}T00:00:00.000Z`),
+      to: new Date(`${period.to}T00:00:00.000Z`),
+      label: period.label,
+    };
     const ret = await vatReturn({
       orgId,
       entityId,
-      from: isoDay(quarter.from),
-      to: isoDay(quarter.to),
+      from: period.from,
+      to: period.to,
     });
 
     // A quarter with no VAT either way has nothing to file from these books. A
@@ -373,7 +375,9 @@ const vatReturnOutstanding: Check = {
     });
     if (covered > 0 && periods === null) return null;
 
-    const deadline = new Date(quarter.to.getTime() + VAT_FILING_DAYS * DAY);
+    // The registration's own due date, which is the period end plus 28 days
+    // under Article 64 — computed by tax-periods rather than added here.
+    const deadline = new Date(`${period.dueOn}T00:00:00.000Z`);
     const late = asOf > deadline;
     const net = BigInt(ret.netVatMinor);
 
@@ -387,8 +391,13 @@ const vatReturnOutstanding: Check = {
         (ret.payable
           ? `${money(net, currency)} is payable to the FTA. `
           : `${money(net, currency)} is reclaimable from the FTA. `) +
-        `Nothing in these books records a filing — the months over the quarter are still open, and a filed ` +
-        `return is one whose periods have been closed behind it.`,
+        `Nothing in these books records a filing — the months over the period are still open, and a filed ` +
+        `return is one whose periods have been closed behind it.` +
+        (period.assumed
+          ? ` No VAT registration is recorded for this entity, so calendar quarters have been assumed. If the FTA ` +
+            `assigned a different stagger — February, May, August and November, say — or monthly returns, this ` +
+            `period and this deadline are both wrong. Recording the registration fixes it everywhere at once.`
+          : ""),
       amountMinor: ret.netVatMinor,
       href: "/accounting/vat",
     };
