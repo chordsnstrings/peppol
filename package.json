@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:contrast": "node scripts/verify-contrast.mjs",
+    "verify:permissions": "node scripts/verify-permissions.mjs",
     "verify:ledger": "node scripts/verify-ledger.mjs",
     "verify:ledger-api": "node scripts/verify-ledger-api.mjs",
     "verify:ledger-ui": "node scripts/verify-ledger-ui.mjs",

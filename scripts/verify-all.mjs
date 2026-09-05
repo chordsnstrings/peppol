@@ -28,6 +28,7 @@ const SUITES = [
   { name: "ledger invariants", cmd: "node", args: ["scripts/verify-ledger.mjs"], needsServer: false },
   { name: "palette contrast", cmd: "node", args: ["scripts/verify-contrast.mjs"], needsServer: false },
   { name: "design language", cmd: "node", args: ["scripts/verify-swedish-design.mjs"], needsServer: false },
+  { name: "permissions", cmd: "node", args: ["scripts/verify-permissions.mjs"], needsServer: false },
   { name: "capability count", cmd: "node", args: ["scripts/capabilities.mjs", "--check"], needsServer: false },
   { name: "ledger HTTP", cmd: "node", args: ["scripts/verify-ledger-api.mjs"], needsServer: true },
   { name: "subledgers HTTP", cmd: "node", args: ["scripts/verify-ledger-ar.mjs"], needsServer: true },

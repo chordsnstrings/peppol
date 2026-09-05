@@ -10,6 +10,13 @@ export interface ApiLineInput {
   taxProfileCode?: string;
   unitCode?: string;
   exemptionReason?: string;
+  /**
+   * What the item cost, for a margin-scheme line. Article 29 taxes the margin,
+   * so without this the tax cannot be worked out at all — and it was dropped
+   * here, which meant an invoice raised through the API or by a recurring
+   * template lost the one figure the scheme needs even when the caller sent it.
+   */
+  marginPurchaseMinor?: number;
 }
 
 export interface ApiInvoiceInput {
@@ -56,6 +63,10 @@ export function buildInvoiceFromApi(entity: Entity, input: ApiInvoiceInput): Inv
     unitPriceMinor: Math.round(Number(l.unitPriceMinor ?? 0)),
     taxProfileCode: validProfile(l.taxProfileCode),
     exemptionReason: l.exemptionReason,
+    marginPurchaseMinor:
+      l.marginPurchaseMinor === undefined || l.marginPurchaseMinor === null
+        ? undefined
+        : Math.round(Number(l.marginPurchaseMinor)),
     lineNetMinor: 0,
     lineVatMinor: 0,
   }));

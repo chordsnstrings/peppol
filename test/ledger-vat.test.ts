@@ -281,7 +281,36 @@ d("VAT 201 return", () => {
     const w = r.warnings.find((x) => /profit margin scheme/i.test(x))!;
     expect(w).toMatch(/5\/105/);
     expect(w).toMatch(/Article 29/);
-    expect(w).toMatch(/2100/);
+    // It names the input that is actually missing, which is the purchase price
+    // on the line — not a manual journal to 2100, which the ledger refuses.
+    expect(w).toMatch(/purchase price/i);
+  });
+
+  it("says nothing about the margin scheme once the tax on the margin has been posted", async () => {
+    // The same used car, sold in a month of its own, with the purchase price
+    // entered so `postInvoice` works the tax out: 5/105 of the 5,000 margin is
+    // 238.10, taken out of revenue rather than added to the invoice, because
+    // the customer was told the document carries no tax.
+    //
+    // Warning on the presence of margin supplies alone would cry wolf on every
+    // correctly handled period from here on, and a return whose warnings are
+    // usually wrong is a return whose warnings are not read.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-10-09", source: "invoice",
+      memo: "Used vehicle — profit margin scheme",
+      lines: [
+        { account: "1010", debit: 3_500_000 },
+        { account: "4000", credit: 3_476_190, taxCode: "MARGIN_SCHEME" },
+        {
+          account: "2100", credit: 23_810, taxCode: "OUTPUT_VAT",
+          memo: "VAT on the margin — not charged to the customer",
+        },
+      ],
+    });
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-10-01", to: "2026-10-31" });
+    expect(r.warnings.find((x) => /profit margin scheme/i.test(x))).toBeUndefined();
+    // And the tax is on the return, because it is output tax like any other.
+    expect(BigInt(r.totalOutputVatMinor)).toBe(23_810n);
   });
 
   it("refuses a period that ends before it starts", async () => {

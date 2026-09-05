@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { cn, formatDate, id as makeId } from "@/lib/utils";
 import { formatMoney, parseMoneyToMinor, minorToMajor } from "@/lib/domain/money";
-import { TAX_PROFILE_LIST, DOC_TYPE_LABEL, UNIT_CODES, getProfile } from "@/lib/domain/tax";
+import { TAX_PROFILE_LIST, DOC_TYPE_LABEL, UNIT_CODES, getProfile, marginSchemeLineTax } from "@/lib/domain/tax";
 import { CURRENCIES } from "@/lib/domain/peppol";
 import { validateInvoice, emptyLine } from "@/lib/domain/validation";
 import { useAppState } from "@/lib/app-state";
@@ -528,6 +528,10 @@ function LineRow({
   const [priceStr, setPriceStr] = React.useState(
     line.unitPriceMinor ? String(minorToMajor(line.unitPriceMinor)) : "",
   );
+  const [costStr, setCostStr] = React.useState(
+    line.marginPurchaseMinor ? String(minorToMajor(line.marginPurchaseMinor)) : "",
+  );
+  const margin = marginSchemeLineTax(line);
 
   return (
     <motion.div
@@ -605,6 +609,46 @@ function LineRow({
               onChange={(e) => onChange({ exemptionReason: e.target.value })}
               className="h-9 text-sm"
             />
+          )}
+          {/*
+            * What the item cost. The one input nothing in the ledger can
+            * supply — a second-hand car came from a person, not a supplier
+            * with an invoice — and without it the margin cannot be worked out
+            * at all, so the tax is nil and none is posted.
+            *
+            * The composer and the VAT return both warned about this and both
+            * pointed at a remedy the product did not have: there was no field
+            * to type the cost into, and 2100 refuses a manual journal for the
+            * tax. A used-goods dealer was told to add a figure the screen did
+            * not have.
+            */}
+          {profile.code === "MARGIN_SCHEME" && (
+            <div className="grid gap-1">
+              <Label className="text-[11px] text-muted-foreground">
+                What this cost you (Article 29 — tax is 5/105 of the margin)
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={costStr}
+                  onChange={(e) => {
+                    setCostStr(e.target.value);
+                    const v = e.target.value.trim();
+                    onChange({ marginPurchaseMinor: v === "" ? undefined : parseMoneyToMinor(v) });
+                  }}
+                  className="h-9 w-40"
+                  aria-label={`Purchase price of line ${index + 1}`}
+                />
+                <span className="text-xs text-muted-foreground">
+                  {margin.costKnown
+                    ? margin.marginMinor > 0
+                      ? `Margin ${formatMoney(margin.marginMinor, currency)} — tax ${formatMoney(margin.taxMinor, currency)}`
+                      : "Sold at or below cost, so there is no margin and no tax. It is not a credit either."
+                    : "Until this is entered the margin cannot be worked out, so no tax is computed and none is posted."}
+                </span>
+              </div>
+            </div>
           )}
           <div className="flex items-center justify-between pt-0.5">
             <span className="text-xs text-muted-foreground">{profile.hint}</span>

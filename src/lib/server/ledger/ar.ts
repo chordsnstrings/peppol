@@ -38,6 +38,16 @@ const REVENUE_BY_PROFILE: Record<TaxProfileCode, string> = {
   MARGIN_SCHEME: "4000",
 };
 
+/**
+ * The memo on the margin-scheme tax line, shared with `vat.ts`.
+ *
+ * A constant rather than a repeated string because the VAT return reads it: it
+ * is how the return tells tax the customer was charged from tax the business
+ * owes out of its own margin, and the two are indistinguishable on the account
+ * and on the tax code. Change the wording here and the return follows.
+ */
+export const MARGIN_TAX_MEMO = "VAT on the margin — not charged to the customer";
+
 const AR_CONTROL = "1100";
 const VAT_OUTPUT = "2100";
 const FX_GAIN = "4950";
@@ -217,7 +227,7 @@ export async function postInvoice(opts: {
       account: VAT_OUTPUT,
       ...(marginTax > 0n ? { credit: marginTax } : { debit: -marginTax }),
       ...fx,
-      memo: "VAT on the margin — not charged to the customer",
+      memo: MARGIN_TAX_MEMO,
       taxCode: "OUTPUT_VAT",
       taxEmirate: emirate,
     });

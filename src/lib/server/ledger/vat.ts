@@ -2,6 +2,7 @@ import { prisma } from "@/lib/server/prisma";
 import { EMIRATES } from "@/lib/domain/peppol";
 import { LedgerError } from "./post";
 import { filingFor, getRegistration, taxPeriodFor } from "./tax-periods";
+import { MARGIN_TAX_MEMO } from "./ar";
 
 /**
  * The FTA VAT 201 return, computed from the general ledger.
@@ -372,6 +373,16 @@ export async function vatReturn(opts: {
   let importAdjustmentNet = 0n;
   let outputVat = 0n;
   let inputVat = 0n;
+  /**
+   * Output tax the business owes out of its own margin rather than tax it
+   * charged a customer.
+   *
+   * Both sit on 2100 under OUTPUT_VAT, because on the return they are the same
+   * liability — so the line's memo is what tells them apart, and `ar.ts` writes
+   * it from a constant this reads. It is counted only to answer one question:
+   * whether the margin supplies below have had their tax worked out at all.
+   */
+  let marginOutputVat = 0n;
   const untagged: string[] = [];
 
   for (const l of lines) {
@@ -380,6 +391,7 @@ export async function vatReturn(opts: {
 
     if (code && OUTPUT_TAX_CODES.includes(code)) {
       outputVat += -amount;
+      if (l.memo === MARGIN_TAX_MEMO) marginOutputVat += -amount;
       // Only the tax on ordinary standard-rated sales is split by emirate. The
       // reverse-charge and import output tax belong to boxes of their own,
       // which the form does not split.
@@ -555,12 +567,18 @@ export async function vatReturn(opts: {
   // and cannot see the margin — the purchase price of the goods is on the
   // document, not in the ledger — so it says so rather than reporting a nil.
   const marginScheme = salesByCode.get("MARGIN_SCHEME") ?? 0n;
-  if (marginScheme !== 0n) {
+  if (marginScheme !== 0n && marginOutputVat === 0n) {
+    // Conditioned on the tax actually being absent. The purchase price can now
+    // be entered on the line, and where it has been, `postInvoice` works the
+    // tax out and posts it out of revenue — so warning on the presence of
+    // margin supplies alone would cry wolf on every correctly handled period,
+    // which is how a return's warnings stop being read.
     warnings.push(
-      `${marginScheme} of supplies are coded to the profit margin scheme and carry no output tax in the ledger. ` +
-        `Tax under the scheme is 5/105 of the margin on each item (Article 29 of Federal Decree-Law 8/2017, ` +
-        `Article 43 of the Executive Regulation), and the invoice shows no tax, so nothing was posted to 2100. ` +
-        `Work out the tax on each margin, post it, and check box 1 before you file.`,
+      `${marginScheme} of supplies are coded to the profit margin scheme and no tax on the margin has been ` +
+        `posted. Tax under the scheme is 5/105 of the margin on each item (Article 29 of Federal Decree-Law ` +
+        `8/2017, Article 43 of the Executive Regulation). It is worked out from what the goods cost, which is ` +
+        `entered on the invoice line — a line with no purchase price against it produces no tax, and none was ` +
+        `posted. Add it to those lines and repost before you file.`,
     );
   }
   // Box 1 is distributed between the emirates because the tax on it is, so a

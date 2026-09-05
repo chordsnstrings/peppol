@@ -79,6 +79,7 @@ export async function POST() {
             taxProfileCode: l.taxProfileCode,
             unitCode: l.unitCode,
             exemptionReason: l.exemptionReason,
+            marginPurchaseMinor: l.marginPurchaseMinor,
           })),
         });
         if (t.customerId) invoice.customerId = t.customerId;
