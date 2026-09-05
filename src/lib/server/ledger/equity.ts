@@ -7,6 +7,11 @@ import { leaseRegister } from "./leases";
 import { receivablesAgeing } from "./ar";
 import { payablesAgeing } from "./ap";
 import { corporateTaxComputation } from "./corptax";
+import { cashCodesFrom } from "./cash";
+import { revaluationRegister } from "./asset-revaluation";
+import { provisionNote, type ProvisionNoteResult } from "./provisions";
+import { deferredTaxNote, type DeferredTaxNoteResult } from "./deferred-tax";
+import { relatedPartyNote as relatedPartyDisclosure, type RelatedPartyNoteData } from "./related-parties";
 
 /**
  * The statement of changes in equity (IAS 1.106), and the notes.
@@ -61,6 +66,7 @@ import { corporateTaxComputation } from "./corptax";
 const SHARE_CAPITAL = "3000";
 const SHAREHOLDER_CURRENT = "3100";
 const STATUTORY_RESERVE = "3200";
+const REVALUATION_SURPLUS = "3300";
 const RETAINED_EARNINGS = "3900";
 
 /**
@@ -69,14 +75,36 @@ const RETAINED_EARNINGS = "3900";
  */
 const CURRENT_YEAR_EARNINGS = "3950";
 
-const EQUITY_COLUMNS = [SHARE_CAPITAL, SHAREHOLDER_CURRENT, STATUTORY_RESERVE, RETAINED_EARNINGS];
-
-/** Cash and cash equivalents, as the cash flow statement defines them. */
-const CASH_CODES = ["1000", "1010", "1020", "1050"];
+/**
+ * In balance sheet order, so the statement reads down the equity section.
+ *
+ * 3300 is here because the product ships a revaluation module that credits it.
+ * Leaving it out put every surplus into `unclassified`, whose remedy — "add it
+ * to the equity columns" — is not one any user of this software can carry out,
+ * and the statement then declared itself unreconciled by exactly the surplus,
+ * every year afterwards, whether or not the account had moved.
+ */
+const EQUITY_COLUMNS = [
+  SHARE_CAPITAL,
+  SHAREHOLDER_CURRENT,
+  STATUTORY_RESERVE,
+  REVALUATION_SURPLUS,
+  RETAINED_EARNINGS,
+];
 
 /** Cost of property, plant and equipment, and the contra account against it. */
 const PPE_COST_CODES = ["1500", "1600"];
 const ACCUM_DEPRECIATION = "1590";
+
+/**
+ * The source on entries the revaluation module made. It restates cost against
+ * accumulated depreciation (IAS 16.35(b)), so its postings look exactly like
+ * an addition and a disposal to anything reading the sign of a line alone.
+ */
+const REVALUATION_SOURCE = "revaluation";
+
+/** Where a write-down beyond an asset's own surplus lands (IAS 36.60). */
+const IMPAIRMENT_EXPENSE = "6650";
 
 const ROU_ASSET = "1700";
 const LEASE_LIABILITY = "2600";
@@ -96,6 +124,7 @@ export type EquityRowKey =
   | "opening"
   | "prior_period_adjustment"
   | "profit_for_period"
+  | "revaluation"
   | "share_capital"
   | "capital_introduced"
   | "reserve_transfer"
@@ -195,6 +224,12 @@ export interface PpeNote extends NoteBase {
     openingMinor: string;
     additionsMinor: string;
     disposalsMinor: string;
+    /**
+     * What the revaluation module did to the cost account: the accumulated
+     * depreciation it eliminated against cost, and the uplift or write-down
+     * itself. Signed, because a write-down reduces cost.
+     */
+    revaluationMinor: string;
     closingMinor: string;
     perBalanceSheetMinor: string;
     agrees: boolean;
@@ -203,11 +238,35 @@ export interface PpeNote extends NoteBase {
     openingMinor: string;
     chargeMinor: string;
     releasedOnDisposalMinor: string;
+    /** IAS 16.35(b): written off against cost when the asset was revalued. */
+    eliminatedOnRevaluationMinor: string;
     closingMinor: string;
     perBalanceSheetMinor: string;
     agrees: boolean;
   };
   netBookValue: { openingMinor: string; closingMinor: string };
+  /**
+   * IAS 16.73(e)(iv)-(vi), taken from the revaluation events rather than
+   * re-derived from the postings: the equity and profit halves of each
+   * movement are decided by IAS 16.39-40 at the moment it happens, and the
+   * ledger lines afterwards cannot be partitioned back into them.
+   */
+  revaluation: {
+    events: number;
+    /** (iv) Increases taken to the revaluation surplus. */
+    increasesMinor: string;
+    /** (iv) Decreases charged against the surplus. Positive: a deduction. */
+    decreasesMinor: string;
+    /** (v) Impairment losses charged to profit or loss. Positive: a charge. */
+    impairmentLossesMinor: string;
+    /** (vi) Impairment losses reversed through profit or loss. */
+    impairmentReversalsMinor: string;
+    /** The four above, netted: the change in carrying amount they caused. */
+    netMovementMinor: string;
+    /** The same change, from the cost and depreciation accounts themselves. */
+    perLedgerMinor: string;
+    agrees: boolean;
+  };
   register: {
     assets: number;
     costMinor: string;
@@ -298,13 +357,86 @@ export interface RevenueNote extends NoteBase {
 
 export interface RelatedPartyNote extends NoteBase {
   key: "related_parties";
+  /** The one balance that is related by construction, whoever is declared. */
   account: { code: string; name: string; nameAr: string | null };
   openingMinor: string;
   closingMinor: string;
   movements: { key: string; label: string; amountMinor: string }[];
   postings: number;
-  /** What relatedness the ledger cannot see, and a preparer must supply. */
+  /** Declared under IAS 24.13, with what passed between them in the period. */
+  parties: {
+    partyKey: string;
+    name: string;
+    relationship: string;
+    relationshipLabel: string;
+    startedOn: string;
+    endedOn: string | null;
+    declaredBy: string;
+    declaredOn: string;
+    salesMinor: string;
+    purchasesMinor: string;
+    documents: number;
+    notes: string | null;
+  }[];
+  byRelationship: {
+    relationship: string;
+    label: string;
+    count: number;
+    salesMinor: string;
+    purchasesMinor: string;
+  }[];
+  /** IAS 24.17. Five categories, and a total alone is not the disclosure. */
+  compensation: {
+    rows: { category: string; label: string; amountMinor: string; headcount: number; declaredBy: string }[];
+    totalMinor: string;
+    missingCategories: { category: string; label: string }[];
+    headcount: number | null;
+  };
+  /** IAS 24.13, which is required whether or not anything passed between them. */
+  attestation: {
+    present: boolean;
+    parentName: string | null;
+    ultimateControllingParty: string | null;
+    noControllingParty: boolean;
+    attestedBy: string | null;
+    attestedOn: string | null;
+  };
+  /** An assessed nil and an unasked question are different facts. */
+  completeness: {
+    unassessed: string[];
+    unassessedCount: number;
+    complete: boolean;
+    reasons: string[];
+  };
+  /** What is still unanswered — the register's own grading, not a fixed list. */
   requiresInput: string[];
+}
+
+/**
+ * The provisions register's own IAS 37.84 note, and the deferred tax
+ * register's IAS 12.81(g) one, carried into the pack whole.
+ *
+ * Both are already built, tested and reconciled against their registers in
+ * their own modules. Restating either here would give the pack a second
+ * derivation of the same figures, which is the one thing this module exists to
+ * prevent, so the results are spread in as they come.
+ */
+export interface ProvisionsNote extends NoteBase, Omit<ProvisionNoteResult, "entityId"> {
+  key: "provisions";
+  /**
+   * Always empty, and present all the same. Everything in this note is
+   * derived, so there is nothing to ask a preparer — but a reader of the pack
+   * that does not recognise a note key falls back to showing its questions,
+   * and a note that answered that with nothing at all would break the page
+   * rather than degrade on it.
+   */
+  requires: NoteQuestion[];
+}
+
+export interface DeferredTaxNote extends NoteBase, Omit<DeferredTaxNoteResult, "entityId"> {
+  key: "deferred_tax";
+  /** Always empty, for the reason given on `ProvisionsNote`. */
+  requires: NoteQuestion[];
 }
 
 export interface TaxNote extends NoteBase {
@@ -330,11 +462,18 @@ export interface TaxNote extends NoteBase {
   warnings: string[];
 }
 
+/** One thing a preparer has to answer, and the paragraph that asks it. */
+export interface NoteQuestion {
+  key: string;
+  question: string;
+  basis: string;
+}
+
 export interface RequiresInputNote extends NoteBase {
   key: "events_after_the_reporting_period" | "commitments_and_contingencies";
   state: "requires_input";
   /** Exactly what a preparer has to answer, one question at a time. */
-  requires: { key: string; question: string; basis: string }[];
+  requires: NoteQuestion[];
 }
 
 export type Note =
@@ -344,7 +483,9 @@ export type Note =
   | ReceivablesPayablesNote
   | RevenueNote
   | RelatedPartyNote
+  | ProvisionsNote
   | TaxNote
+  | DeferredTaxNote
   | RequiresInputNote;
 
 export interface FiscalYearRef {
@@ -443,6 +584,12 @@ interface Context {
   lines: YearLine[];
   entries: Map<string, EntryShape>;
   accountNames: Map<string, { name: string; nameAr: string | null }>;
+  /**
+   * Cash and cash equivalents, derived from the chart rather than listed here.
+   * `cash.ts` says why, and which accounts are excluded whatever subtype
+   * anyone puts on them.
+   */
+  cashCodes: Set<string>;
 }
 
 async function context(opts: { orgId: string; entityId: string; fiscalYear: string }): Promise<Context> {
@@ -494,9 +641,11 @@ async function context(opts: { orgId: string; entityId: string; fiscalYear: stri
     }),
     prisma.account.findMany({
       where: { orgId: opts.orgId, entityId: opts.entityId },
-      select: { code: true, name: true, nameAr: true },
+      select: { code: true, name: true, nameAr: true, subtype: true },
     }),
   ]);
+
+  const cashCodes = new Set(cashCodesFrom(accounts));
 
   const lines: YearLine[] = rows.map((l) => ({
     code: l.account.code,
@@ -522,7 +671,7 @@ async function context(opts: { orgId: string; entityId: string; fiscalYear: stri
     };
     shape.codes.add(l.code);
     if (l.type !== "EQUITY") shape.allEquity = false;
-    if (CASH_CODES.includes(l.code)) shape.touchesCash = true;
+    if (cashCodes.has(l.code)) shape.touchesCash = true;
     entries.set(l.entryId, shape);
   }
 
@@ -540,6 +689,7 @@ async function context(opts: { orgId: string; entityId: string; fiscalYear: stri
     lines,
     entries,
     accountNames: new Map(accounts.map((a) => [a.code, { name: a.name, nameAr: a.nameAr }])),
+    cashCodes,
   };
 }
 
@@ -551,6 +701,9 @@ const ROW_ORDER: EquityRowKey[] = [
   // the restated position rather than the original one.
   "prior_period_adjustment",
   "profit_for_period",
+  // IAS 1.106(d)(ii): what was recognised outside profit sits directly under
+  // the profit it did not go through.
+  "revaluation",
   "share_capital",
   "capital_introduced",
   "reserve_transfer",
@@ -562,6 +715,7 @@ const ROW_LABEL: Record<EquityRowKey, string> = {
   opening: "Balance brought forward",
   prior_period_adjustment: "Prior period adjustments",
   profit_for_period: "Profit for the period",
+  revaluation: "Revaluation of property, plant and equipment",
   share_capital: "Share capital issued",
   capital_introduced: "Funds introduced by the shareholder",
   reserve_transfer: "Transfer to the statutory reserve",
@@ -581,6 +735,11 @@ const ROW_NOTE: Record<EquityRowKey, string> = {
     "The result for the year. Until the year is closed it is not posted anywhere — it is what is left in the " +
     "income and expense accounts — and once it is closed it is the credit the closing entry made to retained " +
     "earnings. Never both.",
+  revaluation:
+    "The surplus arising on revaluing an asset, less any fall charged back against a surplus the same asset " +
+    "already carried (IAS 16.39-.40). It is recognised outside profit or loss, so it is a row of its own and not " +
+    "part of the result above. A fall beyond the surplus that asset carries is charged to profit and appears in " +
+    "the profit row instead, never here.",
   share_capital: "Capital issued or reduced on the share capital account.",
   capital_introduced:
     "Value put into the business by the shareholder through the current account, including expenses of the " +
@@ -590,7 +749,9 @@ const ROW_NOTE: Record<EquityRowKey, string> = {
     "so it adds to nil across the row.",
   transfer_within_equity:
     "An entry whose every line is an equity account, so it changes the composition of equity without changing " +
-    "its total. A dividend credited to the shareholder's current account rather than paid is the usual case.",
+    "its total. A dividend credited to the shareholder's current account rather than paid is one case; the " +
+    "realisation of a revaluation surplus into retained earnings as the asset is used or sold (IAS 16.41) is the " +
+    "other, and both add to nil across the row.",
   distributions: "Value taken out of the business by the owner, whether as a dividend or as drawings.",
   closing:
     "The opening position plus every movement above it — built up from the rows, not read back off the balance " +
@@ -607,6 +768,12 @@ function classify(line: YearLine, entry: EntryShape): EquityRowKey {
   }
   if (line.code === SHARE_CAPITAL) return "share_capital";
   if (line.code === STATUTORY_RESERVE) return "reserve_transfer";
+  // A surplus arising touches the asset and the expense accounts too, so the
+  // entry is not all-equity and has already fallen past the branch above. The
+  // transfer out under IAS 16.41 is all-equity and never reaches here, which
+  // is what keeps the two apart: one changes the size of equity, the other
+  // only its composition.
+  if (line.code === REVALUATION_SURPLUS) return "revaluation";
   // The current account runs both ways: a credit is value the shareholder put
   // in, a debit is value they took out.
   if (line.code === SHAREHOLDER_CURRENT) return line.amount > 0n ? "distributions" : "capital_introduced";
@@ -886,17 +1053,38 @@ function accountingPolicies(ctx: Context, n: number, registerAssets: number, reg
   }
 
   if (registerAssets > 0 || has([...PPE_COST_CODES, ACCUM_DEPRECIATION])) {
-    // The methods and lives are the ones the register actually holds, not a
-    // sentence about what an entity of this kind usually does.
+    // The measurement basis is read off the ledger, not assumed. An entity
+    // that has credited 3300 is on the revaluation model, and a note claiming
+    // the cost model for it states a policy the accounts contradict — IAS 16.29
+    // makes the two a choice, and IAS 1.117(a) asks which was made.
+    const revalued = has([REVALUATION_SURPLUS]);
+    const impaired = has([IMPAIRMENT_EXPENSE]);
+    const impairment =
+      " An asset is written down to its recoverable amount where that is lower than its carrying amount, and a " +
+      "write-down is reversed only up to what the carrying amount would have been had it never been made.";
     policies.push({
       key: "property_plant_and_equipment",
       label: "Property, plant and equipment",
       policy:
-        "Property, plant and equipment is stated at cost less accumulated depreciation. Depreciation is charged " +
-        "monthly over the useful life recorded for each asset, and a change in an estimate is applied " +
-        "prospectively; prior periods are not restated.",
-      basis: "IAS 16.30, IAS 16.73(a)-(b), IAS 8.36",
-      evidence: `${registerAssets} asset${registerAssets === 1 ? "" : "s"} on the fixed asset register.`,
+        (revalued
+          ? "Property, plant and equipment is stated at a revalued amount, being fair value at the date of the " +
+            "valuation less subsequent accumulated depreciation. An increase is recognised in the revaluation " +
+            "surplus in equity except to the extent it reverses a decrease previously charged to profit; a " +
+            "decrease is charged against any surplus that asset already carries and thereafter to profit. On " +
+            "revaluation the accumulated depreciation is eliminated against the gross carrying amount, and " +
+            "depreciation from then on is charged on the revalued amount over the remaining life. A change in " +
+            "an estimate is applied prospectively; prior periods are not restated."
+          : "Property, plant and equipment is stated at cost less accumulated depreciation. Depreciation is " +
+            "charged monthly over the useful life recorded for each asset, and a change in an estimate is " +
+            "applied prospectively; prior periods are not restated.") + (impaired ? impairment : ""),
+      basis: revalued
+        ? "IAS 16.31, IAS 16.35(b), IAS 16.39-.40, IAS 16.73(a)-(b), IAS 8.36" + (impaired ? ", IAS 36.59, IAS 36.117" : "")
+        : "IAS 16.30, IAS 16.73(a)-(b), IAS 8.36" + (impaired ? ", IAS 36.59, IAS 36.117" : ""),
+      evidence:
+        `${registerAssets} asset${registerAssets === 1 ? "" : "s"} on the fixed asset register` +
+        (revalued ? `, and a revaluation surplus on account ${REVALUATION_SURPLUS}` : "") +
+        (impaired ? `, with impairment charged to account ${IMPAIRMENT_EXPENSE}` : "") +
+        ".",
     });
   }
 
@@ -1002,24 +1190,88 @@ function accountingPolicies(ctx: Context, n: number, registerAssets: number, reg
   };
 }
 
-function ppeNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof assetRegister>>): PpeNote {
+/** The revaluation events this year, as `revaluationRegister` records them. */
+type RevaluationEvents = {
+  count: number;
+  increases: bigint;
+  decreases: bigint;
+  impairmentLosses: bigint;
+  impairmentReversals: bigint;
+};
+
+function revaluationEventsIn(
+  ctx: Context,
+  register: Awaited<ReturnType<typeof revaluationRegister>>,
+): RevaluationEvents {
+  const out: RevaluationEvents = {
+    count: 0, increases: 0n, decreases: 0n, impairmentLosses: 0n, impairmentReversals: 0n,
+  };
+  for (const asset of register.assets) {
+    for (const e of asset.events) {
+      if (e.on < ctx.from || e.on > ctx.to) continue;
+      out.count += 1;
+      // The split was decided by IAS 16.39-40 when the event happened and is
+      // stored on it. Re-deriving it from the postings is not possible: the
+      // surplus and the impairment reach different accounts but a single
+      // event can feed both, and the asset's own history is what decided how
+      // much went where.
+      if (e.toSurplusMinor > 0n) out.increases += e.toSurplusMinor;
+      else out.decreases += -e.toSurplusMinor;
+      if (e.toProfitMinor < 0n) out.impairmentLosses += -e.toProfitMinor;
+      else out.impairmentReversals += e.toProfitMinor;
+    }
+  }
+  return out;
+}
+
+function ppeNote(
+  ctx: Context,
+  n: number,
+  register: Awaited<ReturnType<typeof assetRegister>>,
+  revaluations: RevaluationEvents,
+): PpeNote {
+  /*
+   * Partitioned by source, exactly as `leaseNote` partitions 6360 and 6100.
+   *
+   * The revaluation module restates cost against accumulated depreciation —
+   * Dr 1590, Cr 1500, the IAS 16.35(b) elimination — and then moves cost by
+   * the uplift or the write-down. Classifying by the sign of the line alone
+   * therefore reported the whole accumulated depreciation as a disposal of
+   * cost and as depreciation released on it, and the uplift as an addition:
+   * two transactions the entity never entered into. `cost.agrees` could not
+   * catch it, because both halves of that check are built from the same lines.
+   */
+  const revaluationLine = (l: YearLine) => l.source === REVALUATION_SOURCE;
   const cost = ctx.lines.filter((l) => PPE_COST_CODES.includes(l.code));
   const accum = ctx.lines.filter((l) => l.code === ACCUM_DEPRECIATION);
+  const ordinaryCost = cost.filter((l) => !revaluationLine(l));
+  const ordinaryAccum = accum.filter((l) => !revaluationLine(l));
 
-  const additions = cost.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
-  const disposals = -cost.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  const additions = ordinaryCost.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  const disposals = -ordinaryCost.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  // Signed: the elimination is a credit to cost and the write-down is another,
+  // while an uplift is a debit. Netting them is right, because together they
+  // are what the revaluation did to the cost account.
+  const revaluationCost = cost.filter(revaluationLine).reduce((a, l) => a + l.amount, 0n);
   const costOpening = sumOf(ctx.openingBs, PPE_COST_CODES);
-  const costClosing = costOpening + additions - disposals;
+  const costClosing = costOpening + additions - disposals + revaluationCost;
   const costPerSheet = sumOf(ctx.closingBs, PPE_COST_CODES);
 
   // The charge is taken from the movement on 1590 rather than from the
   // depreciation expense account, because 6600 also carries the depreciation
   // of right-of-use assets, which credits 1700 and belongs in the leases note.
-  const charge = -accum.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
-  const released = accum.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  const charge = -ordinaryAccum.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  const released = ordinaryAccum.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  const eliminated = accum.filter(revaluationLine).reduce((a, l) => a + l.amount, 0n);
   const accumOpening = -balanceOf(ctx.openingBs, ACCUM_DEPRECIATION);
-  const accumClosing = accumOpening + charge - released;
+  const accumClosing = accumOpening + charge - released - eliminated;
   const accumPerSheet = -balanceOf(ctx.closingBs, ACCUM_DEPRECIATION);
+
+  // Two records of one thing again: the carrying amount the revaluation
+  // postings moved, and the movement the register says each event was for.
+  const revaluationPerLedger = revaluationCost + eliminated;
+  const revaluationNet =
+    revaluations.increases - revaluations.decreases - revaluations.impairmentLosses + revaluations.impairmentReversals;
 
   const active = register.assets.filter((a) => a.status === "active");
   const categories = new Map<string, { count: number; cost: bigint; accumulated: bigint }>();
@@ -1042,9 +1294,10 @@ function ppeNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof as
     state: anything ? "present" : "empty",
     statement: anything
       ? `Cost and accumulated depreciation are the movements on accounts ${PPE_COST_CODES.join(", ")} and ` +
-        `${ACCUM_DEPRECIATION} in ${ctx.year.label}. The register is a second record of the same assets and is ` +
-        `shown beside the ledger so the two can be compared; it is stated as it now stands rather than as at ` +
-        `${ctx.to}.`
+        `${ACCUM_DEPRECIATION} in ${ctx.year.label}, split by what made each one: a revaluation restates cost ` +
+        `against accumulated depreciation, which is neither an addition nor a disposal and is shown as neither. ` +
+        `The register is a second record of the same assets and is shown beside the ledger so the two can be ` +
+        `compared; it is stated as it now stands rather than as at ${ctx.to}.`
       : `The entity holds no property, plant or equipment. Accounts ${PPE_COST_CODES.join(", ")} and ` +
         `${ACCUM_DEPRECIATION} are nil at both ends of the year and the register is empty.`,
     costAccounts: PPE_COST_CODES,
@@ -1053,6 +1306,7 @@ function ppeNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof as
       openingMinor: costOpening.toString(),
       additionsMinor: additions.toString(),
       disposalsMinor: disposals.toString(),
+      revaluationMinor: revaluationCost.toString(),
       closingMinor: costClosing.toString(),
       perBalanceSheetMinor: costPerSheet.toString(),
       agrees: costClosing === costPerSheet,
@@ -1061,6 +1315,7 @@ function ppeNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof as
       openingMinor: accumOpening.toString(),
       chargeMinor: charge.toString(),
       releasedOnDisposalMinor: released.toString(),
+      eliminatedOnRevaluationMinor: eliminated.toString(),
       closingMinor: accumClosing.toString(),
       perBalanceSheetMinor: accumPerSheet.toString(),
       agrees: accumClosing === accumPerSheet,
@@ -1068,6 +1323,16 @@ function ppeNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof as
     netBookValue: {
       openingMinor: (costOpening - accumOpening).toString(),
       closingMinor: (costClosing - accumClosing).toString(),
+    },
+    revaluation: {
+      events: revaluations.count,
+      increasesMinor: revaluations.increases.toString(),
+      decreasesMinor: revaluations.decreases.toString(),
+      impairmentLossesMinor: revaluations.impairmentLosses.toString(),
+      impairmentReversalsMinor: revaluations.impairmentReversals.toString(),
+      netMovementMinor: revaluationNet.toString(),
+      perLedgerMinor: revaluationPerLedger.toString(),
+      agrees: revaluationNet === revaluationPerLedger,
     },
     register: {
       assets: active.length,
@@ -1123,7 +1388,7 @@ function leaseNote(ctx: Context, n: number, register: Awaited<ReturnType<typeof 
     .filter((l) => l.code === LEASE_RENT && leaseEntry(l))
     .reduce((a, l) => a + l.amount, 0n);
   const cashOutflow = -ctx.lines
-    .filter((l) => CASH_CODES.includes(l.code) && leaseEntry(l))
+    .filter((l) => ctx.cashCodes.has(l.code) && leaseEntry(l))
     .reduce((a, l) => a + l.amount, 0n);
 
   // The undiscounted payments still to be made, from the year end. Discounted
@@ -1315,24 +1580,35 @@ function revenueNote(ctx: Context, n: number): RevenueNote {
   };
 }
 
-function relatedPartyNote(ctx: Context, n: number, statement: StatementOfChangesInEquity): RelatedPartyNote {
+function relatedPartyNote(
+  ctx: Context,
+  n: number,
+  statement: StatementOfChangesInEquity,
+  data: RelatedPartyNoteData,
+): RelatedPartyNote {
   /*
-   * A ledger cannot know which parties are related.
+   * A ledger cannot know which parties are related, and this note does not
+   * guess.
    *
    * Relatedness under IAS 24 is a fact about people and control — a director's
    * spouse, an entity under common control, a member of key management — and
-   * none of that is written down anywhere in a chart of accounts or a journal
-   * line. A counterparty name is a string; it does not say whether the person
-   * behind it is the owner's brother. So this note does not attempt to detect
-   * related parties, because a detector would be wrong in the direction that
-   * matters: it would produce a confident, incomplete list, and a reader would
-   * take the silence about everyone else as a statement that there is nobody
-   * else.
+   * none of that is written in a chart of accounts or a journal line. A
+   * detector would be wrong in the direction that matters: it would produce a
+   * confident, incomplete list, and a reader would take the silence about
+   * everyone else as a statement that there is nobody else.
    *
-   * The shareholder current account is the exception, and the only one. It is
-   * related by construction: the account exists precisely to record what the
-   * owner has put in and taken out, so every balance on it is a related party
-   * balance whatever the ledger knows about anybody's name.
+   * So the parties come from `related-parties.ts`, where somebody declared
+   * them and the declaration is signed and dated. That module also reads what
+   * passed between the entity and each of them, holds the IAS 24.17
+   * compensation by category and the IAS 24.13 attestation, and grades its own
+   * completeness — which is why this note now asks only for what that grading
+   * says is still missing, rather than asking the same four questions of every
+   * entity forever, including the ones that have already answered them.
+   *
+   * The shareholder current account stays, and stays first. It is related by
+   * construction: the account exists precisely to record what the owner has
+   * put in and taken out, so every balance on it is a related party balance
+   * whatever anybody has declared.
    */
   const opening = BigInt(statement.opening.cells[SHAREHOLDER_CURRENT] ?? "0");
   const closing = BigInt(statement.closing.cells[SHAREHOLDER_CURRENT] ?? "0");
@@ -1341,22 +1617,35 @@ function relatedPartyNote(ctx: Context, n: number, statement: StatementOfChanges
     .filter((m) => m.amountMinor !== "0");
   const postings = ctx.lines.filter((l) => l.code === SHAREHOLDER_CURRENT).length;
 
-  const anything = opening !== 0n || closing !== 0n || postings > 0;
+  const declared = data.parties.length;
+  const onTheAccount = opening !== 0n || closing !== 0n || postings > 0;
+  // A note that is empty because somebody assessed the counterparties and
+  // found nothing is a different document from one that is empty because
+  // nobody was asked. `complete` is the register saying which of the two
+  // this is.
+  const anything = onTheAccount || declared > 0 || data.compensation.rows.length > 0 || data.attestation.present;
+
+  const total = BigInt(data.compensation.totalMinor);
 
   return {
     number: n,
     key: "related_parties",
     title: "Related party balances and transactions",
-    basis: "IAS 24.18, IAS 24.17",
-    state: anything ? "present" : "requires_input",
+    basis: "IAS 24.13, IAS 24.17, IAS 24.18",
+    state: anything || data.completeness.complete ? "present" : "requires_input",
     statement: anything
-      ? "The shareholder current account is a related party balance by construction — it exists to record what " +
-        "the owner has put into the business and taken out of it. Every other related party relationship is a " +
-        "fact about people rather than about postings, and no ledger can see it, so this note is complete only " +
-        "once a preparer has answered the questions below."
-      : "The shareholder current account is nil and never moved in the year. That is not the same as there " +
+      ? `${declared === 0 ? "No party has been declared related" : `${declared} related ${declared === 1 ? "party is" : "parties are"} declared`} ` +
+        `for ${ctx.year.label}, and the shareholder current account is a related party balance by construction — ` +
+        `it exists to record what the owner has put into the business and taken out of it. ` +
+        (data.completeness.complete
+          ? `Every counterparty has been assessed, compensation is given by category and the controlling party ` +
+            `is attested, so this note is complete.`
+          : `${data.completeness.reasons.length} thing${data.completeness.reasons.length === 1 ? " is" : "s are"} ` +
+            `still outstanding, listed below.`)
+      : "Nobody has been asked. The shareholder current account is nil and never moved, no party has been " +
+        "declared either related or unrelated, and no attestation has been made. That is not the same as there " +
         "being no related party transactions: relationships under IAS 24 are facts about people and control, " +
-        "which no ledger holds. This note cannot be completed from the accounts alone.",
+        "which no ledger holds.",
     account: {
       code: SHAREHOLDER_CURRENT,
       name: ctx.accountNames.get(SHAREHOLDER_CURRENT)?.name ?? "Shareholder current account",
@@ -1366,12 +1655,45 @@ function relatedPartyNote(ctx: Context, n: number, statement: StatementOfChanges
     closingMinor: closing.toString(),
     movements,
     postings,
-    requiresInput: [
-      "The identity of the entity's related parties, and the nature of each relationship (IAS 24.13, IAS 24.18).",
-      "Compensation of key management personnel, in total and by category (IAS 24.17).",
-      "Transactions with related parties other than the shareholder, and the terms on which they were made (IAS 24.18(b)).",
-      "Whether the entity is controlled by another party, and the identity of the ultimate controlling party (IAS 24.13).",
-    ],
+    parties: data.parties.map((p) => ({
+      partyKey: p.partyKey,
+      name: p.name,
+      relationship: p.relationship,
+      relationshipLabel: p.relationshipLabel,
+      startedOn: p.startedOn,
+      endedOn: p.endedOn,
+      declaredBy: p.declaredBy,
+      declaredOn: p.declaredOn,
+      salesMinor: p.salesMinor.toString(),
+      purchasesMinor: p.purchasesMinor.toString(),
+      documents: p.documents,
+      notes: p.notes,
+    })),
+    byRelationship: data.byRelationship.map((g) => ({
+      relationship: g.relationship,
+      label: g.label,
+      count: g.count,
+      salesMinor: g.salesMinor.toString(),
+      purchasesMinor: g.purchasesMinor.toString(),
+    })),
+    compensation: {
+      rows: data.compensation.rows.map((r) => ({
+        category: r.category,
+        label: r.label,
+        amountMinor: r.amountMinor.toString(),
+        headcount: r.headcount,
+        declaredBy: r.declaredBy,
+      })),
+      totalMinor: total.toString(),
+      missingCategories: data.compensation.missingCategories,
+      headcount: data.compensation.headcount,
+    },
+    attestation: data.attestation,
+    completeness: data.completeness,
+    // The register's own grading, not a fixed list. An entity that has
+    // answered a question is not asked it again, which is the difference
+    // between a note that can be finished and one that cannot.
+    requiresInput: data.completeness.reasons,
   };
 }
 
@@ -1507,6 +1829,69 @@ async function taxNote(ctx: Context, n: number, profitForThePeriod: bigint): Pro
 }
 
 /**
+ * The provisions register's IAS 37.84 movement table, carried in whole.
+ *
+ * It was already built, already reconciled against the register, and already
+ * tested — and the notes pack did not call it, so a set of accounts with a
+ * warranty provision disclosed the provision on the balance sheet and said
+ * nothing about it in the notes. Nothing is recomputed here; the figures are
+ * the register's own, so the note and the provisions screen cannot disagree.
+ */
+function provisionsNote(n: number, result: ProvisionNoteResult): ProvisionsNote {
+  const { entityId: _entityId, ...body } = result;
+  const anything =
+    body.rows.length > 0 || body.contingentLiabilities.length > 0 || body.contingentAssets.length > 0;
+
+  return {
+    number: n,
+    key: "provisions",
+    title: "Provisions, contingent liabilities and contingent assets",
+    basis: "IAS 37.84, IAS 37.85, IAS 37.86, IAS 37.89",
+    state: anything ? "present" : "empty",
+    statement: anything
+      ? `The movement in each class of provision over ${body.periodLabel}, from the register. The five columns ` +
+        `are signed against the carrying amount, so opening plus additions, amounts used, amounts reversed and ` +
+        `the unwinding of the discount is the closing balance exactly. Contingencies are listed under the same ` +
+        `date and are never added into those totals — IAS 37.27 keeps them off the balance sheet.`
+      : `No provision is carried at ${body.asOf} and no contingency is disclosed. The register is empty, which ` +
+        `is a fact about the accounts rather than a representation that nothing could arise.`,
+    ...body,
+    requires: [],
+  };
+}
+
+/**
+ * The deferred tax register's IAS 12.81(g) disclosure, likewise.
+ *
+ * It sits after the corporate tax note because it is the second half of the
+ * same subject: the tax note reconciles the charge for the year, this one says
+ * what is carried on the balance sheet for differences that have not reversed
+ * yet, and the IAS 12.81(e) amounts nobody has recognised at all.
+ */
+function deferredTaxPackNote(n: number, result: DeferredTaxNoteResult): DeferredTaxNote {
+  const { entityId: _entityId, ...body } = result;
+  const anything = body.rows.length > 0 || body.totals.closingNetMinor !== "0";
+
+  return {
+    number: n,
+    key: "deferred_tax",
+    title: "Deferred tax",
+    basis: "IAS 12.81(e), IAS 12.81(g), IAS 12.82",
+    state: anything ? "present" : "empty",
+    statement: anything
+      ? `Deferred tax by type of temporary difference at ${body.asOf}` +
+        `${body.previousAsOf ? ` against ${body.previousAsOf}` : ", with no earlier measurement to compare it to"}` +
+        `, and the movement between them. Amounts on which no deferred tax asset is recognised are shown beside ` +
+        `each type rather than left out, because a deductible difference that has been judged unusable is a ` +
+        `disclosure in its own right.`
+      : `No temporary difference is recorded at ${body.asOf}, so no deferred tax is recognised. The register is ` +
+        `empty rather than nil by measurement.`,
+    ...body,
+    requires: [],
+  };
+}
+
+/**
  * The two notes a ledger can never write.
  *
  * Both are about things that are NOT in the accounts — an event after the
@@ -1516,7 +1901,22 @@ async function taxNote(ctx: Context, n: number, profitForThePeriod: bigint): Pro
  * preparer can make. So they are returned in full, marked as needing an
  * answer, with the questions written out.
  */
-function requiresInputNotes(n: number, to: string): RequiresInputNote[] {
+function requiresInputNotes(
+  n: number,
+  to: string,
+  provisions: { contingentLiabilities: number; contingentAssets: number; number: number },
+): RequiresInputNote[] {
+  // The provisions register already holds contingencies, so asking for them
+  // again as though the question had never been put would invite a preparer
+  // either to repeat them or to assume they were covered. The question stays —
+  // a register holding some contingencies is not a register holding all of
+  // them — but it now says what is already disclosed and where.
+  const held = (count: number) =>
+    count === 0
+      ? ""
+      : ` ${count} ${count === 1 ? "is" : "are"} already on the provisions register and disclosed in note ` +
+        `${provisions.number}; this asks about anything the register does not hold.`;
+
   return [
     {
       number: n,
@@ -1574,12 +1974,16 @@ function requiresInputNotes(n: number, to: string): RequiresInputNote[] {
         },
         {
           key: "contingent_liabilities",
-          question: "Is there any litigation, claim or assessment outstanding, and what is the possible obligation?",
+          question:
+            "Is there any litigation, claim or assessment outstanding, and what is the possible obligation?" +
+            held(provisions.contingentLiabilities),
           basis: "IAS 37.86",
         },
         {
           key: "contingent_assets",
-          question: "Is there any contingent asset whose inflow of benefits is probable?",
+          question:
+            "Is there any contingent asset whose inflow of benefits is probable?" +
+            held(provisions.contingentAssets),
           basis: "IAS 37.89",
         },
         {
@@ -1595,22 +1999,41 @@ function requiresInputNotes(n: number, to: string): RequiresInputNote[] {
 /* ------------------------------------------------------------------- entry */
 
 async function buildNotes(ctx: Context, statement: StatementOfChangesInEquity): Promise<Note[]> {
-  const [assets, leases, ar, ap] = await Promise.all([
+  const [assets, revaluations, leases, ar, ap, provisions, deferredTax, relatedParties] = await Promise.all([
     assetRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
+    revaluationRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
     leaseRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
     receivablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.year.endsOn }),
     payablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.year.endsOn }),
+    provisionNote({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.to }),
+    deferredTaxNote({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.to }),
+    relatedPartyDisclosure({
+      orgId: ctx.orgId,
+      entityId: ctx.entityId,
+      // The period a compensation figure or an attestation was declared for is
+      // the fiscal year, which is also the period this whole pack covers.
+      period: ctx.year.label,
+      from: ctx.from,
+      to: ctx.to,
+    }),
   ]);
 
   const notes: Note[] = [];
   notes.push(accountingPolicies(ctx, 1, assets.assets.length, leases.leases.length));
-  notes.push(ppeNote(ctx, 2, assets));
+  notes.push(ppeNote(ctx, 2, assets, revaluationEventsIn(ctx, revaluations)));
   notes.push(leaseNote(ctx, 3, leases));
   notes.push(receivablesPayablesNote(ctx, 4, ar, ap));
   notes.push(revenueNote(ctx, 5));
-  notes.push(relatedPartyNote(ctx, 6, statement));
-  notes.push(await taxNote(ctx, 7, BigInt(statement.profitForThePeriodMinor)));
-  notes.push(...requiresInputNotes(8, ctx.to));
+  notes.push(relatedPartyNote(ctx, 6, statement, relatedParties));
+  const provisionsNoteNumber = 7;
+  notes.push(provisionsNote(provisionsNoteNumber, provisions));
+  notes.push(await taxNote(ctx, 8, BigInt(statement.profitForThePeriodMinor)));
+  notes.push(deferredTaxPackNote(9, deferredTax));
+  notes.push(...requiresInputNotes(10, ctx.to, {
+    contingentLiabilities: provisions.contingentLiabilities.length,
+    contingentAssets: provisions.contingentAssets.length,
+    number: provisionsNoteNumber,
+  }));
   return notes;
 }
 
