@@ -18,6 +18,16 @@ export async function ledgerBalances(opts: {
   orgId: string;
   entityId: string;
   codes: string[];
+  /**
+   * Balances as at the end of this day, inclusive. Omitted, the answer is
+   * everything ever posted — which is what "what is in the bank now" wants,
+   * and is wrong for any reconciliation drawn at a past date. A cheque
+   * register run for 31 March cannot be tied to an account balance that
+   * includes April.
+   */
+  asOf?: Date | string;
+  /** Balances from the start of this day, inclusive. With `asOf`, a movement. */
+  from?: Date | string;
 }): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>();
   if (!opts.codes.length) return out;
@@ -29,11 +39,17 @@ export async function ledgerBalances(opts: {
   if (!accounts.length) return out;
 
   const byId = new Map(accounts.map((a) => [a.id, a.code]));
+  const day = (v: Date | string) => (typeof v === "string" ? new Date(`${v.slice(0, 10)}T00:00:00.000Z`) : v);
+  const entryDate =
+    opts.from || opts.asOf
+      ? { ...(opts.from ? { gte: day(opts.from) } : {}), ...(opts.asOf ? { lte: day(opts.asOf) } : {}) }
+      : undefined;
+
   const lines = await prisma.journalLine.findMany({
     where: {
       orgId: opts.orgId,
       accountId: { in: accounts.map((a) => a.id) },
-      entry: { status: { in: ["posted", "reversed"] } },
+      entry: { status: { in: ["posted", "reversed"] }, ...(entryDate ? { entryDate } : {}) },
     },
     select: { accountId: true, functionalAmountMinor: true },
   });

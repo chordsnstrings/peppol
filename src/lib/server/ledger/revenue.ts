@@ -560,6 +560,198 @@ export async function runRecognitionAll(opts: Scope & { on: Date | string }) {
  * liabilities are the two figures an auditor asks to see supported, and a
  * register that cannot be tied to the ledger supports nothing.
  */
+
+/* ------------------------------------------------- the IFRS 15 disclosures */
+
+export interface ContractBalancesNote {
+  from: string;
+  to: string;
+  openingAssetMinor: bigint;
+  closingAssetMinor: bigint;
+  openingLiabilityMinor: bigint;
+  closingLiabilityMinor: bigint;
+  /** The movement, which is what 15.118 asks to be explained. */
+  assetMovementMinor: bigint;
+  liabilityMovementMinor: bigint;
+  basis: string;
+  notDerivable: string[];
+}
+
+/**
+ * IFRS 15.116-118: the contract balances and how they moved.
+ *
+ * Read from the ledger rather than from the contract rows, and that is the
+ * whole reason it can be drawn at a date at all. A contract's obligations carry
+ * `recognisedMinor` and `progressBps` as current state — one number, overwritten
+ * every time progress is updated — so nothing on a contract can say what it
+ * looked like in March. The postings can: they are dated, and the recognition
+ * run posts to 1310 and 2310 with a date on the entry.
+ *
+ * What 15.118 also asks for and this cannot give is the *explanation* of the
+ * movement broken into its causes — how much of the opening contract liability
+ * became revenue, as against how much was billed and how much was a
+ * modification. Splitting it needs each posting attributed to a cause, and the
+ * recognition run corrects to a target rather than posting increments, so a
+ * single entry can carry all three at once. That is named below rather than
+ * estimated.
+ */
+export async function contractBalancesNote(opts: {
+  orgId: string; entityId: string; from: string; to: string;
+}): Promise<ContractBalancesNote> {
+  const from = new Date(`${opts.from.slice(0, 10)}T00:00:00.000Z`);
+  const to = new Date(`${opts.to.slice(0, 10)}T00:00:00.000Z`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    throw new LedgerError("The contract balances note needs two dates it can read.");
+  }
+  if (to < from) throw new LedgerError("The period ends before it starts.");
+
+  const dayBefore = new Date(from.getTime() - 86_400_000);
+  const codes = [CONTRACT_ASSET_ACCOUNT, CONTRACT_LIABILITY_ACCOUNT];
+  const scope = { orgId: opts.orgId, entityId: opts.entityId, codes };
+
+  const opening = await ledgerBalances({ ...scope, asOf: dayBefore });
+  const closing = await ledgerBalances({ ...scope, asOf: to });
+
+  const openingAsset = opening.get(CONTRACT_ASSET_ACCOUNT) ?? 0n;
+  const closingAsset = closing.get(CONTRACT_ASSET_ACCOUNT) ?? 0n;
+  // A liability is a credit balance, so it is negative in the ledger's signed
+  // convention and positive on the face of a note.
+  const openingLiability = -(opening.get(CONTRACT_LIABILITY_ACCOUNT) ?? 0n);
+  const closingLiability = -(closing.get(CONTRACT_LIABILITY_ACCOUNT) ?? 0n);
+
+  return {
+    from: opts.from.slice(0, 10),
+    to: opts.to.slice(0, 10),
+    openingAssetMinor: openingAsset,
+    closingAssetMinor: closingAsset,
+    openingLiabilityMinor: openingLiability,
+    closingLiabilityMinor: closingLiability,
+    assetMovementMinor: closingAsset - openingAsset,
+    liabilityMovementMinor: closingLiability - openingLiability,
+    basis: "IFRS 15.116, IFRS 15.117",
+    notDerivable: [
+      "How much of the opening contract liability was recognised as revenue in the period, as against billed " +
+        "or modified (IFRS 15.118). The recognition run corrects to a target rather than posting increments, " +
+        "so one entry can carry all three causes and no posting says which.",
+      "Revenue recognised in the period from performance obligations satisfied in earlier periods " +
+        "(IFRS 15.116(b)), for the same reason.",
+    ],
+  };
+}
+
+export interface RemainingObligations {
+  asOf: string;
+  totalMinor: bigint;
+  /** Contracts with something still to deliver, worst-covered first. */
+  contracts: {
+    code: string;
+    customerName: string;
+    priceMinor: bigint;
+    recognisedMinor: bigint;
+    remainingMinor: bigint;
+    /** POINT_IN_TIME where every remaining obligation is, OVER_TIME where any is over time. */
+    timing: string;
+    obligations: { seq: number; description: string; timing: string; remainingMinor: bigint }[];
+  }[];
+  /**
+   * IFRS 15.120(b) asks when it is expected to become revenue. Nothing records
+   * an expected completion date, so this splits by HOW it will be recognised —
+   * at a point in time or over time — which is recorded and is the qualitative
+   * explanation 15.120(b) permits in place of bands.
+   */
+  byTiming: { timing: string; label: string; totalMinor: bigint }[];
+  basis: string;
+  notDerivable: string[];
+}
+
+/**
+ * IFRS 15.120: the transaction price allocated to obligations not yet
+ * satisfied, and when it is expected to become revenue.
+ *
+ * Measured at today, deliberately, and the return value says so. The
+ * obligations carry `recognisedMinor` as current state, so a figure "as at 31
+ * March" cannot be reconstructed from them — and producing one by subtracting
+ * dated postings would answer a different question, because a posting is what
+ * was recognised rather than what was allocated. IFRS 15.120 asks for the
+ * position at the reporting date, which for a close being run now is now.
+ *
+ * IFRS 15.120(b) asks when the remainder is expected to become revenue. Nothing
+ * in this schema records an expected completion date — a contract carries the
+ * date it was signed and nothing else — so no time band can be derived, and
+ * one derived from anything else would be a guess presented as a disclosure.
+ * What IS recorded is how each obligation will be satisfied, at a point in time
+ * or over time, and 15.120(b) permits a qualitative explanation in place of
+ * bands. That is what is given, and the gap is named rather than filled.
+ */
+export async function remainingObligations(opts: {
+  orgId: string; entityId: string; asOf?: string;
+}): Promise<RemainingObligations> {
+  const asOf = opts.asOf ? new Date(`${opts.asOf.slice(0, 10)}T00:00:00.000Z`) : new Date();
+  if (Number.isNaN(asOf.getTime())) throw new LedgerError("That is not a date I can read.");
+  const asOfIso = asOf.toISOString().slice(0, 10);
+
+  const rows = await prisma.revenueContract.findMany({
+    // A cancelled contract has nothing left to deliver, and a completed one has
+    // nothing left by definition; neither belongs in a figure about what is
+    // still owed to the customer.
+    where: { orgId: opts.orgId, entityId: opts.entityId, status: { notIn: ["cancelled", "completed"] } },
+    include: { obligations: { orderBy: { seq: "asc" } } },
+    orderBy: { code: "asc" },
+  });
+
+  const contracts = rows.map((c) => {
+    const obligations = c.obligations.map((o) => ({
+      seq: o.seq,
+      description: o.description,
+      timing: o.timing,
+      // Allocated less recognised. Never negative: recognising more than was
+      // allocated is refused at source, and a negative here would net off
+      // another obligation that genuinely is outstanding.
+      remainingMinor: o.allocatedMinor > o.recognisedMinor ? o.allocatedMinor - o.recognisedMinor : 0n,
+    }));
+    const remaining = obligations.reduce((a, o) => a + o.remainingMinor, 0n);
+    return {
+      code: c.code,
+      customerName: c.customerName,
+      priceMinor: c.priceMinor,
+      recognisedMinor: c.obligations.reduce((a, o) => a + o.recognisedMinor, 0n),
+      remainingMinor: remaining,
+      timing: obligations.some((o) => o.remainingMinor > 0n && o.timing === "OVER_TIME")
+        ? "OVER_TIME"
+        : "POINT_IN_TIME",
+      obligations: obligations.filter((o) => o.remainingMinor > 0n),
+    };
+  }).filter((c) => c.remainingMinor > 0n);
+
+  const LABELS: Record<string, string> = {
+    OVER_TIME: "Recognised over time as the work is done",
+    POINT_IN_TIME: "Recognised at a point in time, on delivery",
+  };
+  const byTiming = new Map<string, bigint>();
+  for (const c of contracts) {
+    byTiming.set(c.timing, (byTiming.get(c.timing) ?? 0n) + c.remainingMinor);
+  }
+
+  return {
+    asOf: asOfIso,
+    totalMinor: contracts.reduce((a, c) => a + c.remainingMinor, 0n),
+    contracts: contracts.sort((a, b) => (b.remainingMinor > a.remainingMinor ? 1 : -1)),
+    byTiming: [...byTiming.entries()]
+      .filter(([, v]) => v !== 0n)
+      .map(([timing, totalMinor]) => ({ timing, label: LABELS[timing] ?? timing, totalMinor })),
+    basis: "IFRS 15.120",
+    notDerivable: [
+      "This is measured at today rather than at a past reporting date. An obligation carries what has been " +
+        "recognised as current state — one figure, overwritten on every progress update — so what it looked " +
+        "like at an earlier date cannot be reconstructed from it.",
+      "When the remainder is expected to become revenue, in time bands (IFRS 15.120(b)). Nothing records an " +
+        "expected completion date — a contract carries the date it was signed and nothing else — so the split " +
+        "given is by how each obligation is satisfied rather than by when, which is the qualitative " +
+        "explanation 15.120(b) permits in place of bands.",
+    ],
+  };
+}
+
 export async function contractRegister(opts: Scope) {
   const rows = await prisma.revenueContract.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId },
