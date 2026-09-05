@@ -339,7 +339,12 @@ export default function PaymentRunsPage() {
                                   reason: {
                                     label: "Reason",
                                     placeholder: "The hold on the supplier was lifted this morning",
-                                    hint: "This replaces the exclusion note on the bill; it is the only record of why it came back.",
+                                    // Optional on purpose: putting a bill back is the undoing of a
+                                    // decision, and often the whole story is that the reason for
+                                    // leaving it out no longer holds. A note invented to satisfy a
+                                    // field is worse than no note.
+                                    minLength: 0,
+                                    hint: "Optional. It replaces the exclusion note on the bill, so leaving it blank clears that note rather than adding to it.",
                                   },
                                   confirmLabel: "Put it back in",
                                 })

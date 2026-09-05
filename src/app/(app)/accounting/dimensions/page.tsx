@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
+import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
 
 interface Column { key: string; label: string; isUnallocated: boolean }
@@ -54,6 +54,10 @@ export default function DimensionsPage() {
   const entityId = useEntityId();
   const [range, setRange] = React.useState(ytd);
   const [dimension, setDimension] = React.useState("");
+  const [defining, setDefining] = React.useState(false);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [msg, setMsg] = React.useState<string | null>(null);
+  const [err, setErr] = React.useState<string | null>(null);
 
   const q = useLedgerQuery<{ dimensions: Dimension[]; profitAndLoss?: DimPL; summary?: Summary }>(
     entityId
@@ -67,6 +71,22 @@ export default function DimensionsPage() {
     if (dimension || !dimensions.length) return;
     setDimension(dimensions[0].code);
   }, [dimensions, dimension]);
+
+  const act = async (label: string, body: Record<string, unknown>) => {
+    setBusy(label); setErr(null); setMsg(null);
+    try {
+      const r = await api<Record<string, unknown>>("/api/ledger/dimensions", {
+        method: "POST", body: JSON.stringify({ entityId, ...body }),
+      });
+      q.reload();
+      return r;
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "That did not work.");
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  };
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
 
@@ -97,14 +117,41 @@ export default function DimensionsPage() {
               <input type="date" className="sw-input" style={{ width: "9.5rem" }} value={range.to}
                 onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))} />
             </label>
+            <button type="button" className="sw-btn" onClick={() => setDefining((d) => !d)} data-testid="toggle-define">
+              {defining ? "Close" : "Define"}
+            </button>
           </>
         }
       />
 
+      {err && <ErrorNote>{err}</ErrorNote>}
+      {msg && <div className="sw-note mb-3" role="status" data-testid="dimension-result">{msg}</div>}
       {q.error && <ErrorNote>{q.error}</ErrorNote>}
       {q.loading && <Loading />}
-      {!q.loading && !q.error && dimensions.length === 0 && (
-        <Empty>No dimensions have been defined yet. A cost centre, department, project or branch can be created through the dimensions API, and postings tagged with it will report here.</Empty>
+      {!q.loading && !q.error && dimensions.length === 0 && !defining && (
+        <Empty>
+          No dimensions have been defined yet. A cost centre, department, project or branch is defined with the
+          Define button above, and every posting tagged with one reports here.
+        </Empty>
+      )}
+
+      {defining && (
+        <Define
+          dimensions={dimensions}
+          busy={busy}
+          onCreate={async (d) => {
+            const r = await act("create-dimension", { action: "create-dimension", ...d });
+            if (r) { setDimension(d.code.trim().toUpperCase()); setMsg(`${d.name} is now a dimension. Add its values, then tag postings with them in the journal grid.`); }
+          }}
+          onAddValue={async (v) => {
+            const r = await act("add-value", { action: "add-value", ...v });
+            if (r) setMsg(`${v.name} is now a value of ${v.dimension}.`);
+          }}
+          onRequire={async (r) => {
+            const done = await act("require-on-account", { action: "require-on-account", ...r });
+            if (done) setMsg(`Account ${r.accountCode} now refuses a posting that carries no ${r.dimension}. That is the only way Unallocated stays at nil on the costs that matter — asking people to remember is not a control.`);
+          }}
+        />
       )}
 
       {pl && (
@@ -244,6 +291,196 @@ function SummaryPanel({ summary, columns, currency }: { summary: Summary; column
         Columns shown: {columns.length}, one of them Unallocated.
       </p>
     </Panel>
+  );
+}
+
+/**
+ * Defining a dimension, giving it values, and making it mandatory on an
+ * account.
+ *
+ * All three writes existed and were reachable from nothing: a browser user
+ * could read a cost-centre profit and loss and never create the cost centre it
+ * would report on, so every column but Unallocated was empty for everybody. The
+ * third control is the one that does the real work — a dimension nobody is
+ * forced to supply is a dimension that is supplied about half the time, and a
+ * departmental report that is half right is worse than none.
+ */
+function Define({ dimensions, busy, onCreate, onAddValue, onRequire }: {
+  dimensions: Dimension[];
+  busy: string | null;
+  onCreate: (d: { code: string; name: string; isRequired: boolean }) => void;
+  onAddValue: (v: { dimension: string; code: string; name: string }) => void;
+  onRequire: (r: { dimension: string; accountCode: string }) => void;
+}) {
+  const [dim, setDim] = React.useState({ code: "", name: "", isRequired: false });
+  const [val, setVal] = React.useState({ dimension: dimensions[0]?.code ?? "", code: "", name: "" });
+  const [req, setReq] = React.useState({ dimension: dimensions[0]?.code ?? "", accountCode: "" });
+
+  // A dimension created a moment ago should be the one the two lower forms are
+  // pointing at, without the reader having to notice the picker went blank.
+  React.useEffect(() => {
+    if (!dimensions.length) return;
+    setVal((v) => (dimensions.some((d) => d.code === v.dimension) ? v : { ...v, dimension: dimensions[0].code }));
+    setReq((r) => (dimensions.some((d) => d.code === r.dimension) ? r : { ...r, dimension: dimensions[0].code }));
+  }, [dimensions]);
+
+  const chosen = dimensions.find((d) => d.code === req.dimension);
+
+  return (
+    <Panel className="mb-4 p-4">
+      <div className="sw-label">Define a dimension</div>
+      <p className="sw-sub mt-1 max-w-[75ch]">
+        A dimension is a second way of cutting the same postings — a cost centre, a department, a project, a branch.
+        The code is what a posting carries and never changes; the name is what a report is headed with.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="Code">
+          <input className="sw-input" value={dim.code} placeholder="COST_CENTRE"
+            onChange={(e) => setDim((d) => ({ ...d, code: e.target.value }))} />
+        </Field>
+        <Field label="Name">
+          <input className="sw-input" value={dim.name} placeholder="Cost centre"
+            onChange={(e) => setDim((d) => ({ ...d, name: e.target.value }))} />
+        </Field>
+        <label className="flex items-end gap-2 pb-1">
+          <input type="checkbox" className="sw-check" checked={dim.isRequired}
+            onChange={(e) => setDim((d) => ({ ...d, isRequired: e.target.checked }))} />
+          <span className="sw-sub">Expected on every posting</span>
+        </label>
+        <div className="flex items-end">
+          <button
+            type="button"
+            className="sw-btn sw-btn-primary"
+            disabled={!dim.code.trim() || !dim.name.trim() || busy === "create-dimension"}
+            aria-disabled={!dim.code.trim() || !dim.name.trim() || busy === "create-dimension" || undefined}
+            data-testid="create-dimension"
+            onClick={() => { onCreate(dim); setDim({ code: "", name: "", isRequired: false }); }}
+          >
+            {busy === "create-dimension" ? "Saving…" : "Create"}
+          </button>
+        </div>
+      </div>
+      <p className="sw-sub mt-1 max-w-[75ch]">
+        &ldquo;Expected on every posting&rdquo; is advisory and decides nothing on its own. What actually refuses an
+        untagged posting is requiring the dimension on an account, below.
+      </p>
+
+      {dimensions.length > 0 && (
+        <>
+          <div className="sw-label mt-5">Add a value</div>
+          <p className="sw-sub mt-1 max-w-[75ch]">
+            OPS, SALES, ADMIN under a cost centre. UNALLOCATED is the column for postings that carry no value, so it
+            cannot also be one.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Dimension">
+              <select className="sw-select" value={val.dimension}
+                onChange={(e) => setVal((v) => ({ ...v, dimension: e.target.value }))}>
+                {dimensions.map((d) => <option key={d.code} value={d.code}>{d.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Value code">
+              <input className="sw-input" value={val.code} placeholder="OPS"
+                onChange={(e) => setVal((v) => ({ ...v, code: e.target.value }))} />
+            </Field>
+            <Field label="Value name">
+              <input className="sw-input" value={val.name} placeholder="Operations"
+                onChange={(e) => setVal((v) => ({ ...v, name: e.target.value }))} />
+            </Field>
+            <div className="flex items-end">
+              <button
+                type="button"
+                className="sw-btn"
+                disabled={!val.dimension || !val.code.trim() || !val.name.trim() || busy === "add-value"}
+                aria-disabled={!val.dimension || !val.code.trim() || !val.name.trim() || busy === "add-value" || undefined}
+                data-testid="add-dimension-value"
+                onClick={() => { onAddValue(val); setVal((v) => ({ ...v, code: "", name: "" })); }}
+              >
+                {busy === "add-value" ? "Saving…" : "Add value"}
+              </button>
+            </div>
+          </div>
+
+          <div className="sw-label mt-5">Require it on an account</div>
+          <p className="sw-sub mt-1 max-w-[75ch]">
+            The posting rule, not a reminder: a line to this account with no value for the dimension is refused
+            outright. Set it on the sub-accounts that carry the cost — a heading is never posted to, and a dimension
+            with no values yet would lock the account out entirely, so both are refused.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Dimension">
+              <select className="sw-select" value={req.dimension}
+                onChange={(e) => setReq((r) => ({ ...r, dimension: e.target.value }))}>
+                {dimensions.map((d) => <option key={d.code} value={d.code}>{d.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Account code">
+              <input className="sw-input sw-code" value={req.accountCode} placeholder="6100"
+                onChange={(e) => setReq((r) => ({ ...r, accountCode: e.target.value }))} />
+            </Field>
+            <div className="flex items-end">
+              <button
+                type="button"
+                className="sw-btn"
+                disabled={!req.dimension || !req.accountCode.trim() || busy === "require-on-account"}
+                aria-disabled={!req.dimension || !req.accountCode.trim() || busy === "require-on-account" || undefined}
+                data-testid="require-dimension"
+                onClick={() => onRequire(req)}
+              >
+                {busy === "require-on-account" ? "Saving…" : "Require"}
+              </button>
+            </div>
+            {chosen && chosen.values.length === 0 && (
+              <p className="sw-sub self-end pb-1" style={{ color: "var(--sw-neg)" }}>
+                {chosen.name} has no values yet, so nothing could satisfy the requirement.
+              </p>
+            )}
+          </div>
+
+          <div className="sw-label mt-5">Defined so far</div>
+          <div className="sw-scroll mt-2">
+            <table className="sw-table">
+              <caption className="sr-only">Dimensions defined in this organisation and their values</caption>
+              <thead>
+                <tr>
+                  <th style={{ width: "10rem" }}>Code</th>
+                  <th style={{ width: "12rem" }}>Name</th>
+                  <th>Values</th>
+                </tr>
+              </thead>
+              <tbody data-testid="defined-dimensions">
+                {dimensions.map((d) => (
+                  <tr key={d.code}>
+                    <td className="sw-code">{d.code}</td>
+                    <td>
+                      {d.name}
+                      {d.isRequired && <span className="sw-chip ms-2">expected</span>}
+                    </td>
+                    <td>
+                      {d.values.length === 0
+                        ? <span className="sw-sub">None yet — a dimension with no values tags nothing.</span>
+                        : d.values.map((v) => (
+                            <span key={v.code} className="sw-chip me-1" title={v.name}>{v.code}</span>
+                          ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="sw-label">{label}</span>
+      <span className="mt-1 block">{children}</span>
+    </label>
   );
 }
 

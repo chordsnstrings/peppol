@@ -276,6 +276,9 @@ export async function confirmMatch(opts: {
   });
 }
 
+/** The idempotency key `postFromBankLine` books a statement line under. */
+const bankLineKey = (bankLineId: string) => `bank-line:${bankLineId}`;
+
 /** Undo a match. A reconciliation nobody can unpick is one nobody will trust. */
 export async function unmatch(opts: { orgId: string; bankLineId: string }) {
   const bank = await prisma.bankStatementLine.findFirst({ where: { id: opts.bankLineId, orgId: opts.orgId } });
@@ -307,6 +310,32 @@ export async function postFromBankLine(opts: {
   if (!bank) throw new LedgerError("That bank line does not exist.");
   if (bank.status === "matched") throw new LedgerError("That bank line is already matched to a posting.");
 
+  /*
+   * A statement line is booked once, and only once.
+   *
+   * post() is idempotent on externalKey, so without this a second attempt
+   * would hand back the FIRST entry and quietly match to it again — including
+   * after that entry has been reversed. Somebody who booked a charge to the
+   * wrong contra account, unmatched it and reversed it would press Post again,
+   * see it succeed, and get the same wrong posting back with no sign anything
+   * had gone amiss. The correction has to be a journal of its own.
+   */
+  const already = await prisma.journalEntry.findFirst({
+    where: { orgId: opts.orgId, externalKey: bankLineKey(bank.id) },
+    select: { series: true, number: true, status: true },
+  });
+  if (already) {
+    const ref = `${already.series}-${already.number}`;
+    throw new LedgerError(
+      already.status === "reversed"
+        ? `This bank line was already booked as ${ref}, and ${ref} has been reversed. Booking it again would ` +
+          `return that same reversed entry rather than a new one — post the correction as a journal and match ` +
+          `this line to it instead.`
+        : `This bank line was already booked as ${ref}; it is that entry it needs to be matched to, not booked ` +
+          `a second time.`,
+    );
+  }
+
   const amount = bank.amountMinor;
   const entry = await post({
     orgId: opts.orgId,
@@ -316,7 +345,7 @@ export async function postFromBankLine(opts: {
     source: "bank",
     sourceType: "STATEMENT_LINE",
     sourceId: bank.id,
-    externalKey: `bank-line:${bank.id}`,
+    externalKey: bankLineKey(bank.id),
     actorType: "HUMAN",
     actorId: opts.userId,
     series: "BK",
@@ -358,6 +387,41 @@ export interface Reconciliation {
   differenceMinor: string;
   unmatchedBank: { id: string; postedOn: string; description: string; amountMinor: string }[];
   unmatchedLedger: { id: string; reference: string; entryDate: string; memo: string | null; amountMinor: string }[];
+  /**
+   * The pairs somebody has already agreed on.
+   *
+   * A matched line used to disappear from this statement altogether, which made
+   * a wrong match the one mistake on the page that could not be corrected: the
+   * arithmetic still tied, because matching forces equal amounts, so the damage
+   * was the itemisation — the outstanding-cheque working paper naming the wrong
+   * cheque, with nothing on screen to unpick.
+   */
+  matched: MatchedPair[];
+}
+
+export interface MatchedPair {
+  bankLineId: string;
+  postedOn: string;
+  description: string;
+  amountMinor: string;
+  matchedAt: string | null;
+  /** Null only if the posting behind the match has since gone; unmatch it. */
+  journalLineId: string | null;
+  reference: string | null;
+  entryDate: string | null;
+  memo: string | null;
+  /** posted | reversed — the entry's own status, not the match's. */
+  entryStatus: string | null;
+  /**
+   * The entry that reversed the matched posting, where one has.
+   *
+   * Reversing does not touch the match, so the statement line stays pointing at
+   * an entry that has been undone while the reversal's own bank line sits in
+   * the outstanding list — an item that will never clear, because the bank
+   * never saw either half. Naming the reversal here is what lets somebody see
+   * that and unmatch.
+   */
+  reversedBy: string | null;
 }
 
 /**
@@ -409,6 +473,48 @@ export async function reconcile(opts: {
 
   const reconciled = ledgerBalance - outstanding + unrecorded;
 
+  /*
+   * The matched pairs, read separately from the lines above.
+   *
+   * A match is not bounded by `asOf` the way the balance is: a bank line dated
+   * inside the period can perfectly well be matched to a posting dated after
+   * it, and dropping that pair would show the line as matched to nothing.
+   */
+  const matchedBank = bankLines.filter((b) => b.matchedLineId);
+  const matchedLines = matchedBank.length
+    ? await prisma.journalLine.findMany({
+        where: { orgId: opts.orgId, id: { in: matchedBank.map((b) => b.matchedLineId as string) } },
+        include: { entry: { select: { id: true, series: true, number: true, entryDate: true, memo: true, status: true } } },
+      })
+    : [];
+  const lineById = new Map(matchedLines.map((l) => [l.id, l]));
+
+  const reversedEntryIds = matchedLines.filter((l) => l.entry.status === "reversed").map((l) => l.entry.id);
+  const reversals = reversedEntryIds.length
+    ? await prisma.journalEntry.findMany({
+        where: { orgId: opts.orgId, reversalOfId: { in: reversedEntryIds } },
+        select: { series: true, number: true, reversalOfId: true },
+      })
+    : [];
+  const reversalOf = new Map(reversals.map((r) => [r.reversalOfId as string, `${r.series}-${r.number}`]));
+
+  const matched: MatchedPair[] = matchedBank.map((b) => {
+    const line = lineById.get(b.matchedLineId as string);
+    return {
+      bankLineId: b.id,
+      postedOn: b.postedOn.toISOString().slice(0, 10),
+      description: b.description,
+      amountMinor: b.amountMinor.toString(),
+      matchedAt: b.matchedAt?.toISOString().slice(0, 10) ?? null,
+      journalLineId: line?.id ?? null,
+      reference: line ? `${line.entry.series}-${line.entry.number}` : null,
+      entryDate: line?.entry.entryDate.toISOString().slice(0, 10) ?? null,
+      memo: line ? line.memo ?? line.entry.memo : null,
+      entryStatus: line?.entry.status ?? null,
+      reversedBy: line ? reversalOf.get(line.entry.id) ?? null : null,
+    };
+  });
+
   return {
     accountCode: account.code,
     accountName: account.name,
@@ -434,5 +540,6 @@ export async function reconcile(opts: {
       memo: l.memo ?? l.entry.memo,
       amountMinor: l.txnAmountMinor.toString(),
     })),
+    matched,
   };
 }

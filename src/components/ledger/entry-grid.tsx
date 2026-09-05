@@ -8,6 +8,7 @@ import { fmtMinor, parseAmount, toInput } from "@/lib/ledger/format";
 
 interface Account { id: string; code: string; name: string; nameAr: string | null; isPostable: boolean; isControl: boolean; currency: string | null; status: string }
 interface Period { id: string; label: string; status: string; startsOn: string; endsOn: string }
+interface Dimension { code: string; name: string; isRequired: boolean; status: string; values: { code: string; name: string; status: string }[] }
 
 interface Row {
   key: number;
@@ -16,12 +17,16 @@ interface Row {
   debit: string;
   credit: string;
   memo: string;
+  /** The value code this line carries for the dimension chosen above the grid. */
+  dimension: string;
 }
 
 const CURRENCY = "AED";
-/** The editable columns, in grid order. `keyof Row` would drag in the numeric
- *  `key` and make every assignment narrow to never. */
+/** The columns a spreadsheet paste lands in, in grid order. `keyof Row` would
+ *  drag in the numeric `key` and make every assignment narrow to never. */
 type TextCol = "account" | "memo" | "debit" | "credit";
+/** Every editable cell, which is the four above plus the dimension picker. */
+type GridCol = TextCol | "dimension";
 
 /** Strip whatever a spreadsheet decorated the figure with — currency symbols,
  *  non-breaking spaces — before the amount parser sees it. */
@@ -30,7 +35,7 @@ function sanitiseAmount(v: string): string {
 }
 
 let nextKey = 1;
-const blank = (): Row => ({ key: nextKey++, account: "", debit: "", credit: "", memo: "" });
+const blank = (): Row => ({ key: nextKey++, account: "", debit: "", credit: "", memo: "", dimension: "" });
 
 /**
  * The journal entry grid.
@@ -51,6 +56,9 @@ const blank = (): Row => ({ key: nextKey++, account: "", debit: "", credit: "", 
  *    turns red only after a post has been attempted.
  *  - A minus typed into Debit moves itself to Credit, because that is what the
  *    person meant.
+ *  - The dimension column appears only where a dimension has been defined. A
+ *    column of empty pickers on a book that does not use cost centres is one
+ *    more Tab stop on every line for nothing.
  */
 export function EntryGrid() {
   const router = useRouter();
@@ -69,7 +77,25 @@ export function EntryGrid() {
   const periodsQ = useLedgerQuery<{ periods: Period[] }>(
     entityId ? `/api/ledger/periods?entityId=${entityId}` : null,
   );
+  const dimensionsQ = useLedgerQuery<{ dimensions: Dimension[] }>(
+    entityId ? `/api/ledger/dimensions?entityId=${entityId}` : null,
+  );
   const accounts = accountsQ.data?.accounts ?? [];
+
+  /**
+   * One dimension at a time, chosen above the grid.
+   *
+   * A column per dimension would widen the grid without bound, and a book with
+   * a cost centre, a project and a branch would push the amounts off screen —
+   * which is the one thing this grid cannot afford. Choosing which dimension
+   * this entry is being tagged against keeps it to a single column however many
+   * are defined, and an entry that needs two of them is two entries or a later
+   * correction, which is rare enough to be worth the trade.
+   */
+  const dimensions = (dimensionsQ.data?.dimensions ?? []).filter((d) => d.status === "active");
+  const [dimensionCode, setDimensionCode] = React.useState("");
+  const activeDimension = dimensions.find((d) => d.code === dimensionCode) ?? dimensions[0];
+  const dimensionValues = (activeDimension?.values ?? []).filter((v) => v.status === "active");
 
   /** Resolve a typed cell to exactly one account, or nothing. */
   const resolve = React.useCallback(
@@ -228,7 +254,7 @@ export function EntryGrid() {
     setPasteNote(`Pasted ${matrix.length} row${matrix.length === 1 ? "" : "s"}. Check the totals before posting.`);
   };
 
-  const onCellKey = (e: React.KeyboardEvent<HTMLInputElement>, key: number, field: TextCol) => {
+  const onCellKey = (e: React.KeyboardEvent<HTMLElement>, key: number, field: GridCol) => {
     // Ctrl+D copies the cell above — the single most repeated keystroke in
     // manual entry (same account, different amount).
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
@@ -263,6 +289,12 @@ export function EntryGrid() {
             debit: (p.debit ?? 0n) !== 0n ? (p.debit as bigint).toString() : undefined,
             credit: (p.credit ?? 0n) !== 0n ? (p.credit as bigint).toString() : undefined,
             memo: p.row.memo.trim() || undefined,
+            // { COST_CENTRE: "OPS" } — keyed by code, which is what post()
+            // resolves and what a reversal rebuilds the line's tags from.
+            dimensions:
+              activeDimension && p.row.dimension
+                ? { [activeDimension.code]: p.row.dimension }
+                : undefined,
           })),
         }),
       });
@@ -304,7 +336,7 @@ export function EntryGrid() {
       </div>
 
       <Panel className="p-4">
-        <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
+        <div className={`grid gap-3 ${dimensions.length > 1 ? "sm:grid-cols-[10rem_1fr_12rem]" : "sm:grid-cols-[10rem_1fr]"}`}>
           <div>
             <label className="sw-label block" htmlFor="je-date">Date</label>
             <input id="je-date" type="date" className="sw-input mt-1" value={entryDate} onChange={(e) => setEntryDate(e.target.value)} />
@@ -322,6 +354,26 @@ export function EntryGrid() {
               onChange={(e) => setMemo(e.target.value)}
             />
           </div>
+          {dimensions.length > 1 && (
+            <div>
+              <label className="sw-label block" htmlFor="je-dimension">Tag lines with</label>
+              <select
+                id="je-dimension"
+                className="sw-select mt-1"
+                value={activeDimension?.code ?? ""}
+                onChange={(e) => {
+                  // A value belongs to the dimension it was chosen from, so
+                  // switching has to clear what is already on the lines rather
+                  // than reinterpret it under the new one.
+                  setDimensionCode(e.target.value);
+                  setRows((rs) => rs.map((r) => ({ ...r, dimension: "" })));
+                }}
+              >
+                {dimensions.map((d) => <option key={d.code} value={d.code}>{d.name}</option>)}
+              </select>
+              <p className="sw-sub mt-1">One dimension per entry, in the column at the end of each line.</p>
+            </div>
+          )}
         </div>
       </Panel>
 
@@ -336,6 +388,7 @@ export function EntryGrid() {
                 <th style={{ minWidth: "12rem" }}>Line description</th>
                 <th className="sw-col-debit sw-num" style={{ width: "var(--sw-col-amount)" }}>Debit</th>
                 <th className="sw-col-credit sw-num" style={{ width: "var(--sw-col-amount)" }}>Credit</th>
+                {activeDimension && <th style={{ width: "11rem" }}>{activeDimension.name}</th>}
                 <th style={{ width: "2.5rem" }}><span className="sr-only">Remove</span></th>
               </tr>
             </thead>
@@ -409,6 +462,25 @@ export function EntryGrid() {
                         onBlur={(e) => commitAmount(r.key, "credit", e.target.value)}
                       />
                     </td>
+                    {activeDimension && (
+                      <td>
+                        <select
+                          className="sw-cell"
+                          aria-label={`Line ${i + 1} ${activeDimension.name}`}
+                          value={r.dimension}
+                          onChange={(e) => setRow(r.key, { dimension: e.target.value })}
+                          onKeyDown={(e) => onCellKey(e, r.key, "dimension")}
+                        >
+                          {/* Unallocated is the report's own name for a line
+                              that carries no value, so it is what the empty
+                              choice is called here too. */}
+                          <option value="">Unallocated</option>
+                          {dimensionValues.map((v) => (
+                            <option key={v.code} value={v.code}>{v.name}</option>
+                          ))}
+                        </select>
+                      </td>
+                    )}
                     <td>
                       <button
                         type="button"
@@ -428,6 +500,7 @@ export function EntryGrid() {
                 <th scope="row" colSpan={3} style={{ textAlign: "end" }}>Totals</th>
                 <td className="sw-num" data-testid="total-debit">{fmtMinor(totalDebit, CURRENCY, { zero: "zero" })}</td>
                 <td className="sw-num" data-testid="total-credit">{fmtMinor(totalCredit, CURRENCY, { zero: "zero" })}</td>
+                {activeDimension && <td />}
                 <td />
               </tr>
               {difference !== 0n && (
@@ -442,6 +515,7 @@ export function EntryGrid() {
                   <td className={`sw-num ${diffTone}`} data-testid="diff-credit">
                     {difference > 0n ? fmtMinor(difference, CURRENCY, { zero: "zero" }) : ""}
                   </td>
+                  {activeDimension && <td />}
                   <td />
                 </tr>
               )}
@@ -494,6 +568,13 @@ export function EntryGrid() {
         Amount cells take arithmetic: <code>1200/3</code>, <code>(450+80)*1.05</code>. A minus typed
         into Debit moves itself to Credit. <kbd>Ctrl</kbd>+<kbd>D</kbd> copies the cell above. Paste a block from Excel
         or Sheets straight into the grid — account, description, debit, credit.
+        {activeDimension && (
+          <>
+            {" "}
+            The {activeDimension.name.toLowerCase()} column is a picker rather than a pasted column, so a value that
+            does not exist can never be tagged silently; a line left on Unallocated carries no tag at all.
+          </>
+        )}
       </p>
     </div>
   );

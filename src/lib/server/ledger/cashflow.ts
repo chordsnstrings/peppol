@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { cashCodes } from "./cash";
 import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { balanceSheet, profitAndLoss } from "./statements";
@@ -56,9 +57,19 @@ import { balanceSheet, profitAndLoss } from "./statements";
  * and the charge in the period are two different figures.
  */
 
-/** Cash and cash equivalents (IAS 7.6-.9). Savings sits here for an SMB: it is
- *  short-term, highly liquid and held to meet commitments, not to invest. */
-export const CASH_CODES = ["1000", "1010", "1020", "1050"];
+/*
+ * Cash and cash equivalents (IAS 7.6-.9) are derived from the chart, by
+ * `cashCodes` in ./cash — not listed here.
+ *
+ * They were listed here, as four codes, and the list was copied into three
+ * other modules. Money lands outside those four: the petty cash screen takes
+ * a free-text account and the receipt path accepts any code. An account like
+ * that which MOVES makes this statement declare itself unreconciled and tell
+ * the reader to edit a list no screen exposes; an account like that which
+ * merely HOLDS a balance is worse, because opening and closing cash on a
+ * primary statement are then understated by the whole of it and nothing says
+ * so.
+ */
 
 /** Fixed asset accounts whose gross movement is an investing flow. */
 const FIXED_ASSET_CODES = ["1500", "1600", "1700"];
@@ -125,6 +136,10 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "2100": "operating_working_capital", // VAT output
   "2110": "operating_working_capital", // VAT payable to FTA
   "2200": "operating_working_capital", // salaries payable
+  // Pension is a payroll cost charged in the month it is earned and paid over
+  // to GPSSA the month after. The unpaid balance absorbs or releases cash the
+  // same way an unpaid salary does — it is not a provision and not financing.
+  "2230": "operating_working_capital", // pension contributions payable (GPSSA)
   "2300": "operating_working_capital", // customer deposits and advances
   "2400": "operating_working_capital", // corporate tax payable
   // IFRS 15 presentation. A contract asset is revenue earned and not yet
@@ -293,6 +308,9 @@ export async function cashFlowStatement(opts: {
 
   /* ---------------------------------------------------- movements by account */
 
+  // What counts as cash in THIS entity's chart, not in the seeded one.
+  const cashList = await cashCodes({ orgId: opts.orgId, entityId: opts.entityId });
+
   const movements = new Map<string, Movement>();
   const collect = (
     bs: { assets: { lines: { code: string; name: string; balanceMinor: string }[] }; liabilities: { lines: { code: string; name: string; balanceMinor: string }[] }; equity: { lines: { code: string; name: string; balanceMinor: string }[] } },
@@ -317,7 +335,7 @@ export async function cashFlowStatement(opts: {
 
   /* --------------------------------------------------------- cash and its move */
 
-  const cashAccounts = CASH_CODES.map((code) => movements.get(code))
+  const cashAccounts = cashList.map((code) => movements.get(code))
     .filter((m): m is Movement => m !== undefined)
     .map((m) => ({
       code: m.code,
@@ -327,8 +345,8 @@ export async function cashFlowStatement(opts: {
       movementMinor: m.movement.toString(),
     }));
 
-  const openingCash = CASH_CODES.reduce((a, c) => a + (movements.get(c)?.opening ?? 0n), 0n);
-  const closingCash = CASH_CODES.reduce((a, c) => a + (movements.get(c)?.closing ?? 0n), 0n);
+  const openingCash = cashList.reduce((a, c) => a + (movements.get(c)?.opening ?? 0n), 0n);
+  const closingCash = cashList.reduce((a, c) => a + (movements.get(c)?.closing ?? 0n), 0n);
   const cashMovementPerLedger = closingCash - openingCash;
 
   /* ------------------------------------------------------------ the sections */
@@ -353,7 +371,7 @@ export async function cashFlowStatement(opts: {
   const unclassified: Movement[] = [];
 
   for (const m of movements.values()) {
-    if (CASH_CODES.includes(m.code)) continue;
+    if (cashList.includes(m.code)) continue;
     if (m.movement === 0n) continue; // nothing moved, nothing to say
     const bucket = CLASSIFICATION[m.code];
     if (!bucket) { unclassified.push(m); continue; }

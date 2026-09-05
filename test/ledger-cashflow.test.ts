@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { post } from "@/lib/server/ledger/post";
 import { profitAndLoss } from "@/lib/server/ledger/statements";
-import { cashFlowStatement, CLASSIFICATION, CASH_CODES } from "@/lib/server/ledger/cashflow";
+import { cashFlowStatement, CLASSIFICATION } from "@/lib/server/ledger/cashflow";
+import { cashCodesFrom, NEVER_CASH } from "@/lib/server/ledger/cash";
 import { openBooks, openFiscalYear, UAE_CHART } from "@/lib/server/ledger/setup";
 
 const db = new PrismaClient();
@@ -274,7 +275,9 @@ describe("the classification map against the chart", () => {
     // the revaluation surplus, the leave provision — went unclassified, and an
     // unclassified movement is reported as a warning and left out of the
     // statement. This test is what stops it happening again.
-    const cash = new Set(CASH_CODES);
+    // The chart's own answer, not a hand-kept list — so this covers exactly
+    // what the statement will treat as non-cash and therefore have to classify.
+    const cash = new Set(cashCodesFrom(UAE_CHART));
     const missing = UAE_CHART
       .filter((a) => a.isPostable !== false)
       .filter((a) => ["ASSET", "LIABILITY", "EQUITY"].includes(a.type))
@@ -297,33 +300,39 @@ describe("the classification map against the chart", () => {
 });
 
 describe("what counts as cash", () => {
-  it("keeps post-dated cheques out of cash and cash equivalents", async () => {
+  it("keeps post-dated cheques out of cash and cash equivalents", () => {
     // A cheque dated ninety days out is a promise, not money. IAS 7.7 wants an
     // insignificant risk of a change in value and a post-dated cheque is
     // nothing but that risk — it can bounce, and the whole cheque subledger
-    // exists because it can. Three modules keep their own cash list, and if
-    // any of them ever picks 1060 up the balance sheet will quietly start
-    // reporting paper as cash again.
-    const forecast = await import("@/lib/server/ledger/forecast");
-    const equity = await import("@/lib/server/ledger/equity");
-    const src = [
-      await import("node:fs").then((fs) =>
-        ["cashflow", "forecast", "equity"].map((m) =>
-          fs.readFileSync(`src/lib/server/ledger/${m}.ts`, "utf8"),
-        ),
-      ),
-    ].flat();
+    // exists because it can.
+    expect(cashCodesFrom(UAE_CHART)).not.toContain("1060");
 
-    expect(CASH_CODES).not.toContain("1060");
-    for (const text of src) {
-      const line = text.split("\n").find((l) => l.includes("CASH_CODES") && l.includes("1000"));
-      expect(line, "each module states its own cash list on one line").toBeTruthy();
-      expect(line).not.toContain("1060");
+    // And the carve-out has to beat the subtype, because the subtype is
+    // editable. Somebody tidying the chart who marks 1060 as a bank account
+    // must not thereby move ninety-day paper into cash on the balance sheet.
+    expect(NEVER_CASH.has("1060")).toBe(true);
+    expect(cashCodesFrom([{ code: "1060", subtype: "BANK" }])).not.toContain("1060");
+  });
+
+  it("leaves no module keeping a cash list of its own", async () => {
+    // Five modules used to declare the same four codes and two more imported
+    // one of those copies. The copies were the defect: money lands in accounts
+    // outside the seeded four — petty cash takes a free-text account — and a
+    // module reading a stale list understates cash in silence. There is one
+    // answer now, derived from the chart, and this is what stops a sixth copy
+    // appearing.
+    const fs = await import("node:fs");
+    const dir = "src/lib/server/ledger";
+    const offenders: string[] = [];
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".ts") || f === "cash.ts") continue;
+      const text = fs.readFileSync(`${dir}/${f}`, "utf8");
+      for (const line of text.split("\n")) {
+        if (line.trimStart().startsWith("*") || line.trimStart().startsWith("//")) continue;
+        if (line.includes('"1000"') && line.includes('"1010"')) offenders.push(`${f}: ${line.trim()}`);
+      }
     }
-    // The imports are what make the failure land here rather than at runtime:
-    // a module that stops existing should break this test, not a screen.
-    expect(typeof forecast).toBe("object");
-    expect(typeof equity).toBe("object");
+    expect(offenders, "these should call cashCodes() instead").toEqual([]);
   });
 
   it("classifies both cheque accounts as operating working capital", () => {

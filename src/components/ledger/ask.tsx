@@ -36,10 +36,20 @@ export interface AskOptions {
   reason?: {
     label: string;
     placeholder?: string;
-    /** Below this many non-blank characters the confirm stays disabled. */
+    /**
+     * Below this many non-blank characters the confirm stays disabled.
+     * Defaults to 4. Zero means the field may be left empty — which some call
+     * sites genuinely want: putting a bill back into a payment run takes a
+     * note if there is one to give and does not need one invented.
+     */
     minLength?: number;
     /** Why it is being asked, in one line under the field. */
     hint?: string;
+    /**
+     * A single line rather than a box. Right for a name or an amount, which
+     * are not prose and should not offer three lines of room for one.
+     */
+    single?: boolean;
   };
   confirmLabel?: string;
   cancelLabel?: string;
@@ -75,7 +85,6 @@ export function AskProvider({ children }: { children: React.ReactNode }) {
       {children}
       {pending && (
         <AskDialog
-          key={pending.title}
           options={pending}
           onDone={(value) => { pending.resolve(value); setPending(null); }}
         />
@@ -86,13 +95,14 @@ export function AskProvider({ children }: { children: React.ReactNode }) {
 
 function AskDialog({ options, onDone }: { options: AskOptions; onDone: (v: string | null) => void }) {
   const [value, setValue] = React.useState("");
-  const fieldRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const fieldRef = React.useRef<HTMLTextAreaElement | HTMLInputElement | null>(null);
   const confirmRef = React.useRef<HTMLButtonElement | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   const opener = React.useRef<HTMLElement | null>(null);
 
   const min = options.reason?.minLength ?? 4;
   const enough = !options.reason || value.trim().length >= min;
+  const single = options.reason?.single === true;
 
   React.useEffect(() => {
     opener.current = document.activeElement as HTMLElement | null;
@@ -142,18 +152,31 @@ function AskDialog({ options, onDone }: { options: AskOptions; onDone: (v: strin
         {options.reason && (
           <label className="sw-ask-field">
             <span className="sw-label">{options.reason.label}</span>
-            <textarea
-              ref={fieldRef}
-              className="sw-input sw-ask-input"
-              rows={3}
-              value={value}
-              placeholder={options.reason.placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              aria-describedby="sw-ask-hint"
-            />
+            {single ? (
+              <input
+                ref={fieldRef as React.RefObject<HTMLInputElement>}
+                className="sw-input mt-1 w-full"
+                value={value}
+                placeholder={options.reason.placeholder}
+                onChange={(e) => setValue(e.target.value)}
+                aria-describedby="sw-ask-hint"
+              />
+            ) : (
+              <textarea
+                ref={fieldRef as React.RefObject<HTMLTextAreaElement>}
+                className="sw-input sw-ask-input"
+                rows={3}
+                value={value}
+                placeholder={options.reason.placeholder}
+                onChange={(e) => setValue(e.target.value)}
+                aria-describedby="sw-ask-hint"
+              />
+            )}
             <span id="sw-ask-hint" className="sw-sub">
               {options.reason.hint ??
-                `At least ${min} characters. Whoever reads this record later has only what is written here.`}
+                (min === 0
+                  ? "Optional. Whoever reads this record later has only what is written here."
+                  : `At least ${min} characters. Whoever reads this record later has only what is written here.`)}
             </span>
           </label>
         )}

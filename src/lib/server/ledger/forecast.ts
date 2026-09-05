@@ -3,6 +3,7 @@ import { LedgerError } from "./post";
 import { receivablesAgeing, type OpenItem } from "./ar";
 import { payablesAgeing } from "./ap";
 import { templateStatus, parseTemplateLines, templateTotal } from "./recurring";
+import { cashCodes } from "./cash";
 
 /**
  * A cash flow forecast.
@@ -301,11 +302,15 @@ const recurringOut: Source = {
   key: "recurring",
   async run({ orgId, entityId, from, to }) {
     const status = await templateStatus({ orgId, entityId, asOf: iso(from).slice(0, 7) });
+    // A template posting to a bank account this chart calls cash but the four
+    // seeded codes do not was previously read as an accrual and forecast as no
+    // movement at all — the one failure mode a cash forecast cannot have.
+    const cashList = new Set(await cashCodes({ orgId, entityId }));
     const out: ForecastLine[] = [];
 
     for (const t of status.templates) {
       if (t.status !== "active" || !t.lines) continue;
-      const cash = t.lines.filter((l) => CASH_CODES.has(l.account));
+      const cash = t.lines.filter((l) => cashList.has(l.account));
       if (!cash.length) continue;
       // Only the cash side matters to a forecast: an accrual moves no money.
       const amount = cash.reduce((a, l) => a + BigInt(l.debit ?? 0) - BigInt(l.credit ?? 0), 0n);
@@ -373,8 +378,6 @@ const vatOut: Source = {
   },
 };
 
-/** Cash and bank codes in the standard chart, for reading a template's lines. */
-const CASH_CODES = new Set(["1000", "1010", "1020", "1050"]);
 
 const SOURCES: Source[] = [receivablesIn, payablesOut, paymentRunsOut, recurringOut, vatOut];
 

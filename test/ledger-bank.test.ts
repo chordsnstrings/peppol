@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { post } from "@/lib/server/ledger/post";
+import { post, reverse } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import {
   importStatement, suggestMatches, confirmMatch, unmatch, postFromBankLine, reconcile, fingerprintOf,
@@ -227,5 +227,69 @@ d("bank reconciliation", () => {
     expect(rec.statementBalanceMinor).toBeNull();
     expect(rec.reconciled).toBe(false); // unproven, not proven wrong
     expect(rec.differenceMinor).toBe("0");
+  });
+
+  it("lists the pairs already matched, so a wrong match can be seen at all", async () => {
+    const e = await P("2026-10-05", [{ account: "1010", debit: 12_000 }, { account: "4000", credit: 12_000 }], "Deposit");
+    await imp([{ postedOn: "2026-10-05", description: "Deposit", amountMinor: 12_000 }]);
+    const b = await db.bankStatementLine.findFirst({ where: { orgId: ORG } });
+    const j = await db.journalLine.findFirst({ where: { entryId: e.id, account: { code: "1010" } } });
+    await confirmMatch({ orgId: ORG, bankLineId: b!.id, journalLineId: j!.id });
+
+    const rec = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf: new Date("2026-10-31") });
+    expect(rec.matched).toHaveLength(1);
+    expect(rec.matched[0]).toMatchObject({
+      bankLineId: b!.id,
+      description: "Deposit",
+      amountMinor: "12000",
+      reference: `${e.series}-${e.number}`,
+      entryStatus: "posted",
+      reversedBy: null,
+    });
+    // A matched line belongs on neither open list — it is explained.
+    expect(rec.unmatchedBank.map((x) => x.id)).not.toContain(b!.id);
+    expect(rec.unmatchedLedger.map((x) => x.id)).not.toContain(j!.id);
+  });
+
+  it("names the reversal when a matched posting has been undone, and unmatch clears it", async () => {
+    const e = await P("2026-10-10", [{ account: "1010", debit: 8_000 }, { account: "4900", credit: 8_000 }], "Booked to the wrong account");
+    await imp([{ postedOn: "2026-10-10", description: "Transfer in", amountMinor: 8_000 }]);
+    const b = await db.bankStatementLine.findFirst({ where: { orgId: ORG } });
+    const j = await db.journalLine.findFirst({ where: { entryId: e.id, account: { code: "1010" } } });
+    await confirmMatch({ orgId: ORG, bankLineId: b!.id, journalLineId: j!.id });
+
+    // Reversing does not touch the match, so the statement line is left
+    // pointing at an entry that has been undone.
+    const rev = await reverse({ orgId: ORG, entryId: e.id });
+
+    const rec = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf: new Date("2026-10-31") });
+    const pair = rec.matched.find((m) => m.bankLineId === b!.id)!;
+    expect(pair.entryStatus).toBe("reversed");
+    expect(pair.reversedBy).toBe(`${rev.series}-${rev.number}`);
+
+    // And the reversal's own bank line is an outstanding item that can never
+    // clear, because the bank never saw either half of the pair.
+    const phantom = rec.unmatchedLedger.filter((l) => l.reference === `${rev.series}-${rev.number}`);
+    expect(phantom).toHaveLength(1);
+    expect(phantom[0].amountMinor).toBe("-8000");
+
+    await unmatch({ orgId: ORG, bankLineId: b!.id });
+    const after = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf: new Date("2026-10-31") });
+    expect(after.matched).toHaveLength(0);
+    expect(after.unmatchedBank.map((x) => x.description)).toContain("Transfer in");
+  });
+
+  it("refuses to book a bank line twice rather than handing back the first entry", async () => {
+    await imp([{ postedOn: "2026-11-02", description: "Card fee", amountMinor: -1_200 }]);
+    const b = await db.bankStatementLine.findFirst({ where: { orgId: ORG } });
+    const first = await postFromBankLine({ orgId: ORG, entityId: ENT, bankLineId: b!.id, contraAccount: "6350" });
+    await unmatch({ orgId: ORG, bankLineId: b!.id });
+
+    // post() is idempotent on its externalKey, so without an explicit refusal
+    // a second attempt with a different contra account would silently return
+    // the first entry and re-match to it — the wrong posting, reported as a
+    // success.
+    await expect(postFromBankLine({ orgId: ORG, entityId: ENT, bankLineId: b!.id, contraAccount: "6900" }))
+      .rejects.toThrow(new RegExp(`already booked as ${first.reference}`));
   });
 });

@@ -103,6 +103,21 @@ const MONETARY_SUBTYPES = new Set([
   "CASH", "BANK", "AR", "AP",
   "VAT_INPUT", "VAT_OUTPUT", "VAT_RECEIVABLE", "VAT_PAYABLE",
   "PAYROLL", "EOSB", "CT_PAYABLE",
+  // A provision is an obligation to hand over a determinable number of units of
+  // currency at an uncertain date (IAS 37.10). The date is what is uncertain,
+  // not the currency — which is why the end-of-service provision above has
+  // always been monetary, and these two are the same kind of thing.
+  "PROVISION", "LEAVE_PROVISION",
+  // A contract asset is consideration already earned and not yet invoiced. The
+  // amount is set by the contract and becomes a trade receivable the day it is
+  // billed; retranslating the receivable but not the contract asset would put a
+  // step in profit or loss on the invoicing date that no exchange rate caused.
+  "CONTRACT_ASSET",
+  // Deferred tax is a right to pay, or an obligation to pay, an amount of tax
+  // that is determined in currency (IAS 12.5). In this product it is always
+  // measured in the tax currency, so a foreign balance should not arise — but
+  // the map has to say what it is rather than fall through to a refusal.
+  "DEFERRED_TAX_ASSET", "DEFERRED_TAX_LIABILITY",
 ]);
 
 const NON_MONETARY_SUBTYPES = new Map<string, string>([
@@ -111,6 +126,10 @@ const NON_MONETARY_SUBTYPES = new Map<string, string>([
   ["ACCUM_DEP", "accumulated depreciation follows the asset it is written against, which is non-monetary"],
   ["CWIP", "capital work in progress is non-monetary — it becomes an asset, never a receipt of currency"],
   ["GRNI", "goods received not invoiced measures stock on hand rather than a claim to currency; the obligation to pay for it sits in payables and is revalued there"],
+  ["INTANGIBLE", "an intangible asset is non-monetary and stays at its historical rate (IAS 21.23(b), IAS 38)"],
+  ["ACCUM_AMORT", "accumulated amortisation follows the intangible it is written against, which is non-monetary"],
+  ["WIP", "work in progress is unbilled cost, not a claim to currency — it is the service business's inventory, and IAS 21.23(b) leaves it at the rate the cost was incurred at"],
+  ["CONTRACT_LIABILITY", "a contract liability is consideration already received; the obligation is to deliver goods or services, not currency, and IFRIC 22 fixes it at the receipt-date rate"],
 ]);
 
 /**
@@ -121,7 +140,23 @@ const NON_MONETARY_SUBTYPES = new Map<string, string>([
 // it was split out of. Leaving it out would retranslate a foreign-currency
 // loan's long-term half and not its short-term half, which is worse than
 // retranslating neither.
-const MONETARY_CODES = new Set(["1150", "1400", "2050", "2060", "2450", "2500", "2600"]);
+// 1060 is the mirror of 2060 and was missing from this list while 2060 was in
+// it: a foreign-currency cheque the entity WRITES got an unrealised difference
+// under IAS 21.23 and the identical cheque it HOLDS was skipped, so profit or
+// loss was understated by the difference on held cheques. A cheque is a claim
+// to a fixed number of units of the currency written on it whichever way it
+// points.
+//
+// 1255 and 2470 are the trade finance pair. A margin deposit is restricted, not
+// non-monetary — the restriction is why IAS 7.48 keeps it out of cash, and it
+// has no bearing on IAS 21.16, which asks only whether the entity has a right
+// to a determinable number of units of currency. A trust receipt is a
+// borrowing. (Today no trade finance posting carries a currency on its lines,
+// so neither reaches this classifier at all; that is a separate gap, and the
+// map should be right for the day it closes.)
+const MONETARY_CODES = new Set([
+  "1060", "1150", "1255", "1400", "2050", "2060", "2450", "2470", "2500", "2600",
+]);
 
 const NON_MONETARY_CODES = new Map<string, string>([
   ["1300", "a prepayment is a right to goods or services, not to currency — IFRIC 22 fixes it at the rate on the date it was paid"],
@@ -131,7 +166,17 @@ const NON_MONETARY_CODES = new Map<string, string>([
 
 type Classification = { monetary: true } | { monetary: false; reason: string };
 
-function classify(account: { code: string; type: string; subtype: string | null }): Classification {
+/**
+ * Exported so a test can hold the map against the chart. The map was written
+ * once and the chart kept growing — intangibles, amortisation, contract
+ * balances and the leave provision were all added later and none of them was
+ * classified, and 1060 was missing while its 2060 mirror was present. An
+ * account this cannot decide is skipped, which understates profit or loss by
+ * the whole of its unrealised difference and says so only in a note nobody
+ * reads twice. A map that has to be remembered goes stale; a test that fails
+ * when the chart gains an account does not.
+ */
+export function classify(account: { code: string; type: string; subtype?: string | null }): Classification {
   if (account.subtype && MONETARY_SUBTYPES.has(account.subtype)) return { monetary: true };
   if (account.subtype && NON_MONETARY_SUBTYPES.has(account.subtype)) {
     return { monetary: false, reason: NON_MONETARY_SUBTYPES.get(account.subtype)! };
@@ -154,7 +199,9 @@ function classify(account: { code: string; type: string; subtype: string | null 
   // afterwards because the ledger would still balance.
   return {
     monetary: false,
-    reason: `this account carries no subtype, so whether it is monetary cannot be decided from the chart. Give it a subtype (IAS 21.8: a monetary item is a right to receive, or an obligation to deliver, a determinable number of units of currency) and run the revaluation again`,
+    reason: account.subtype
+      ? `this account's subtype ${account.subtype} is not classified as monetary or non-monetary, so whether it is monetary cannot be decided from the chart. Classify the subtype (IAS 21.8: a monetary item is a right to receive, or an obligation to deliver, a determinable number of units of currency) and run the revaluation again`
+      : `this account carries no subtype, so whether it is monetary cannot be decided from the chart. Give it a subtype (IAS 21.8: a monetary item is a right to receive, or an obligation to deliver, a determinable number of units of currency) and run the revaluation again`,
   };
 }
 

@@ -4,10 +4,10 @@ import {
   issueFacility, drawFacility, settleFacility, closeFacility,
   contingentLiabilities, facilityRegister, isOwnExposure, KINDS,
 } from "@/lib/server/ledger/trade-finance";
-import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { openBooks, openFiscalYear, UAE_CHART } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 import { ledgerBalances } from "@/lib/server/ledger/balances";
-import { CASH_CODES } from "@/lib/server/ledger/cashflow";
+import { cashCodesFrom, NEVER_CASH } from "@/lib/server/ledger/cash";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -64,7 +64,10 @@ describe("restricted cash is not cash", () => {
     // Money the bank is holding against a promise cannot be spent. Reporting
     // it as cash tells a reader the business has liquidity it does not have —
     // the same error as counting a post-dated cheque.
-    expect(CASH_CODES).not.toContain("1255");
+    expect(cashCodesFrom(UAE_CHART)).not.toContain("1255");
+    // Restricted means restricted whatever the chart is later edited to say.
+    expect(NEVER_CASH.has("1255")).toBe(true);
+    expect(cashCodesFrom([{ code: "1255", subtype: "BANK" }])).not.toContain("1255");
   });
 });
 

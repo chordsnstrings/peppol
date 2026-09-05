@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { LedgerError } from "./post";
-import { cashFlowStatement, CASH_CODES } from "./cashflow";
+import { cashFlowStatement } from "./cashflow";
+import { cashCodes } from "./cash";
 
 /**
  * The cash flow statement by the direct method.
@@ -42,8 +43,6 @@ import { cashFlowStatement, CASH_CODES } from "./cashflow";
  * from the ledger. Anything else is left visible as a difference, never
  * absorbed into a balancing line.
  */
-
-const CASH = new Set(CASH_CODES);
 
 /** What a receipt or payment was for. Ordered as IAS 7.18(a) lists them. */
 export type DirectLine =
@@ -202,6 +201,11 @@ export async function directCashFlow(opts: {
     },
     include: { account: { select: { code: true } }, entry: { select: { id: true } } },
   });
+
+  // What counts as cash here has to be the same answer the indirect statement
+  // gets, or the two reconcile against different totals and the difference is
+  // reported as an attribution failure rather than as the disagreement it is.
+  const CASH = new Set(await cashCodes({ orgId: opts.orgId, entityId: opts.entityId }));
 
   const byEntry = new Map<string, { cash: bigint; contra: { code: string; amount: bigint }[] }>();
   for (const l of lines) {

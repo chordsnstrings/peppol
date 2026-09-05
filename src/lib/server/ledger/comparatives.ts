@@ -3,7 +3,7 @@ import { LedgerError } from "./post";
 import { balanceSheet, balances, profitAndLoss, type StatementSection } from "./statements";
 import { asPercent, asTimes, financialKpis, type Kpi } from "./kpi";
 import { renderLayout, type Coverage, type LayoutInput, type RowKind } from "./layouts";
-import { CASH_CODES } from "./cashflow";
+import { cashCodes } from "./cash";
 
 /**
  * Comparatives: the same statement against something.
@@ -986,6 +986,10 @@ export async function trend(opts: {
     return { start, end, partial: end < monthEnd };
   });
 
+  // Read once for the whole series rather than once per month: the chart does
+  // not change between January and December of the same run.
+  const cashList = new Set(await cashCodes({ orgId: opts.orgId, entityId: opts.entityId }));
+
   const rows = await Promise.all(
     spans.map(async (span) => {
       const [pl, cash] = await Promise.all([
@@ -997,12 +1001,13 @@ export async function trend(opts: {
         }),
         // Cash is a balance at a moment, not a movement over the month, so it
         // comes from `balances` at the month end rather than from the period's
-        // own postings. The codes are the cash-flow module's own list, so the
-        // two screens cannot disagree about what counts as cash.
+        // own postings. What counts as cash is derived from the chart by the
+        // one helper every module uses, so the trend line and the cash flow
+        // statement cannot disagree about it.
         balances({ orgId: opts.orgId, entityId: opts.entityId, to: span.end }),
       ]);
       const cashMinor = cash.rows
-        .filter((r) => CASH_CODES.includes(r.code))
+        .filter((r) => cashList.has(r.code))
         .reduce((a, r) => a + r.balance, 0n);
       return { span, pl, cashMinor };
     }),

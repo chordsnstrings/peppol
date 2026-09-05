@@ -55,7 +55,9 @@ export async function cashCodes(opts: { orgId: string; entityId: string }): Prom
 
 /** The same answer from accounts the caller already has. */
 export function cashCodesFrom(
-  accounts: { code: string; subtype: string | null }[],
+  // `undefined` as well as `null`, so the seeded chart — where an account
+  // simply omits the field — can be passed straight in.
+  accounts: { code: string; subtype?: string | null }[],
 ): string[] {
   const out = new Set<string>();
   for (const a of accounts) {

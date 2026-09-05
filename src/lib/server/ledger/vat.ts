@@ -573,7 +573,9 @@ export async function vatReturn(opts: {
       `${unattributedSupplies} of standard-rated supplies, bearing ${unattributedOutputVat} of output tax, carry ` +
         `no emirate and are on none of the seven rows of box 1. The VAT 201 splits box 1 between the emirates ` +
         `because the tax is distributed between them on that basis, so this has to be attributed to one of them ` +
-        `before the return is filed. It has not been spread across the others.`,
+        `before the return is filed. It has not been spread across the others. The emirate is taken from the ` +
+        `selling establishment's address when an invoice posts — set it in the entity's settings and supplies ` +
+        `raised from then on carry it.`,
     );
   }
   if (unrecognisedEmirates.size) {

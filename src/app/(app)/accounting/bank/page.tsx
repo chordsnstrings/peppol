@@ -4,6 +4,8 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { Attachments } from "@/components/ledger/attachments";
+import { useAsk } from "@/components/ledger/ask";
 import { fmtMinor, toInput } from "@/lib/ledger/format";
 
 interface Statement {
@@ -13,6 +15,12 @@ interface Statement {
   reconciledBalanceMinor: string; reconciled: boolean; differenceMinor: string;
   unmatchedBank: { id: string; postedOn: string; description: string; amountMinor: string }[];
   unmatchedLedger: { id: string; reference: string; entryDate: string; memo: string | null; amountMinor: string }[];
+  matched: MatchedPair[];
+}
+interface MatchedPair {
+  bankLineId: string; postedOn: string; description: string; amountMinor: string;
+  matchedAt: string | null; journalLineId: string | null; reference: string | null;
+  entryDate: string | null; memo: string | null; entryStatus: string | null; reversedBy: string | null;
 }
 interface Suggestion {
   bankLineId: string; journalLineId: string; entryReference: string; entryMemo: string | null;
@@ -28,11 +36,19 @@ interface Suggestion {
  */
 export default function BankPage() {
   const entityId = useEntityId();
+  const ask = useAsk();
   const [account] = React.useState("1010");
   const [paste, setPaste] = React.useState("");
   const [busy, setBusy] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [note, setNote] = React.useState<string | null>(null);
+  /**
+   * Which statement line's documents are open. One at a time and below the
+   * tables rather than expanded inside them: the list read is cheap, but the
+   * point of keeping metadata and bytes apart is lost if forty rows each fetch
+   * on sight.
+   */
+  const [docsFor, setDocsFor] = React.useState<{ id: string; description: string } | null>(null);
 
   const q = useLedgerQuery<{ statement: Statement; suggestions: Suggestion[] }>(
     entityId ? `/api/ledger/bank?entityId=${entityId}&account=${account}` : null,
@@ -110,6 +126,33 @@ export default function BankPage() {
       setBusy(null);
     }
   };
+
+  /**
+   * Undo a match.
+   *
+   * The arithmetic never depended on it — matching forces equal amounts — so
+   * what a wrong match damages is the itemisation: the outstanding-cheque
+   * working paper naming the wrong cheque. Until the matched lines were listed
+   * there was nothing on the page to correct.
+   */
+  const doUnmatch = async (m: MatchedPair) => {
+    const answer = await ask({
+      title: `Unmatch ${m.description}?`,
+      detail: m.reversedBy
+        ? `This statement line is matched to ${m.reference}, which has been reversed by ${m.reversedBy}. Unmatching ` +
+          `puts it back on the list of items to explain. ${m.reversedBy} has a bank line of its own that will stay ` +
+          `outstanding until the pair is matched to whichever posting is now correct.`
+        : `This statement line is matched to ${m.reference ?? "a posting"}. Unmatching does not touch the posting — it ` +
+          `withdraws only the statement that the two are the same event, and both go back on the lists above.`,
+      confirmLabel: "Unmatch",
+    });
+    if (answer === null) return;
+    const r = await act(m.bankLineId, { action: "unmatch", bankLineId: m.bankLineId });
+    if (r) setNote(`Unmatched ${m.description}. It is back on the list of statement lines to explain.`);
+  };
+
+  const toggleDocs = (id: string, description: string) =>
+    setDocsFor((d) => (d?.id === id ? null : { id, description }));
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
   const st = q.data?.statement;
@@ -257,11 +300,14 @@ export default function BankPage() {
                       <th>Description</th>
                       <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
                       <th style={{ width: "10rem" }}><span className="sr-only">Post</span></th>
+                      <th style={{ width: "6.5rem" }}><span className="sr-only">Documents</span></th>
                     </tr>
                   </thead>
                   <tbody>
                     {st.unmatchedBank.map((b) => (
                       <BankRow key={b.id} line={b} busy={busy === b.id}
+                        docsOpen={docsFor?.id === b.id}
+                        onDocs={() => toggleDocs(b.id, b.description)}
                         onPost={(contra) => act(b.id, { action: "post", bankLineId: b.id, contraAccount: contra })} />
                     ))}
                   </tbody>
@@ -306,6 +352,103 @@ export default function BankPage() {
           </Panel>
         </div>
       )}
+
+      {st && (
+        <Panel className="mt-4 overflow-hidden">
+          <Head>Matched — and how to unpick one</Head>
+          {st.matched.length === 0 ? (
+            <div className="p-3"><Empty>Nothing has been matched on this account yet.</Empty></div>
+          ) : (
+            <div className="sw-scroll">
+              <table className="sw-table">
+                <caption className="sr-only">Statement lines matched to postings, with the match that can be undone</caption>
+                <thead>
+                  <tr>
+                    <th style={{ width: "7rem" }}>Date</th>
+                    <th>Statement line</th>
+                    <th style={{ width: "8rem" }}>Posting</th>
+                    <th>Description</th>
+                    <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
+                    <th style={{ width: "13rem" }}><span className="sr-only">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody data-testid="matched-rows">
+                  {st.matched.map((m) => (
+                    <tr key={m.bankLineId}>
+                      <td>{m.postedOn}</td>
+                      <td className="max-w-0 truncate">{m.description}</td>
+                      <td className="sw-code">
+                        {m.reference ?? <span className="sw-zero">–</span>}
+                        {m.reversedBy && <span className="sw-chip sw-chip-bad ms-1">reversed</span>}
+                      </td>
+                      <td className="max-w-0 truncate">
+                        {m.reversedBy ? (
+                          // The one case where a matched line is not a settled
+                          // one: the posting behind it has been undone, and the
+                          // reversal's own bank line is sitting in "in our
+                          // books, not on the statement" where it will never
+                          // clear, because the bank saw neither half.
+                          <span style={{ color: "var(--sw-neg)" }}>
+                            {m.reference} was reversed by {m.reversedBy}. Unmatch this line and match it to the
+                            posting that is now right, or the reversal stays outstanding for good.
+                          </span>
+                        ) : (
+                          m.memo ?? <span className="sw-zero">–</span>
+                        )}
+                      </td>
+                      <td className="sw-num"><Figure minor={m.amountMinor} /></td>
+                      <td>
+                        <span className="flex flex-wrap items-center gap-1 py-1">
+                          <button
+                            type="button"
+                            className="sw-btn sw-btn-sm"
+                            disabled={busy === m.bankLineId}
+                            aria-disabled={busy === m.bankLineId || undefined}
+                            onClick={() => doUnmatch(m)}
+                          >
+                            <span aria-hidden="true">{busy === m.bankLineId ? "…" : "Unmatch"}</span>
+                            <span className="sr-only">{`Unmatch ${m.description}`}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="sw-btn sw-btn-sm"
+                            aria-expanded={docsFor?.id === m.bankLineId}
+                            onClick={() => toggleDocs(m.bankLineId, m.description)}
+                          >
+                            <span aria-hidden="true">Documents</span>
+                            <span className="sr-only">{`Documents for ${m.description}`}</span>
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }}>
+            A match is a statement that two records describe the same event, and unmatching withdraws only that —
+            the posting stays exactly as it was. Booking a line to the wrong account is a different mistake:
+            unmatch it, reverse the entry from the{" "}
+            <Link href="/accounting/journals" className="sw-link">journal register</Link>, then post the correction
+            as a journal and match this line to it. The same line cannot be booked from here twice, because the
+            second attempt would hand back the first entry rather than a new one.
+          </p>
+        </Panel>
+      )}
+
+      {docsFor && (
+        <Panel className="mt-4 overflow-hidden">
+          <Head>Documents — {docsFor.description}</Head>
+          <Attachments
+            subjectType="BANK_LINE"
+            subjectId={docsFor.id}
+            entityId={entityId}
+            title={`Attached to the statement line of ${docsFor.description}`}
+            note="The bank's advice or letter behind this line. A charge nobody can explain a year later is explained by the document that came with it, not by the memo somebody typed."
+          />
+        </Panel>
+      )}
     </>
   );
 }
@@ -319,9 +462,11 @@ const CONTRAS = [
   { code: "6100", label: "Rent" },
 ];
 
-function BankRow({ line, busy, onPost }: {
+function BankRow({ line, busy, docsOpen, onDocs, onPost }: {
   line: { id: string; postedOn: string; description: string; amountMinor: string };
   busy: boolean;
+  docsOpen: boolean;
+  onDocs: () => void;
   onPost: (contra: string) => void;
 }) {
   const [contra, setContra] = React.useState("");
@@ -352,6 +497,17 @@ function BankRow({ line, busy, onPost }: {
             {busy ? "…" : "Post"}
           </button>
         </span>
+      </td>
+      <td>
+        <button
+          type="button"
+          className="sw-btn sw-btn-sm"
+          aria-expanded={docsOpen}
+          onClick={onDocs}
+        >
+          <span aria-hidden="true">Documents</span>
+          <span className="sr-only">{`Documents for ${line.description}`}</span>
+        </button>
       </td>
     </tr>
   );

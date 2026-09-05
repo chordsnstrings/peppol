@@ -115,7 +115,12 @@ export default function PettyCashPage() {
         reason: {
           label: "Amount",
           placeholder: "250.00",
-          hint: `In ${f.currency}, written with the fils: 250.00, not 250. It cannot be more than the cash actually in the tin.`,
+          // An amount is one line, not three, and "50" is a legitimate answer —
+          // so the four-character floor that suits a written reason is wrong
+          // here. What the amount has to be is checked below, where it is read.
+          single: true,
+          minLength: 1,
+          hint: `In ${f.currency}. Arithmetic is read, so 100+150 is fine. It cannot be more than the cash actually in the tin.`,
         },
         confirmLabel: "Post the return",
       });
