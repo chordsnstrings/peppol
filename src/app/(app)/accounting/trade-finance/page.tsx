@@ -26,6 +26,8 @@ interface Register {
 }
 interface Note {
   asOf: string;
+  /** Every figure in the note is in this currency, whatever the facilities are in. */
+  functionalCurrency: string;
   byKind: { kind: string; label: string; count: number; facedMinor: string; drawnMinor: string; contingentMinor: string }[];
   totalFacedMinor: string;
   totalDrawnMinor: string;
@@ -33,6 +35,7 @@ interface Note {
   heldInFavourMinor: string;
   restrictedCash: { marginMinor: string; ledgerMinor: string; agrees: boolean; differenceMinor: string };
   expiringWithin90Days: { reference: string; kind: string; expiresOn: string; contingentMinor: string }[];
+  untranslated: { reference: string; currency: string; reason: string }[];
   statement: string;
   basis: string;
 }
@@ -82,6 +85,11 @@ export default function TradeFinancePage() {
   };
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
+
+  // Bound once rather than read through `note` at each use: the figures below
+  // are rendered inside callbacks, and a property read is not narrowed by the
+  // guard around them.
+  const disclosure = note.data;
 
   return (
     <>
@@ -185,6 +193,11 @@ export default function TradeFinancePage() {
                           <th style={{ width: "9rem" }}>Reference</th>
                           <th style={{ width: "12rem" }}>Kind</th>
                           <th>Bank and beneficiary</th>
+                          {/* The figures on the row are in the facility's own
+                              currency rather than the entity's, and a facility
+                              in one with three decimal places reads as ten
+                              times itself if the column does not say so. */}
+                          <th style={{ width: "5rem" }}>Currency</th>
                           <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Face</th>
                           <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Margin</th>
                           <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Drawn</th>
@@ -207,10 +220,11 @@ export default function TradeFinancePage() {
                                 {f.bank}
                                 <span className="sw-sub"> — {f.beneficiary}</span>
                               </td>
-                              <td className="sw-num"><Figure minor={f.amountMinor} colour={false} /></td>
-                              <td className="sw-num"><Figure minor={f.marginMinor} colour={false} /></td>
-                              <td className="sw-num"><Figure minor={f.drawnMinor} colour={false} /></td>
-                              <td className="sw-num"><Figure minor={f.owedToBankMinor} colour={false} /></td>
+                              <td className="sw-code">{f.currency}</td>
+                              <td className="sw-num"><Figure minor={f.amountMinor} currency={f.currency} colour={false} /></td>
+                              <td className="sw-num"><Figure minor={f.marginMinor} currency={f.currency} colour={false} /></td>
+                              <td className="sw-num"><Figure minor={f.drawnMinor} currency={f.currency} colour={false} /></td>
+                              <td className="sw-num"><Figure minor={f.owedToBankMinor} currency={f.currency} colour={false} /></td>
                               <td>
                                 {f.expiresOn}
                                 {f.expired && <span className="sw-chip sw-chip-bad ml-1.5">lapsed</span>}
@@ -300,7 +314,7 @@ export default function TradeFinancePage() {
                             </tr>
                             {closing === f.reference && (
                               <tr>
-                                <td colSpan={10} style={{ background: "var(--sw-ground)" }}>
+                                <td colSpan={11} style={{ background: "var(--sw-ground)" }}>
                                   <CloseFacility
                                     reference={f.reference}
                                     expiresOn={f.expiresOn}
@@ -330,7 +344,7 @@ export default function TradeFinancePage() {
                             )}
                             {open === f.reference && (
                               <tr>
-                                <td colSpan={10} style={{ background: "var(--sw-ground)" }}>
+                                <td colSpan={11} style={{ background: "var(--sw-ground)" }}>
                                   <table className="sw-table" style={{ maxWidth: "50rem", margin: "0.5rem" }}>
                                     <caption className="sr-only">What happened to {f.reference}</caption>
                                     <thead>
@@ -346,7 +360,7 @@ export default function TradeFinancePage() {
                                         <tr key={`${e.kind}:${e.happenedOn}:${i}`}>
                                           <td>{e.happenedOn}</td>
                                           <td>{e.kind}</td>
-                                          <td className="sw-num"><Figure minor={e.amountMinor} colour={false} /></td>
+                                          <td className="sw-num"><Figure minor={e.amountMinor} currency={f.currency} colour={false} /></td>
                                           <td className="sw-sub">{e.memo ?? (e.entryId ? "posted" : "not posted")}</td>
                                         </tr>
                                       ))}
@@ -377,33 +391,63 @@ export default function TradeFinancePage() {
       {tab === "note" && (
         <>
           {note.error && <ErrorNote>{note.error}</ErrorNote>}
-          {note.loading && !note.data && <Loading />}
-          {note.data && (
+          {note.loading && !disclosure && <Loading />}
+          {disclosure && (
             <>
               <Panel className="mb-4 p-4">
                 <dl className="grid gap-4 sm:grid-cols-3">
                   <div>
                     <dt className="sw-label">Given, at face</dt>
-                    <dd className="sw-num mt-1 text-lg"><Figure minor={note.data.totalFacedMinor} colour={false} /></dd>
+                    <dd className="sw-num mt-1 text-lg">
+                      <Figure minor={disclosure.totalFacedMinor} currency={disclosure.functionalCurrency} colour={false} />
+                    </dd>
                   </div>
                   <div>
                     <dt className="sw-label">Already called</dt>
-                    <dd className="sw-num mt-1 text-lg"><Figure minor={note.data.totalDrawnMinor} colour={false} /></dd>
+                    <dd className="sw-num mt-1 text-lg">
+                      <Figure minor={disclosure.totalDrawnMinor} currency={disclosure.functionalCurrency} colour={false} />
+                    </dd>
                     <p className="sw-sub mt-0.5">On the balance sheet. It stopped being contingent when it was called.</p>
                   </div>
                   <div>
                     <dt className="sw-label">Contingent</dt>
                     <dd className="sw-num mt-1 text-lg" data-testid="tf-contingent">
-                      <Figure minor={note.data.totalContingentMinor} colour={false} />
+                      <Figure minor={disclosure.totalContingentMinor} currency={disclosure.functionalCurrency} colour={false} />
                     </dd>
                     <p className="sw-sub mt-0.5">Disclosed, not recognised.</p>
                   </div>
                 </dl>
-                <p className="sw-sub mt-3 max-w-[75ch]">{note.data.statement}</p>
-                <p className="sw-sub mt-1">Basis: {note.data.basis}.</p>
+                <p className="sw-sub mt-3 max-w-[75ch]">{disclosure.statement}</p>
+                {/* Which currency, and translated how. A note that adds dollar
+                    minor units to dirham ones is a number nobody can use, and a
+                    reader cannot tell one from the other by looking. */}
+                <p className="sw-sub mt-1 max-w-[75ch]" data-testid="tf-note-currency">
+                  Figures in {disclosure.functionalCurrency}. A facility in another currency is stated at the rate on
+                  file as at {disclosure.asOf} — what calling it would cost today — except the margin, which is stated
+                  at the rate on the day it was paid, because that is what account 1255 carries.
+                </p>
+                <p className="sw-sub mt-1">Basis: {disclosure.basis}.</p>
               </Panel>
 
-              {note.data.byKind.length > 0 && (
+              {disclosure.untranslated.length > 0 && (
+                <Panel className="mb-4 p-4">
+                  <div className="sw-label">Not in the figures above</div>
+                  <ul className="sw-sub mt-1 max-w-[75ch]" data-testid="tf-untranslated">
+                    {disclosure.untranslated.map((u) => (
+                      <li key={u.reference}>
+                        <span className="sw-code">{u.reference}</span> ({u.currency}) — {u.reason}.
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="sw-sub mt-2 max-w-[75ch]">
+                    These are real exposures, left out because they cannot be stated in
+                    {" "}{disclosure.functionalCurrency} — each row says why. Adding them in at par would put a figure
+                    in the disclosure that nothing supports, and it would look exactly like the rest of it.
+                  </p>
+                </Panel>
+              )}
+
+              {disclosure.byKind.length > 0 && (
                 <Panel className="mb-4 overflow-hidden">
                   <div className="sw-scroll">
                     <table className="sw-table">
@@ -418,13 +462,13 @@ export default function TradeFinancePage() {
                         </tr>
                       </thead>
                       <tbody data-testid="tf-note-rows">
-                        {note.data.byKind.map((k) => (
+                        {disclosure.byKind.map((k) => (
                           <tr key={k.kind}>
                             <td>{k.label}</td>
                             <td className="sw-num">{k.count}</td>
-                            <td className="sw-num"><Figure minor={k.facedMinor} colour={false} /></td>
-                            <td className="sw-num"><Figure minor={k.drawnMinor} colour={false} /></td>
-                            <td className="sw-num"><Figure minor={k.contingentMinor} colour={false} /></td>
+                            <td className="sw-num"><Figure minor={k.facedMinor} currency={disclosure.functionalCurrency} colour={false} /></td>
+                            <td className="sw-num"><Figure minor={k.drawnMinor} currency={disclosure.functionalCurrency} colour={false} /></td>
+                            <td className="sw-num"><Figure minor={k.contingentMinor} currency={disclosure.functionalCurrency} colour={false} /></td>
                           </tr>
                         ))}
                       </tbody>
@@ -438,22 +482,22 @@ export default function TradeFinancePage() {
                 <dl className="mt-3 grid gap-4 sm:grid-cols-3">
                   <div>
                     <dt className="sw-sub">Margin the banks hold</dt>
-                    <dd className="sw-num mt-1"><Figure minor={note.data.restrictedCash.marginMinor} colour={false} /></dd>
+                    <dd className="sw-num mt-1"><Figure minor={disclosure.restrictedCash.marginMinor} currency={disclosure.functionalCurrency} colour={false} /></dd>
                   </div>
                   <div>
                     <dt className="sw-sub">What account 1255 carries</dt>
-                    <dd className="sw-num mt-1"><Figure minor={note.data.restrictedCash.ledgerMinor} colour={false} /></dd>
+                    <dd className="sw-num mt-1"><Figure minor={disclosure.restrictedCash.ledgerMinor} currency={disclosure.functionalCurrency} colour={false} /></dd>
                   </div>
                   <div>
                     <dt className="sw-sub">Do they agree?</dt>
                     <dd className="mt-1" role="status" data-testid="tf-margin-agrees">
-                      {note.data.restrictedCash.agrees
+                      {disclosure.restrictedCash.agrees
                         ? <span className="sw-chip">yes</span>
                         : (
                           <>
                             <span className="sw-chip sw-chip-bad">no</span>{" "}
                             <span className="sw-num">
-                              out by <Figure minor={note.data.restrictedCash.differenceMinor} />
+                              out by <Figure minor={disclosure.restrictedCash.differenceMinor} currency={disclosure.functionalCurrency} />
                             </span>
                           </>
                         )}
@@ -467,10 +511,10 @@ export default function TradeFinancePage() {
                 </p>
               </Panel>
 
-              {note.data.heldInFavourMinor !== "0" && (
+              {disclosure.heldInFavourMinor !== "0" && (
                 <Panel className="mb-4 p-4">
                   <div className="sw-label">Held in the entity&rsquo;s favour</div>
-                  <div className="sw-num mt-1 text-lg"><Figure minor={note.data.heldInFavourMinor} colour={false} /></div>
+                  <div className="sw-num mt-1 text-lg"><Figure minor={disclosure.heldInFavourMinor} currency={disclosure.functionalCurrency} colour={false} /></div>
                   <p className="sw-sub mt-1 max-w-[75ch]">
                     Security the entity holds rather than a promise it has made. It is not a contingent liability
                     and it is not an asset either — it is a comfort, and it is stated because a reader would
@@ -479,7 +523,7 @@ export default function TradeFinancePage() {
                 </Panel>
               )}
 
-              {note.data.expiringWithin90Days.length > 0 && (
+              {disclosure.expiringWithin90Days.length > 0 && (
                 <Panel className="p-4">
                   <div className="sw-label">Expiring within ninety days</div>
                   <table className="sw-table mt-2" style={{ maxWidth: "40rem" }}>
@@ -492,11 +536,11 @@ export default function TradeFinancePage() {
                       </tr>
                     </thead>
                     <tbody data-testid="tf-expiring">
-                      {note.data.expiringWithin90Days.map((e) => (
+                      {disclosure.expiringWithin90Days.map((e) => (
                         <tr key={e.reference}>
                           <td className="sw-code">{e.reference}</td>
                           <td>{e.expiresOn}</td>
-                          <td className="sw-num"><Figure minor={e.contingentMinor} colour={false} /></td>
+                          <td className="sw-num"><Figure minor={e.contingentMinor} currency={disclosure.functionalCurrency} colour={false} /></td>
                         </tr>
                       ))}
                     </tbody>

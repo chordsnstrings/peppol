@@ -1,6 +1,11 @@
 import { prisma } from "@/lib/server/prisma";
 import { LedgerError } from "./post";
 import { profitAndLoss, balanceSheet, type StatementLine } from "./statements";
+// `intercompany.ts` imports `groupList` from this module, so the two refer to
+// each other. Both references are to hoisted function declarations called at
+// run time rather than to anything read while a module is evaluating, which is
+// what makes the cycle harmless — do not move either into module scope.
+import { eliminationSchedule, type EliminationKind } from "./intercompany";
 
 /**
  * Group accounts: one set of statements for several legal entities.
@@ -59,6 +64,18 @@ import { profitAndLoss, balanceSheet, type StatementLine } from "./statements";
  *  - No currency translation. A member reporting in another currency is
  *    included at face value and warned about, which is at least honest; a made-
  *    up rate would not be.
+ *
+ * The first two of those used to be stated HERE and nowhere else, which is to
+ * say to the people who read this file and to nobody who reads the accounts.
+ * The screen showed `warnings`, and every warning was conditional — a partly
+ * owned parent, a currency that did not match, a member whose own sheet did not
+ * balance — so an AED parent with an AED subsidiary, which is most of the UAE,
+ * saw a clean consolidation with no caveat on it at all. They are now in
+ * `caveats`, which is never empty, and in `basisNote`, which every caller gets.
+ * Where `intercompany.ts` can measure what has been left in, the caveat says
+ * the number rather than the fact: "revenue and cost are each overstated by
+ * 4,800,000" is a statement a reader can act on, and "intragroup trade is not
+ * eliminated" is one they cannot.
  *
  * Amounts are BigInt minor units and ownership is basis points held in BigInt.
  * No float touches any of it.
@@ -145,6 +162,29 @@ export interface Elimination {
   applied: boolean;
 }
 
+/**
+ * Something these figures are not, said whether or not it happens to bite.
+ *
+ * A caveat is not a warning. A warning fires when something is wrong with this
+ * group's data; a caveat is true of every group this module reports, because it
+ * describes what the module does not do. Conditional presentation is what made
+ * the two most important ones invisible to the commonest group there is.
+ */
+export interface ConsolidationCaveat {
+  key: string;
+  /** The heading, short enough to read at a glance. */
+  title: string;
+  /** What is in the figures and what it does to them, in full sentences. */
+  detail: string;
+  /**
+   * How much is left in, where it can be measured from the ledger. Null where
+   * it cannot — and `detail` then says why, rather than implying it is nil.
+   */
+  amountMinor: string | null;
+  /** The paragraph the rule comes from. */
+  authority: string;
+}
+
 /** The minority's claim on one member, held apart from the parent's owners. */
 export interface NonControllingInterest {
   entityId: string;
@@ -207,6 +247,13 @@ export interface ConsolidatedStatements {
 
   eliminations: Elimination[];
   eliminationsApplied: boolean;
+  /**
+   * What these figures are, in one sentence, always. Never empty and never
+   * conditional — a reader who is handed only the numbers has been misled.
+   */
+  basisNote: string;
+  /** Never empty. What the module does not do, and what it costs the reader. */
+  caveats: ConsolidationCaveat[];
   warnings: string[];
 }
 
@@ -511,6 +558,27 @@ export async function consolidatedStatements(opts: {
   const totalAssets = BigInt(assets.totalMinor);
   const totalLiabEqNci = BigInt(liabilities.totalMinor) + equityAttributableToParent + nciNetAssets;
 
+  /* --- what this is not -------------------------------------------------- */
+
+  const caveats = buildCaveats({
+    members,
+    measured: await measureUneliminated({
+      orgId: opts.orgId, groupCode: group.code,
+      memberCount: members.length, from: opts.from, to: opts.to,
+    }),
+    eliminationsApplied: applyEliminations,
+  });
+
+  const basisNote =
+    `These are COMBINED figures, not consolidated ones. Every member's ledger has been added to every other ` +
+    `member's, line by line on account code, and the non-controlling interest has been split out — but the ` +
+    `parent's investment in each subsidiary has not been eliminated against that subsidiary's equity, and trade ` +
+    `between members has not been eliminated either. So group assets and equity are overstated by the investment, ` +
+    `and revenue, cost, receivables and payables are grossed up by whatever the members sold each other. Group ` +
+    `profit and the sheet's balancing are not affected by the trade, because both sides of it are in here. ` +
+    `Read this as a management view of the group; a set of IFRS 10 consolidated accounts needs the two ` +
+    `eliminations below, and they are outside what this ledger can do on its own.`;
+
   /* --- warnings ---------------------------------------------------------- */
 
   for (const r of reports) {
@@ -581,8 +649,128 @@ export async function consolidatedStatements(opts: {
 
     eliminations,
     eliminationsApplied: applyEliminations,
+    basisNote,
+    caveats,
     warnings,
   };
+}
+
+/* ------------------------------------------------------------- the caveats */
+
+/**
+ * How much of what this module does not eliminate can actually be measured.
+ *
+ * `intercompany.ts` already does the hard half of this: it matches one member's
+ * sales document against another member's purchase document and builds the
+ * elimination journal a group accountant would write. That schedule was never
+ * fed back here, so the consolidation went on saying "intragroup trade is not
+ * eliminated" while the number sat one module away. This asks for it.
+ *
+ * Two figures come back, both of them things still IN the totals above:
+ *   • trade_result — the intragroup sales the seller booked as revenue and the
+ *     buyer booked as cost. Group profit is right (they are equal and opposite)
+ *     and revenue and cost are each overstated by it.
+ *   • trade_balance — what one member still owes another at the reporting date.
+ *     Group assets and liabilities are each overstated by it, unless the
+ *     candidate eliminations on this page have been applied.
+ *
+ * A failure to measure is reported, not swallowed. The matcher refuses a group
+ * with fewer than two members — a member cannot trade with itself — and that is
+ * a reason, not an error, so it produces a caveat that says the amount is
+ * unquantified rather than one that implies it is nil.
+ */
+async function measureUneliminated(opts: {
+  orgId: string;
+  groupCode: string;
+  memberCount: number;
+  from: string;
+  to: string;
+}): Promise<{ tradeResultMinor: bigint | null; tradeBalanceMinor: bigint | null; why: string | null }> {
+  if (opts.memberCount < 2) {
+    return {
+      tradeResultMinor: null,
+      tradeBalanceMinor: null,
+      why: "There is only one member in this group, so nothing here can be intragroup.",
+    };
+  }
+
+  try {
+    const schedule = await eliminationSchedule({
+      orgId: opts.orgId, groupCode: opts.groupCode, from: opts.from, asOf: opts.to,
+    });
+    const totalOf = (kind: EliminationKind) =>
+      schedule.entries.filter((e) => e.kind === kind).reduce((a, e) => a + BigInt(e.totalMinor), 0n);
+    return {
+      tradeResultMinor: totalOf("trade_result"),
+      tradeBalanceMinor: totalOf("trade_balance"),
+      why: null,
+    };
+  } catch (e) {
+    // A LedgerError here is the matcher declining to run and saying why, which
+    // belongs in the caveat. Anything else is a fault and is not this module's
+    // to hide behind a caveat that reads as a measurement.
+    if (!(e instanceof LedgerError)) throw e;
+    return { tradeResultMinor: null, tradeBalanceMinor: null, why: e.message };
+  }
+}
+
+/**
+ * The caveats, built for every group whatever its shape.
+ *
+ * Both of these are unconditional by construction: there is no `if` in front of
+ * either, and there must never be. What varies is only whether the amount could
+ * be measured.
+ */
+function buildCaveats(opts: {
+  members: GroupMember[];
+  measured: { tradeResultMinor: bigint | null; tradeBalanceMinor: bigint | null; why: string | null };
+  eliminationsApplied: boolean;
+}): ConsolidationCaveat[] {
+  const subsidiaries = opts.members.filter((m) => !m.isParent);
+  const { tradeResultMinor, tradeBalanceMinor, why } = opts.measured;
+
+  const investment: ConsolidationCaveat = {
+    key: "investment_not_eliminated",
+    title: "The investment in each subsidiary is still in these figures",
+    detail:
+      `IFRS 10.B86(b) eliminates the parent's carrying amount of its investment in each subsidiary against its ` +
+      `share of that subsidiary's equity, and recognises any goodwill. That has not been done here and cannot be: ` +
+      `nothing in the ledger links a shareholding to a member entity, so this module cannot tell the parent's ` +
+      `investment in ${subsidiaries.length === 1 ? subsidiaries[0].entityId : "a subsidiary"} from any other asset ` +
+      `it holds. The consequence is double counting — the investment appears as an asset of the parent AND the ` +
+      `subsidiary's net assets appear line by line — and group equity is the members' equity added together, with ` +
+      `no goodwill and no consolidation reserve. Real acquisition accounting is a separate exercise; take these ` +
+      `figures into it rather than out of it.`,
+    amountMinor: null,
+    authority: "IFRS 10.B86(b), IFRS 3",
+  };
+
+  const measuredTrade = tradeResultMinor !== null && tradeBalanceMinor !== null;
+  const trade: ConsolidationCaveat = {
+    key: "intragroup_trade_not_eliminated",
+    title: "Trade between members is still in these figures",
+    detail: measuredTrade
+      ? `IFRS 10.B86(c) eliminates intragroup income, expenses, assets and liabilities in full. That has not been ` +
+        `done to the totals above. The intercompany matcher can see ` +
+        `${tradeResultMinor} of sales between members over this period: revenue and cost of sales are each ` +
+        `overstated by that, though group profit is not, because the two are equal and opposite. It can also see ` +
+        `${tradeBalanceMinor} still owed between members at the reporting date, which overstates group receivables ` +
+        `and group payables by the same amount each` +
+        (opts.eliminationsApplied
+          ? `, before the eliminations applied to this run. The two figures are not the same measurement — the ` +
+            `applied eliminations pair whole control-account balances, and this one pairs documents — so read the ` +
+            `intercompany screen for the pairs behind it.`
+          : `; the candidates listed on this page are the control-account version of the same thing and none has ` +
+            `been applied. Read the intercompany screen for the document-level pairs behind these numbers.`)
+      : `IFRS 10.B86(c) eliminates intragroup income, expenses, assets and liabilities in full. That has not been ` +
+        `done to the totals above, and how much is left in could not be measured. ${why ?? ""} ` +
+        `Revenue, cost, receivables and payables are therefore each grossed up by whatever the members traded ` +
+        `with each other; group profit is unaffected, because the two sides are equal and opposite.`.trim(),
+    amountMinor: measuredTrade ? tradeResultMinor.toString() : null,
+    authority: "IFRS 10.B86(c)",
+  };
+
+  return [investment, trade];
 }
 
 /* ------------------------------------------------------------------ helpers */

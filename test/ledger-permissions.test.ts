@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
-  PERMISSIONS, CONFLICTS, BUILT_IN_ROLES, seedBuiltInRoles,
+  PERMISSIONS, CONFLICTS, BUILT_IN_ROLES, REKEYED, seedBuiltInRoles,
   createRole, updateRole, assignRole, revokeRole,
   check, requirePermission, permissionsOf, rolesOverview, PermissionError,
 } from "@/lib/server/ledger/permissions";
@@ -87,8 +87,25 @@ describe("the permission catalogue", () => {
     const accountant = BUILT_IN_ROLES.find((r) => r.code === "ACCOUNTANT")!;
     const held = new Set(accountant.permissions);
     const noted = CONFLICTS.filter((c) => c.weight === "note" && held.has(c.a) && held.has(c.b));
-    expect(noted).toHaveLength(1);
-    expect(noted[0].why).toMatch(/worth knowing rather than worth refusing/);
+    expect(noted.map((c) => `${c.a}+${c.b}`).sort()).toEqual([
+      "fx.rate+payment_run.propose",
+      "ledger.post+period.close",
+    ]);
+    expect(noted.find((c) => c.a === "ledger.post")!.why).toMatch(/worth knowing rather than worth refusing/);
+  });
+
+  it("tells a workspace that the person proposing a payment can move the limit governing it", () => {
+    // The rate on file is what a foreign bill is converted at before an
+    // approval threshold is tested, so writing a rate moves the band a bill
+    // falls in. Both shipped roles that keep the books hold the pair, which is
+    // exactly why it has to be reported rather than assumed away.
+    const pair = CONFLICTS.find((c) => c.a === "fx.rate" && c.b === "payment_run.propose");
+    expect(pair, "the fx rate and the payment run it sizes").toBeDefined();
+    expect(pair!.why).toMatch(/second director/i);
+    for (const code of ["ACCOUNTANT", "BOOKKEEPER"]) {
+      const held = new Set(BUILT_IN_ROLES.find((r) => r.code === code)!.permissions);
+      expect(held.has("fx.rate") && held.has("payment_run.propose"), code).toBe(true);
+    }
   });
 });
 
@@ -301,7 +318,7 @@ const ROUTE_KEYS: { route: string; permission: string; why: string }[] = [
   { route: "GET /api/ledger/dimensions", permission: "ledger.read", why: "cost-centre reporting" },
   { route: "GET /api/ledger/layouts", permission: "ledger.read", why: "saved layouts and their reports" },
   { route: "GET /api/ledger/notifications", permission: "ledger.read", why: "the queue" },
-  { route: "POST /api/ledger/notifications", permission: "ledger.read", why: "acknowledging a row" },
+  { route: "POST /api/ledger/notifications", permission: "notifications.manage", why: "acknowledging a row takes it off everybody's queue" },
   { route: "POST /api/ledger/layouts (preview)", permission: "ledger.read", why: "a render, not a save" },
   { route: "POST /api/ledger/accounts", permission: "chart.edit", why: "adding an account" },
   { route: "POST /api/ledger/dimensions", permission: "chart.edit", why: "what a journal line must carry" },
@@ -310,7 +327,10 @@ const ROUTE_KEYS: { route: string; permission: string; why: string }[] = [
   { route: "POST /api/ledger/exports", permission: "setup.manage", why: "migrating a ledger in" },
   { route: "POST /api/ledger/budget", permission: "setup.manage", why: "setting a scenario" },
   { route: "POST /api/ledger/layouts (save)", permission: "setup.manage", why: "how statements are shown" },
-  { route: "POST /api/ledger/consolidation", permission: "setup.manage", why: "who is in the group" },
+  { route: "POST /api/ledger/consolidation", permission: "consolidation.manage", why: "who is in the group" },
+  { route: "POST /api/ledger/related-parties", permission: "disclosure.manage", why: "what the IAS 24 note asserts" },
+  { route: "POST /api/ledger/attachments", permission: "attachment.add", why: "the evidence behind a record" },
+  { route: "DELETE /api/ledger/attachments", permission: "ledger.reverse", why: "taking evidence off a posted record" },
 ];
 
 const READ_ROUTES = ROUTE_KEYS.filter((r) => r.permission === "ledger.read");
@@ -478,13 +498,22 @@ const TRADING_KEYS: { route: string; permission: string; why: string }[] = [
   { route: "POST /api/ledger/petty-cash (spend)", permission: "ap.manage", why: "a small purchase with input tax on it" },
   { route: "POST /api/ledger/cheques (record ISSUED, return/cancel an issued cheque)", permission: "ap.manage", why: "settling and unsettling a payable" },
 
+  { route: "POST /api/ledger/procurement (post, with an override reason)", permission: "match.override", why: "forcing an invoice past the three-way match" },
+
+  { route: "POST /api/ledger/inventory (add, method, locations, reorder)", permission: "inventory.manage", why: "the stock records themselves" },
   { route: "POST /api/ledger/inventory (the rest)", permission: "ledger.post", why: "issues, counts, write-downs and sweeps" },
   { route: "POST /api/ledger/recurring (the rest)", permission: "ledger.post", why: "the journal, written a month early" },
 
   { route: "POST /api/ledger/cheques (deposit, clear, bounce, represent)", permission: "bank.reconcile", why: "what the bank did with the paper" },
   { route: "POST /api/ledger/petty-cash (open, reimburse, return, close)", permission: "bank.reconcile", why: "money in and out of the bank" },
 
-  { route: "POST /api/ledger/projects", permission: "chart.edit", why: "a value of the PROJECT dimension" },
+  { route: "POST /api/ledger/projects", permission: "project.manage", why: "raising and closing a job" },
+  { route: "POST /api/ledger/timesheets (record, approve)", permission: "timesheet.record", why: "keying a week onto a job" },
+  { route: "POST /api/ledger/timesheets (writeOff, wip)", permission: "ledger.post", why: "taking recorded value off the balance sheet" },
+  { route: "POST /api/ledger/revaluation (set-rate)", permission: "fx.rate", why: "the rate the books and the approval limits both use" },
+  { route: "POST /api/ledger/revaluation (revalue, reverse)", permission: "ledger.post", why: "the IAS 21 gain or loss" },
+  { route: "POST /api/ledger/leave (record)", permission: "leave.record", why: "writing down that somebody was away" },
+  { route: "POST /api/ledger/leave (encash, provision)", permission: "payroll.run", why: "paying leave out and measuring it" },
   { route: "POST /api/ledger/write-offs (adjustVat)", permission: "tax.file", why: "Article 64(1) relief on the next return" },
 ];
 
@@ -577,11 +606,36 @@ d("the keys the trading routes guard themselves with", () => {
   });
 
   it("keeps a project code out of the bookkeeper's hands, like any other coding change", async () => {
-    // A project is a value of the PROJECT dimension, so it takes the same key
-    // as the chart and the dimensions route — which the bookkeeper does not
-    // hold, and the accountant does.
+    // A project is a value of the PROJECT dimension. It no longer takes the
+    // chart key — opening a job is not editing the chart of accounts — but it
+    // stays with the accountant, who is who held it before `project.manage`
+    // existed.
+    await expect(requirePermission({ orgId: ORG3, userId: LEILA, permission: "project.manage" }))
+      .rejects.toThrow(PermissionError);
     await expect(requirePermission({ orgId: ORG3, userId: LEILA, permission: "chart.edit" }))
       .rejects.toThrow(PermissionError);
+  });
+
+  it("lets the bookkeeper keep the stock records without the power to post a journal by hand", async () => {
+    // The whole point of splitting the master data off `ledger.post`: adding a
+    // SKU or opening a warehouse is not posting. The bookkeeper holds both
+    // here, so what this proves is that the shipped role kept the act when the
+    // key moved — the regression a split like this actually causes.
+    await requirePermission({ orgId: ORG3, userId: LEILA, permission: "inventory.manage" });
+    // And the cashier, who could never do it, still cannot.
+    await expect(requirePermission({ orgId: ORG3, userId: MAYA, permission: "inventory.manage" }))
+      .rejects.toThrow(PermissionError);
+  });
+
+  it("stops the approver clearing findings off everybody's queue", async () => {
+    // The approver reads the books, and reading the books used to be the key
+    // this took. Acknowledging is a shared row: it removes the finding for the
+    // whole organisation.
+    await requirePermission({ orgId: ORG3, userId: KHALID, permission: "ledger.read" });
+    await expect(requirePermission({ orgId: ORG3, userId: KHALID, permission: "notifications.manage" }))
+      .rejects.toThrow(PermissionError);
+    // The bookkeeper works the queue, and keeps it.
+    await requirePermission({ orgId: ORG3, userId: LEILA, permission: "notifications.manage" });
   });
 
   it("refuses a member with no role every one of these routes", async () => {
@@ -601,5 +655,221 @@ d("the keys the trading routes guard themselves with", () => {
       expect(decision.allowed, r.route).toBe(true);
       expect(decision.unconfigured, r.route).toBe(true);
     }
+  });
+});
+
+/* ------------------------------------ the acts that got a key of their own -- */
+
+/**
+ * Ten acts were guarded by whichever key the catalogue happened to have nearest
+ * to them, and each of them now has one that describes it. The catalogue can be
+ * read; what cannot be read off a diff is whether a role that could do the act
+ * on Friday can still do it on Monday, and that is the regression a split like
+ * this actually causes — felt at a month end, by somebody who was never told
+ * their permissions changed.
+ */
+describe("splitting a permission without taking an act away", () => {
+  it("moves every act onto a key the catalogue defines", () => {
+    const keys = new Set(PERMISSIONS.map((p) => p.key));
+    for (const k of REKEYED) {
+      expect(keys.has(k.from), `${k.act} came from ${k.from}`).toBe(true);
+      expect(keys.has(k.to), `${k.act} now needs ${k.to}`).toBe(true);
+      expect(k.from).not.toBe(k.to);
+      expect(k.act.length).toBeGreaterThan(10);
+    }
+  });
+
+  /**
+   * The attention queue is the one act deliberately taken away from a shipped
+   * role, because that was the defect: acknowledging is a shared upsert and it
+   * was reachable with `ledger.read`, which is the Viewer's entire grant. Every
+   * other narrowing has to be a no-op for the roles the product ships.
+   */
+  const DELIBERATE = new Set(["VIEWER:notifications.manage", "APPROVER:notifications.manage", "CASHIER:notifications.manage"]);
+
+  it("leaves every shipped role able to do what it could do before", () => {
+    for (const r of BUILT_IN_ROLES) {
+      const held = new Set(r.permissions);
+      for (const k of REKEYED) {
+        if (!held.has(k.from)) continue;
+        if (DELIBERATE.has(`${r.code}:${k.to}`)) continue;
+        expect(held.has(k.to), `${r.code} could ${k.act.toLowerCase()} and now cannot: it needs ${k.to}`).toBe(true);
+      }
+    }
+  });
+
+  it("takes the shared queue away from the roles that only read", () => {
+    for (const code of ["VIEWER", "APPROVER", "CASHIER"]) {
+      const held = new Set(BUILT_IN_ROLES.find((r) => r.code === code)!.permissions);
+      expect(held.has("ledger.read"), code).toBe(true);
+      expect(held.has("notifications.manage"), `${code} can still clear everybody's queue`).toBe(false);
+    }
+    for (const code of ["OWNER", "ACCOUNTANT", "BOOKKEEPER"]) {
+      const held = new Set(BUILT_IN_ROLES.find((r) => r.code === code)!.permissions);
+      expect(held.has("notifications.manage"), `${code} works the queue and cannot`).toBe(true);
+    }
+  });
+});
+
+/* ------------------------------- a workspace that was already running ------ */
+
+const ORG4 = "t-org-perm-upgrade";
+const HUDA = "u-huda";     // Accountant, from before the split.
+const YOUSEF = "u-yousef"; // A role the workspace wrote itself.
+const DANA = "u-dana";     // The only person who can manage roles.
+
+async function wipe4() {
+  await db.$transaction([
+    db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    db.$executeRawUnsafe(`DELETE FROM "RoleAssignment" WHERE "orgId" = '${ORG4}'`),
+    db.$executeRawUnsafe(`DELETE FROM "AccountingRole" WHERE "orgId" = '${ORG4}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Membership" WHERE "orgId" = '${ORG4}'`),
+    db.$executeRawUnsafe(`DELETE FROM "User" WHERE id IN ('${HUDA}','${YOUSEF}','${DANA}')`),
+    db.$executeRawUnsafe(`DELETE FROM "Organization" WHERE id = '${ORG4}'`),
+  ]);
+}
+
+d("a workspace whose roles were written by an older release", () => {
+  beforeAll(async () => {
+    await wipe4();
+    await db.organization.create({ data: { id: ORG4, name: "Upgrade LLC", slug: ORG4 } });
+    for (const [id, name, email] of [
+      [HUDA, "Huda", "huda@test.ae"],
+      [YOUSEF, "Yousef", "yousef@test.ae"],
+      [DANA, "Dana", "dana@test.ae"],
+    ] as const) {
+      await db.user.create({ data: { id, name, email, passwordHash: "x" } });
+      await db.membership.create({ data: { userId: id, orgId: ORG4, role: "MEMBER" } });
+    }
+    await seedBuiltInRoles({ orgId: ORG4 });
+
+    // What the row looks like in a workspace seeded before the split: the
+    // permissions are a Json column written at the time, and there is no
+    // migration that could reach into it — the product's own users write to
+    // this table too.
+    await db.accountingRole.updateMany({
+      where: { orgId: ORG4, code: "ACCOUNTANT" },
+      data: { permissions: ["ledger.read", "ledger.post", "chart.edit", "ap.manage", "payment_run.propose"] },
+    });
+
+    await assignRole({ orgId: ORG4, userId: HUDA, roleCode: "ACCOUNTANT" });
+    await assignRole({ orgId: ORG4, userId: DANA, roleCode: "OWNER" });
+  });
+  afterAll(async () => { await wipe4(); });
+
+  it("still lets the accountant do everything the shipped role promises", async () => {
+    // Read from the code rather than from the row. Without this the split
+    // would have taken the stock records, the disclosures, the timesheets and
+    // the exchange rates off every accountant in every workspace that had
+    // already been seeded — at whatever moment they next tried one.
+    for (const key of ["inventory.manage", "disclosure.manage", "timesheet.record", "attachment.add", "fx.rate", "project.manage"]) {
+      const decision = await check({ orgId: ORG4, userId: HUDA, permission: key });
+      expect(decision.allowed, `the accountant lost ${key}`).toBe(true);
+    }
+  });
+
+  it("says on the screen that the stored row is behind, without pretending it matters to enforcement", async () => {
+    const before = await rolesOverview({ orgId: ORG4 });
+    const stale = before.roles.find((r) => r.code === "ACCOUNTANT")!;
+    expect(stale.outOfDate).toBe(true);
+    expect(stale.permissions).toEqual(BUILT_IN_ROLES.find((r) => r.code === "ACCOUNTANT")!.permissions);
+    expect(stale.losing).toEqual([]);
+
+    // The Viewer is narrower than it was — the attention queue was taken off
+    // it deliberately — and that is the product's decision rather than a loss
+    // for this workspace to put right, so it is not reported as one.
+    expect(before.roles.find((r) => r.code === "VIEWER")!.losing).toEqual([]);
+
+    // Seeding is the reconciliation, and it is idempotent: it names what it
+    // brought into line and says nothing the second time.
+    const first = await seedBuiltInRoles({ orgId: ORG4 });
+    expect(first.created).toEqual([]);
+    expect(first.reconciled).toContain("ACCOUNTANT");
+    const again = await seedBuiltInRoles({ orgId: ORG4 });
+    expect(again.reconciled).toEqual([]);
+
+    const after = await rolesOverview({ orgId: ORG4 });
+    expect(after.roles.find((r) => r.code === "ACCOUNTANT")!.outOfDate).toBe(false);
+  });
+
+  it("never rewrites a role the workspace wrote itself, and shows it what it lost", async () => {
+    // A custom role is theirs. Widening it quietly would be the same silent
+    // redefinition the product refuses to let anybody do to a shipped role —
+    // so the acts it can no longer reach are reported, act by act, and the
+    // workspace decides.
+    await createRole({
+      orgId: ORG4, code: "STOCK_CLERK", name: "Stock clerk",
+      description: "Keeps the warehouse.",
+      permissions: ["ledger.read", "ledger.post"],
+    });
+    await assignRole({ orgId: ORG4, userId: YOUSEF, roleCode: "STOCK_CLERK" });
+
+    const overview = await rolesOverview({ orgId: ORG4 });
+    const clerk = overview.roles.find((r) => r.code === "STOCK_CLERK")!;
+    expect(clerk.permissions).toEqual(["ledger.read", "ledger.post"]);
+    expect(clerk.losing.map((l) => l.to).sort()).toEqual([
+      "attachment.add", "disclosure.manage", "fx.rate", "inventory.manage", "notifications.manage", "timesheet.record",
+    ]);
+    expect(clerk.losing.every((l) => l.act.length > 10)).toBe(true);
+
+    // And the loss is real, not decorative: the act is refused until somebody
+    // decides to grant the key.
+    const stock = await check({ orgId: ORG4, userId: YOUSEF, permission: "inventory.manage" });
+    expect(stock.allowed).toBe(false);
+    expect(stock.reason).toMatch(/keep the stock records/i);
+  });
+
+  it("lets a role of the workspace's own be edited without dropping a single grant", async () => {
+    // The whole of the fourth defect: before this the only way to change a
+    // role was to delete it and build it again, which took every assignment
+    // with it — and the workspace found out which people it had forgotten when
+    // one of them was refused something.
+    const grantsBefore = await db.roleAssignment.count({
+      where: { orgId: ORG4, role: { code: "STOCK_CLERK" } },
+    });
+
+    const edited = await updateRole({
+      orgId: ORG4, code: "STOCK_CLERK",
+      permissions: ["ledger.read", "ledger.post", "inventory.manage"],
+    });
+    expect(edited.permissions).toEqual(["ledger.read", "ledger.post", "inventory.manage"]);
+
+    expect(await db.roleAssignment.count({ where: { orgId: ORG4, role: { code: "STOCK_CLERK" } } }))
+      .toBe(grantsBefore);
+    const now = await check({ orgId: ORG4, userId: YOUSEF, permission: "inventory.manage" });
+    expect(now.allowed).toBe(true);
+
+    const overview = await rolesOverview({ orgId: ORG4 });
+    expect(overview.roles.find((r) => r.code === "STOCK_CLERK")!.losing.map((l) => l.to))
+      .not.toContain("inventory.manage");
+  });
+
+  it("refuses to redefine a role the product ships, whatever is asked of it", async () => {
+    await expect(updateRole({ orgId: ORG4, code: "BOOKKEEPER", permissions: ["ledger.read"] }))
+      .rejects.toThrow(/would mean something different in every workspace/i);
+  });
+
+  it("will not let an edit leave nobody able to say who may do what", async () => {
+    // revokeRole already refuses to take the last grant of "Manage roles"
+    // away. Editing the role is the other way to the same dead end, and it is
+    // the one a person reaches by tidying up a permission list.
+    await createRole({
+      orgId: ORG4, code: "ADMIN_ONLY", name: "Administrator",
+      permissions: ["ledger.read", "roles.manage"],
+    });
+    await assignRole({ orgId: ORG4, userId: YOUSEF, roleCode: "ADMIN_ONLY" });
+    // Dana holds OWNER, which also carries roles.manage, so this edit is safe.
+    await updateRole({ orgId: ORG4, code: "ADMIN_ONLY", permissions: ["ledger.read"] });
+
+    // Take the other way in away, and the same edit becomes the lock-out.
+    await createRole({
+      orgId: ORG4, code: "ADMIN_LAST", name: "Last administrator",
+      permissions: ["ledger.read", "roles.manage"],
+    });
+    await assignRole({ orgId: ORG4, userId: YOUSEF, roleCode: "ADMIN_LAST" });
+    await revokeRole({ orgId: ORG4, userId: DANA, roleCode: "OWNER" });
+
+    await expect(updateRole({ orgId: ORG4, code: "ADMIN_LAST", permissions: ["ledger.read"] }))
+      .rejects.toThrow(/nobody in this workspace able to say who may do what/i);
   });
 });

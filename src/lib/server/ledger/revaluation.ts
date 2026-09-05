@@ -151,11 +151,10 @@ const NON_MONETARY_SUBTYPES = new Map<string, string>([
 // non-monetary — the restriction is why IAS 7.48 keeps it out of cash, and it
 // has no bearing on IAS 21.16, which asks only whether the entity has a right
 // to a determinable number of units of currency. A trust receipt is a
-// borrowing. (Today no trade finance posting carries a currency on its lines,
-// so neither reaches this classifier at all; that is a separate gap, and the
-// map should be right for the day it closes.)
+// borrowing. (Trade finance now carries the facility's currency and a rate on
+// every line it posts, so both of these reach this classifier for real.)
 const MONETARY_CODES = new Set([
-  "1060", "1150", "1255", "1400", "2050", "2060", "2450", "2470", "2500", "2600",
+  "1060", "1150", "1255", "1400", "2050", "2060", "2450", "2460", "2470", "2500", "2600",
 ]);
 
 const NON_MONETARY_CODES = new Map<string, string>([

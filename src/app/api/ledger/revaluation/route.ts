@@ -67,11 +67,18 @@ export async function POST(req: Request) {
      * skips non-monetary items on purpose — so `asset.manage` would be the
      * wrong key however similar the two screens sound.
      *
-     * `set-rate` takes the same key as the postings rather than a lighter one,
-     * because the rate on file IS the size of the journal. Somebody who could
-     * write a rate without being able to post could move the period's profit
-     * and would only have to wait for somebody else to press revalue. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+     * `set-rate` used to take that same key, on the reasoning that the rate on
+     * file IS the size of the journal. That reasoning was right and incomplete.
+     * The rate is also what approvals.ts converts a foreign bill at before it
+     * measures it against a threshold, so writing a rate moves the limit that
+     * decides whether a second director has to sign — and `ledger.post` and
+     * `payment_run.propose` are held together by the shipped Bookkeeper and
+     * Accountant, which put the limit in the hands of the person proposing the
+     * payment it governs. `fx.rate` is its own key so that a workspace with two
+     * pairs of hands can separate them; the shipped roles that could set a rate
+     * before still hold both, and the pair is reported on the roles screen. */
+    const key = b.action === "set-rate" ? "fx.rate" : "ledger.post";
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {
       case "set-rate": {

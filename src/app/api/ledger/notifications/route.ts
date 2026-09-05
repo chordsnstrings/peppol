@@ -82,16 +82,20 @@ export async function POST(req: Request) {
     if (!b.key) return json({ error: "Which notification?" }, 400);
 
     /* This one writes: acknowledging or snoozing a row takes a finding off
-     * everybody's queue, not just the acknowledger's. There is no notifications
-     * key in the catalogue and "notifications.manage" is what this would have
-     * asked for. Of the twenty-one that exist the read key is the closest — the
-     * people who work this queue are bookkeepers and accountants, and putting it
-     * behind the setup key would lock the queue's own audience out of it.
+     * everybody's queue, not just the acknowledger's, because NotificationAck
+     * is one shared row per finding rather than one per reader.
+     *
+     * It was guarded by `ledger.read` for want of anything closer, which handed
+     * the act to the shipped Viewer — the role whose whole description is that
+     * it reads the books and changes nothing. A viewer could clear the VAT
+     * deadline off the accountant's queue and nobody would know why it went.
+     * `notifications.manage` is the key now, and the shipped roles that work
+     * this queue — Owner, Accountant, Bookkeeper — hold it.
      *
      * Checked after the body is read because the queue being cleared is one
      * entity's: everybody's queue is everybody working on that entity, and a
      * grant on a sister company is not one of them. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.read" });
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "notifications.manage" });
 
     const act = {
       orgId,

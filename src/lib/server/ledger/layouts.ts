@@ -2,7 +2,9 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
-import { balances, profitAndLoss, removeYearEndClose } from "./statements";
+import {
+  balances, classifyChart, profitAndLoss, removeYearEndClose, type BalanceSheetClass,
+} from "./statements";
 
 /**
  * Custom report layouts — a management pack defined as data rather than code.
@@ -22,6 +24,12 @@ import { balances, profitAndLoss, removeYearEndClose } from "./statements";
  *    postings. A second query would eventually disagree with the statements
  *    about the same month, and a custom report that disagrees with the accounts
  *    is worse than no custom report.
+ *
+ *  - An `accounts` row picks its accounts by code range, by name, or by the
+ *    classification the chart itself carries — see `LayoutGroup`. The last of
+ *    those exists because a range over the codes and a question about what is
+ *    current are different questions with different answers, and the range is
+ *    the one that gets it wrong.
  *
  *  - A total is a plain sum of the rendered values of rows above it. There is
  *    no subtraction in the row language, because a deduction is expressed by
@@ -48,10 +56,30 @@ import { balances, profitAndLoss, removeYearEndClose } from "./statements";
 export type LayoutBasis = "BALANCE" | "PROFIT";
 
 /**
- * `accounts` sums a code range or an explicit list; `total` sums rows named
- * above it; `heading` is a label alone; `spacer` is nothing.
+ * `accounts` sums a code range, an explicit list, or a classification the chart
+ * itself carries; `total` sums rows named above it; `heading` is a label alone;
+ * `spacer` is nothing.
  */
 export type RowKind = "accounts" | "total" | "heading" | "spacer";
+
+/**
+ * The four groups a balance sheet is split into, as the chart's own hierarchy
+ * defines them — `classifyChart` in statements.ts is the single place that
+ * decides which accounts are in each.
+ *
+ * A row selecting on one of these is not a convenience over writing the range
+ * out. It is a different question: `from 1100 to 1499` asks which accounts are
+ * numbered in a band, and "current assets" asks which accounts somebody
+ * classified as current. The two answers differ, and where they differ the band
+ * is the one that is wrong — 1320 deferred tax asset is numbered inside that
+ * band and hangs under non-current assets, and IAS 1.56 says it may never be
+ * presented as current.
+ */
+export type LayoutGroup = BalanceSheetClass;
+
+const GROUPS: LayoutGroup[] = [
+  "CURRENT_ASSET", "NON_CURRENT_ASSET", "CURRENT_LIABILITY", "NON_CURRENT_LIABILITY",
+];
 
 export interface LayoutRow {
   /** Names the row so a `total` can refer to it. Optional — an unreferenced row needs none. */
@@ -63,6 +91,8 @@ export interface LayoutRow {
   to?: string;
   /** Named accounts instead of a range. */
   codes?: string[];
+  /** Every account the chart classifies this way, instead of a range or a list. */
+  group?: LayoutGroup;
   /** For a `total`: the keys of the rows it adds up. */
   of?: string[];
   /** Flip the sign for presentation: a credit balance reads positive, a cost reads as a deduction. */
@@ -243,17 +273,24 @@ export function validateRows(input: unknown, chart: Set<string> | null): LayoutR
       const codes = Array.isArray(r?.codes)
         ? (r.codes as unknown[]).map((c) => str(c)).filter(Boolean)
         : [];
+      const group = str(r?.group).toUpperCase();
       const hasRange = Boolean(from || to);
 
-      if (!hasRange && !codes.length) {
+      if (group && !GROUPS.includes(group as LayoutGroup)) {
         throw new LedgerError(
-          `${where} sums accounts but names neither a code range nor a list of codes, so there is nothing for ` +
+          `${where} selects the group "${str(r?.group)}", which is not one of ${GROUPS.join(", ")}.`,
+        );
+      }
+      if (!hasRange && !codes.length && !group) {
+        throw new LedgerError(
+          `${where} sums accounts but names no code range, list of codes or group, so there is nothing for ` +
             `it to add up.`,
         );
       }
-      if (hasRange && codes.length) {
+      if ([hasRange, codes.length > 0, Boolean(group)].filter(Boolean).length > 1) {
         throw new LedgerError(
-          `${where} gives both a range and a list of codes. Give one or the other, so the row means one thing.`,
+          `${where} selects accounts more than one way. Give a range, a list of codes or a group — one of them, ` +
+            `so the row means one thing.`,
         );
       }
       if (hasRange && (!from || !to)) {
@@ -274,6 +311,8 @@ export function validateRows(input: unknown, chart: Set<string> | null): LayoutR
       if (hasRange) {
         row.from = from;
         row.to = to;
+      } else if (group) {
+        row.group = group as LayoutGroup;
       } else {
         row.codes = codes;
       }
@@ -357,15 +396,31 @@ function chase(key: string, target: string, totals: Map<string, string[]>, seen:
 
 /* ------------------------------------------------------------------ storage */
 
-type ChartAccount = { code: string; name: string; type: string; isPostable: boolean };
+type ChartAccount = {
+  code: string; name: string; type: string; isPostable: boolean;
+  /** Null on equity, income and expenses, and on an asset or liability the chart cannot place. */
+  classification: BalanceSheetClass | null;
+};
 
-/** The entity's chart, in the order a statement lists it. */
+/**
+ * The entity's chart, in the order a statement lists it, with each account's
+ * current/non-current classification worked out once.
+ *
+ * The parent and the subtype are read only to compute that — the hierarchy is
+ * what a `group` row selects on, and it cannot be recovered from the codes.
+ */
 async function chartOf(orgId: string, entityId: string): Promise<ChartAccount[]> {
   const accounts = await prisma.account.findMany({
     where: { orgId, entityId },
-    select: { code: true, name: true, type: true, isPostable: true },
+    select: { id: true, code: true, name: true, type: true, subtype: true, parentId: true, isPostable: true },
   });
-  return accounts.sort((a, b) => cmpCode(a.code, b.code));
+  const classOf = classifyChart(accounts);
+  return accounts
+    .map((a) => ({
+      code: a.code, name: a.name, type: a.type, isPostable: a.isPostable,
+      classification: classOf.get(a.code) ?? null,
+    }))
+    .sort((a, b) => cmpCode(a.code, b.code));
 }
 
 function toSaved(row: {
@@ -566,7 +621,9 @@ export async function renderLayout(opts: {
     if (row.kind === "accounts") {
       codes = (row.codes?.length
         ? chart.filter((a) => row.codes!.includes(a.code))
-        : chart.filter((a) => inRange(a.code, row.from!, row.to!))
+        : row.group
+          ? chart.filter((a) => a.classification === row.group)
+          : chart.filter((a) => inRange(a.code, row.from!, row.to!))
       ).map((a) => a.code);
       for (const code of codes) {
         raw += balanceOf.get(code) ?? 0n;
@@ -727,7 +784,9 @@ export async function duplicateLayout(opts: {
       if (row.kind !== "accounts") return false;
       const hit = row.codes?.length
         ? targetChart.some((a) => row.codes!.includes(a.code))
-        : targetChart.some((a) => inRange(a.code, row.from!, row.to!));
+        : row.group
+          ? targetChart.some((a) => a.classification === row.group)
+          : targetChart.some((a) => inRange(a.code, row.from!, row.to!));
       return !hit;
     })
     .map((row) => row.label);
@@ -790,16 +849,28 @@ export const STARTER_LAYOUTS: LayoutInput[] = [
     name: "Summarised balance sheet",
     basis: "BALANCE",
     rows: [
+      // Split the way IAS 1.60 asks, and on the chart's own classification
+      // rather than on the code bands this layout used to read. The bands were
+      // close enough to look right and wrong where it counted: 1320 deferred
+      // tax asset and 2320 deferred tax liability are numbered inside the
+      // current bands and hang under the non-current headings, so a summarised
+      // sheet drawn on the numbers reported both as current — which IAS 1.56
+      // forbids outright.
       { kind: "heading", label: "Assets" },
-      { key: "cash", kind: "accounts", label: "Cash and bank", from: "1000", to: "1099" },
-      { key: "receivables", kind: "accounts", label: "Receivables and prepayments", from: "1100", to: "1499" },
-      { key: "fixed", kind: "accounts", label: "Non-current assets", from: "1500", to: "1999" },
-      { key: "total_assets", kind: "total", label: "Total assets", of: ["cash", "receivables", "fixed"], bold: true },
+      { key: "current_assets", kind: "accounts", label: "Current assets", group: "CURRENT_ASSET" },
+      { key: "non_current_assets", kind: "accounts", label: "Non-current assets", group: "NON_CURRENT_ASSET" },
+      {
+        key: "total_assets", kind: "total", label: "Total assets",
+        of: ["current_assets", "non_current_assets"], bold: true,
+      },
       { kind: "spacer", label: "" },
       { kind: "heading", label: "Liabilities" },
-      { key: "payables", kind: "accounts", label: "Payables and accruals", from: "2000", to: "2499", invert: true },
-      { key: "borrowings", kind: "accounts", label: "Non-current liabilities", from: "2500", to: "2999", invert: true },
-      { key: "total_liabilities", kind: "total", label: "Total liabilities", of: ["payables", "borrowings"], bold: true },
+      { key: "current_liabilities", kind: "accounts", label: "Current liabilities", group: "CURRENT_LIABILITY", invert: true },
+      { key: "non_current_liabilities", kind: "accounts", label: "Non-current liabilities", group: "NON_CURRENT_LIABILITY", invert: true },
+      {
+        key: "total_liabilities", kind: "total", label: "Total liabilities",
+        of: ["current_liabilities", "non_current_liabilities"], bold: true,
+      },
       { kind: "spacer", label: "" },
       { kind: "heading", label: "Equity" },
       { key: "capital", kind: "accounts", label: "Capital and reserves", from: "3000", to: "3999", invert: true },

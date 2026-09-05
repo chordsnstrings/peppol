@@ -313,3 +313,109 @@ d("payables subledger", () => {
     expect(tb.differenceMinor).toBe(0n);
   });
 });
+
+/*
+ * The maturity ladder, on its own ledger.
+ *
+ * A separate entity because the bills above were raised to test posting and
+ * carry no terms at all, and the whole question here is what the terms say. It
+ * is the same organisation, so `wipe()` clears it with the rest.
+ */
+d("payables maturity", () => {
+  const MAT = "t-ent-ap-mat";
+  const AS_OF = new Date("2026-06-30");
+
+  /** A bill for a round gross, on the terms given — or on none, deliberately. */
+  const owe = (number: string, issueDate: string, dueDate: string | undefined, netMinor: number) =>
+    postBill({
+      orgId: ORG,
+      bill: bill(
+        { id: `mat-${number}`, entityId: MAT, number, issueDate, supplyDate: issueDate, dueDate },
+        [line(netMinor, 0, "ZERO_OTHER")],
+      ),
+    });
+
+  const bandsOf = (rows: { key: string; label: string; amountMinor: string }[]) =>
+    Object.fromEntries(rows.map((b) => [b.key, b.amountMinor]));
+
+  beforeAll(async () => {
+    await openFiscalYear({ orgId: ORG, entityId: MAT, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG, entityId: MAT });
+
+    // The case the old report got backwards: raised sixty days ago on ninety
+    // day terms. It is in the third ageing band and it is not overdue — the
+    // money is not needed for another month.
+    await owe("BILL-M1", "2026-05-01", "2026-07-30", 100_000);
+    // Genuinely late: raised in January on thirty day terms.
+    await owe("BILL-M2", "2026-01-05", "2026-02-04", 200_000);
+    // Raised five days ago, but not payable until October. The ageing calls it
+    // current; the maturity ladder puts it furthest out, which is the truth.
+    await owe("BILL-M3", "2026-06-25", "2026-10-23", 50_000);
+    await owe("BILL-M4", "2026-06-10", "2026-08-15", 10_000);
+    await owe("BILL-M5", "2026-06-15", "2026-09-20", 20_000);
+    // No terms keyed at all.
+    await owe("BILL-M6", "2026-06-01", undefined, 30_000);
+  });
+
+  it("ages on the day the bill was raised, which is a credit control report", async () => {
+    const ageing = await payablesAgeing({ orgId: ORG, entityId: MAT, asOf: AS_OF });
+    expect(ageing.buckets).toEqual({
+      // M3 five days, M4 twenty, M5 fifteen, M6 twenty-nine.
+      current: "110000",
+      // M1, sixty days old.
+      d31_60: "100000",
+      d61_90: "0",
+      d91_120: "0",
+      // M2, a hundred and seventy-six days old.
+      over120: "200000",
+    });
+    expect(ageing.totalMinor).toBe("410000");
+    // Only M2 is actually late, and it is the only one the ageing's own
+    // overdue figure counts — the bands beside it are ages, not lateness.
+    expect(ageing.overdueMinor).toBe("200000");
+  });
+
+  it("cuts the maturity table on the due date, which is a liquidity report", async () => {
+    const { maturity } = await payablesAgeing({ orgId: ORG, entityId: MAT, asOf: AS_OF });
+    expect(bandsOf(maturity.bands)).toEqual({
+      past_due: "200000",  // M2, due in February
+      within_30: "100000", // M1, due in thirty days — sixty days old and not overdue
+      d31_60: "10000",     // M4, due 15 August
+      d61_90: "20000",     // M5, due 20 September
+      over_90: "50000",    // M3, five days old and not payable until October
+      undated: "30000",    // M6, no terms recorded
+    });
+    // The same money as the ageing, laid out by a different question.
+    expect(maturity.totalMinor).toBe("410000");
+    expect(maturity.pastDueMinor).toBe("200000");
+    expect(maturity.asOf).toBe("2026-06-30");
+  });
+
+  it("keeps a bill with no terms out of the earliest band rather than assuming it is due now", async () => {
+    const { maturity, open } = await payablesAgeing({ orgId: ORG, entityId: MAT, asOf: AS_OF });
+    expect(maturity.undatedItems).toBe(1);
+    expect(maturity.undatedMinor).toBe("30000");
+    // IFRS 7.B11C would put an amount repayable on demand in the earliest
+    // band. A bill with no terms keyed is not evidence that it is repayable on
+    // demand, so it is shown apart rather than folded into the money that has
+    // to be found this month.
+    const undated = open.find((o) => o.memo.includes("BILL-M6"))!;
+    expect(undated.dueDate).toBeNull();
+    expect(undated.daysToMaturity).toBeNull();
+    expect(undated.daysOverdue).toBe(0);
+  });
+
+  it("carries the days to maturity on each open item, signed, beside the days it is old", async () => {
+    const { open } = await payablesAgeing({ orgId: ORG, entityId: MAT, asOf: AS_OF });
+    const m1 = open.find((o) => o.memo.includes("BILL-M1"))!;
+    expect(m1.daysOld).toBe(60);
+    expect(m1.daysToMaturity).toBe(30);
+    expect(m1.daysOverdue).toBe(0);
+
+    const m2 = open.find((o) => o.memo.includes("BILL-M2"))!;
+    expect(m2.daysOld).toBe(176);
+    // Negative: it fell due a hundred and forty-six days ago.
+    expect(m2.daysToMaturity).toBe(-146);
+    expect(m2.daysOverdue).toBe(146);
+  });
+});

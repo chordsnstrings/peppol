@@ -213,11 +213,19 @@ d("custom report layouts", () => {
   it("renders a balance sheet layout that balances, as at a date", async () => {
     const r = await renderLayout({ orgId: ORG, entityId: ENT, code: "BS_SUMMARY", to: PERIOD.to });
     const bs = await balanceSheet({ orgId: ORG, entityId: ENT, asOf: PERIOD.to });
-    expect(value(r, "cash")).toBe("5720000");        // 1010 4,920,000 + 1020 800,000
-    expect(value(r, "receivables")).toBe("60000");   // the insurance prepayment
+    // The seeded layout splits on the chart's own current/non-current
+    // classification rather than on a code range, which is what IAS 1.60 asks
+    // for and what the balance sheet itself now does. Everything this fixture
+    // posts is current — cash, the insurance prepayment, an accrual and tax
+    // payable — so the split is checked by both halves being present and
+    // adding to the whole, not by inventing a non-current balance for it.
+    expect(value(r, "current_assets")).toBe("5780000"); // 1010 4,920,000 + 1020 800,000 + the prepayment 60,000
+    expect(value(r, "non_current_assets")).toBe("0");
     expect(value(r, "total_assets")).toBe("5780000");
     expect(value(r, "total_assets")).toBe(bs.totalAssetsMinor);
-    expect(value(r, "payables")).toBe("150000");     // accrual and tax payable, presented positively
+    expect(value(r, "current_liabilities")).toBe("150000"); // accrual and tax payable, presented positively
+    expect(value(r, "non_current_liabilities")).toBe("0");
+    expect(value(r, "total_liabilities")).toBe("150000");
     expect(value(r, "capital")).toBe("5000000");
     // Profit not yet closed to equity is the income and expense accounts themselves.
     expect(value(r, "result")).toBe("630000");
@@ -288,7 +296,7 @@ d("custom report layouts", () => {
   it("refuses an accounts row with neither a range nor a list of codes", async () => {
     await expect(
       save("EMPTYROW", [{ key: "revenue", kind: "accounts", label: "Revenue" }]),
-    ).rejects.toThrow(/Row 1 "Revenue" sums accounts but names neither a code range nor a list of codes/);
+    ).rejects.toThrow(/Row 1 "Revenue" sums accounts but names no code range, list of codes or group/);
   });
 
   it("refuses a range that runs backwards", async () => {

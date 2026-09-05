@@ -252,8 +252,9 @@ export default function EntitySettingsPage() {
             </p>
             <p>
               The documents behind sent invoices — the PINT AE UBL and the Tax Data Document — are
-              kept, because {RECORD_RETENTION.basis} requires them for {RECORD_RETENTION.years} years
-              and nothing here can rebuild them. Export your data first if you want your own copy.
+              kept unless you tick the box below: {RECORD_RETENTION.basis} requires them for{" "}
+              {RECORD_RETENTION.years} years and nothing here can rebuild them. They stay available
+              from Export data afterwards.
             </p>
             <div className="flex items-start gap-2.5 rounded-lg border border-destructive/25 bg-destructive/[0.06] p-3">
               <Checkbox id="destroy-archive" checked={destroyArchive} onCheckedChange={setDestroyArchive} />

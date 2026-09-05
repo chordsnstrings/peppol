@@ -10,6 +10,8 @@ interface Role {
   code: string; name: string; description: string | null;
   builtIn: boolean; status: string; permissions: string[];
   conflicts: Conflict[]; assignedCount: number;
+  losing: { act: string; from: string; to: string }[];
+  outOfDate: boolean;
 }
 interface Person {
   userId: string; name: string | null; email: string;
@@ -28,6 +30,7 @@ export default function RolesPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [openRole, setOpenRole] = React.useState<string | null>(null);
   const [making, setMaking] = React.useState(false);
+  const [editing, setEditing] = React.useState<string | null>(null);
 
   const act = async (label: string, body: Record<string, unknown>) => {
     setBusy(label); setErr(null); setMsg(null);
@@ -58,14 +61,20 @@ export default function RolesPage() {
         }
         actions={
           <>
-            {data?.roles.length === 0 && (
+            {(data?.roles.length === 0 || data?.roles.some((r) => r.outOfDate)) && (
               <button type="button" className="sw-btn sw-btn-primary" data-testid="seed-roles"
                 disabled={busy === "seed"}
                 onClick={async () => {
                   const r = await act("seed", { action: "seed" });
-                  if (r) setMsg("The roles this product ships are now available to grant. Nothing is granted yet.");
+                  if (!r) return;
+                  const brought = (r.reconciled as string[] | undefined) ?? [];
+                  setMsg(
+                    brought.length
+                      ? `${brought.join(", ")} now say in the database what the product already enforced for them.`
+                      : "The roles this product ships are now available to grant. Nothing is granted yet.",
+                  );
                 }}>
-                Add the standard roles
+                {data?.roles.length === 0 ? "Add the standard roles" : "Bring the shipped roles up to date"}
               </button>
             )}
             <button type="button" className="sw-btn" onClick={() => setMaking((m) => !m)} data-testid="toggle-new-role">
@@ -174,6 +183,14 @@ export default function RolesPage() {
                                   );
                                 })}
                               </ul>
+                              {r.outOfDate && (
+                                <div className="sw-note mt-2" data-testid={`role-stale-${r.code}`}>
+                                  That list is what this workspace enforces for {r.name} — a shipped role is read from
+                                  the product rather than from the row, so a release cannot quietly leave one behind.
+                                  The row itself has not caught up; bringing the shipped roles up to date writes it
+                                  down and changes nothing about who may do what.
+                                </div>
+                              )}
                               {r.conflicts.length > 0 && (
                                 <>
                                   <div className="sw-label mt-3">Where it puts two jobs in one pair of hands</div>
@@ -184,6 +201,25 @@ export default function RolesPage() {
                                           {c.weight === "control" ? "control" : "note"}
                                         </span>{" "}
                                         {label(c.a)} and {label(c.b)} — {c.why}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </>
+                              )}
+                              {r.losing.length > 0 && (
+                                <>
+                                  <div className="sw-label mt-3">What it no longer covers</div>
+                                  <p className="sw-sub mt-1 max-w-[75ch]">
+                                    Each of these acts used to come with a permission this role holds, and each now has
+                                    a permission of its own that says what it is. Nothing was added to this role: it is
+                                    yours, and widening it is a decision to make rather than something an upgrade
+                                    should do quietly. Edit the role to put an act back.
+                                  </p>
+                                  <ul className="mt-1.5 space-y-1" data-testid={`role-losing-${r.code}`}>
+                                    {r.losing.map((l) => (
+                                      <li key={l.to} className="sw-sub">
+                                        <span className="sw-chip sw-chip-warn">no longer</span> {l.act} — it came with{" "}
+                                        {label(l.from)} and now needs {label(l.to)}.
                                       </li>
                                     ))}
                                   </ul>
@@ -200,7 +236,42 @@ export default function RolesPage() {
                                     if (g) setMsg(`Granted ${r.code}${entityId ? ` on ${entityId}` : " on every entity"}.`);
                                   }}
                                 />
+                                {!r.builtIn && (
+                                  <button type="button" className="sw-btn sw-btn-sm"
+                                    data-testid={`edit-role-${r.code}`}
+                                    aria-expanded={editing === r.code}
+                                    onClick={() => setEditing(editing === r.code ? null : r.code)}>
+                                    {editing === r.code ? "Stop editing" : "Edit what it grants"}
+                                  </button>
+                                )}
                               </div>
+
+                              {r.builtIn ? (
+                                <p className="sw-sub mt-3 max-w-[75ch]">
+                                  A role the product ships cannot be edited, so that &ldquo;{r.name}&rdquo; does not
+                                  come to mean something different in every workspace. Copy it into a role of your own
+                                  and change that.
+                                </p>
+                              ) : (
+                                editing === r.code && (
+                                  <EditRole
+                                    role={r}
+                                    catalogue={data.catalogue}
+                                    busy={busy === `update:${r.code}`}
+                                    onSave={async (change) => {
+                                      const u = await act(`update:${r.code}`, { action: "update", code: r.code, ...change });
+                                      if (u) {
+                                        setEditing(null);
+                                        setMsg(
+                                          `${r.code} now grants ${change.permissions.length} ` +
+                                            `${change.permissions.length === 1 ? "permission" : "permissions"}. ` +
+                                            `Everybody holding it is covered by the change already.`,
+                                        );
+                                      }
+                                    }}
+                                  />
+                                )
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -330,7 +401,6 @@ function NewRole({ catalogue, busy, onCreate }: {
   const [chosen, setChosen] = React.useState<string[]>([]);
   const [err, setErr] = React.useState<string | null>(null);
 
-  const groups = [...new Set(catalogue.map((c) => c.group))];
   const toggle = (key: string) =>
     setChosen((c) => (c.includes(key) ? c.filter((k) => k !== key) : [...c, key]));
 
@@ -353,25 +423,7 @@ function NewRole({ catalogue, busy, onCreate }: {
         </label>
       </div>
 
-      {groups.map((g) => (
-        <fieldset key={g} className="mt-3">
-          <legend className="sw-label">{g}</legend>
-          <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
-            {catalogue.filter((c) => c.group === g).map((c) => (
-              <li key={c.key}>
-                <label className="flex items-start gap-2">
-                  <input type="checkbox" className="mt-0.5" checked={chosen.includes(c.key)}
-                    onChange={() => toggle(c.key)} />
-                  <span>
-                    {c.label}
-                    <span className="sw-sub block">{c.effect}</span>
-                  </span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        </fieldset>
-      ))}
+      <PermissionPicker catalogue={catalogue} chosen={chosen} onToggle={toggle} />
 
       {err && <div className="sw-error mt-2" role="alert">{err}</div>}
 
@@ -385,5 +437,139 @@ function NewRole({ catalogue, busy, onCreate }: {
         {busy ? "Saving…" : "Create the role"}
       </button>
     </Panel>
+  );
+}
+
+/**
+ * Change what a role of the workspace's own grants.
+ *
+ * Before this the only way to alter a role was to delete it and build it again,
+ * which took every grant on it with it — so a business that wanted its credit
+ * controller to also place credit holds had to re-grant the role to everybody
+ * who held it, and would find out which of them it had forgotten when one of
+ * them was refused something. A shipped role is not editable here at all, for
+ * the reason the schema itself gives: a workspace that could redefine Approver
+ * would leave nobody able to reason about what Approver means.
+ */
+function EditRole({ role, catalogue, busy, onSave }: {
+  role: Role;
+  catalogue: PermissionDef[];
+  busy: boolean;
+  onSave: (change: { name: string; description: string; permissions: string[] }) => void;
+}) {
+  const [chosen, setChosen] = React.useState<string[]>(role.permissions);
+  const [name, setName] = React.useState(role.name);
+  const [description, setDescription] = React.useState(role.description ?? "");
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const toggle = (key: string) =>
+    setChosen((c) => (c.includes(key) ? c.filter((k) => k !== key) : [...c, key]));
+
+  const added = chosen.filter((k) => !role.permissions.includes(k)).length;
+  const removed = role.permissions.filter((k) => !chosen.includes(k)).length;
+
+  return (
+    <Panel className="mt-3 p-4">
+      <div className="sw-label">What {role.name} grants</div>
+      <p className="sw-sub mt-1 max-w-[75ch]">
+        Saving this changes what {role.assignedCount === 0 ? "anybody granted this role" : role.assignedCount === 1
+          ? "the one person holding it"
+          : `all ${role.assignedCount} people holding it`}{" "}
+        may do, from the moment it is saved. The grants themselves are untouched — nobody has to be given the role
+        again, which is what deleting and rebuilding it used to cost.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        {/* The code is shown rather than offered, because it is how every grant
+            points at this role: changing it would be a different role wearing
+            the same name, and nothing would follow it. A field somebody cannot
+            type into should not look like a field. */}
+        <div className="block">
+          <span className="sw-label">Code</span>
+          <div className="sw-code mt-1">{role.code}</div>
+        </div>
+        <label className="block">
+          <span className="sw-label">Name</span>
+          <input className="sw-input mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="sw-label">What it is for</span>
+          <input className="sw-input mt-1" value={description} onChange={(e) => setDescription(e.target.value)} />
+        </label>
+      </div>
+
+      <PermissionPicker
+        catalogue={catalogue}
+        chosen={chosen}
+        onToggle={toggle}
+        suggest={role.losing.map((l) => l.to)}
+      />
+
+      {err && <div className="sw-error mt-2" role="alert">{err}</div>}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button type="button" className="sw-btn sw-btn-primary" disabled={busy}
+          data-testid={`save-edit-${role.code}`}
+          onClick={() => {
+            if (!chosen.length) {
+              setErr("A role that grants nothing will be assigned by mistake and then wondered about.");
+              return;
+            }
+            if (!name.trim()) { setErr("A role needs a name somebody will recognise on a grant."); return; }
+            setErr(null);
+            onSave({ name: name.trim(), description: description.trim(), permissions: chosen });
+          }}>
+          {busy ? "Saving…" : "Save what it grants"}
+        </button>
+        <span className="sw-sub" data-testid={`edit-summary-${role.code}`}>
+          {added === 0 && removed === 0
+            ? "Nothing changed yet."
+            : `${added} to add, ${removed} to take away.`}
+        </span>
+      </div>
+    </Panel>
+  );
+}
+
+/**
+ * The permission grid, shared by the new-role form and the edit form.
+ *
+ * One grid rather than two, because the two forms would otherwise drift into
+ * describing the same permission differently — and what a permission means is
+ * the only thing on this screen a person has to get right.
+ */
+function PermissionPicker({ catalogue, chosen, onToggle, suggest }: {
+  catalogue: PermissionDef[];
+  chosen: string[];
+  onToggle: (key: string) => void;
+  /** Keys an act moved onto, flagged where the role does not hold them yet. */
+  suggest?: string[];
+}) {
+  const groups = [...new Set(catalogue.map((c) => c.group))];
+  return (
+    <>
+      {groups.map((g) => (
+        <fieldset key={g} className="mt-3">
+          <legend className="sw-label">{g}</legend>
+          <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
+            {catalogue.filter((c) => c.group === g).map((c) => (
+              <li key={c.key}>
+                <label className="flex items-start gap-2">
+                  <input type="checkbox" className="mt-0.5" checked={chosen.includes(c.key)}
+                    onChange={() => onToggle(c.key)} />
+                  <span>
+                    {c.label}
+                    {suggest?.includes(c.key) && !chosen.includes(c.key) && (
+                      <span className="sw-chip sw-chip-warn ml-1.5">an act moved here</span>
+                    )}
+                    <span className="sw-sub block">{c.effect}</span>
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </fieldset>
+      ))}
+    </>
   );
 }

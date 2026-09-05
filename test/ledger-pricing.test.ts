@@ -382,6 +382,19 @@ d("the register", () => {
     expect(r.prices[0].listCode).toBe("ORPHAN");
   });
 
+  it("refuses a list code that names nothing instead of listing every list", async () => {
+    // Asking for one list and being handed every list's prices is worse than
+    // an error: nothing in the reply says the filter was dropped, so a typo in
+    // an integration reads as "TRADE holds all of these prices".
+    await expect(priceListRegister({ ...S, on: "2026-03-01", listCode: "TRADE" }))
+      .rejects.toThrow(/There is no price list TRADE/);
+  });
+
+  it("reads a blank list code as no filter, not as a list that does not exist", async () => {
+    const r = await priceListRegister({ ...S, on: "2026-03-01", listCode: "  " });
+    expect(new Set(r.prices.map((p) => p.listCode)).size).toBeGreaterThan(1);
+  });
+
   it("counts every price on a list, not the ones that fit on the page", async () => {
     const r = await priceListRegister({ ...S, on: "2026-03-01" });
     const list = r.lists.find((l) => l.code === "LIST")!;

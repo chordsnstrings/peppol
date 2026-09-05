@@ -2,6 +2,7 @@ import { requireSession } from "@/lib/server/session";
 import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
 import { json, handleError } from "@/lib/server/http";
+import { prisma } from "@/lib/server/prisma";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import { LedgerError } from "@/lib/server/ledger/post";
 import {
@@ -74,16 +75,24 @@ export async function POST(req: Request) {
      * for. Refusing self-approval, which the module already does, is a
      * different question from who may approve at all.
      *
-     * The guard waits for the body so that raising a claim is checked against
-     * the entity it is being raised in. Only `create` carries one: every other
-     * action addresses a claim by id, and the entity is on the claim rather
-     * than in the request, so `b.entityId` is undefined and the check falls
-     * back to the org-wide answer it gave before. That is a real gap and it is
-     * stated rather than papered over — approving a claim still only asks
-     * whether you may approve claims somewhere in this workspace. Closing it
-     * means reading the claim's own entity here, the way `ap/post` reads the
-     * bill's. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "expense.approve" });
+     * The guard waits for the body so that each action is checked against the
+     * entity it acts in, and the two kinds of action find that entity in two
+     * different places. `create` is the only one that carries an entity, and
+     * it is the entity the claim is being raised in. Every other action
+     * addresses an existing claim by id, so the entity comes off the claim —
+     * the same order the GET above uses and the same reason `ap/post` reads
+     * the bill before it asks. Passing `b.entityId` for those asked the
+     * org-wide question, because it is undefined on every action but `create`:
+     * approving, posting and paying only asked whether you may approve claims
+     * somewhere in this workspace, so a grant on one entity answered for every
+     * other one. A claim id that matches nothing has no entity to check, and
+     * the action below is left to say so — its message for a claim that is not
+     * there is the one it always was. */
+    const entityOfClaim = b.claimId
+      ? (await prisma.expenseClaim.findFirst({ where: { id: b.claimId, orgId }, select: { entityId: true } }))?.entityId
+      : undefined;
+    const entityOfAction = b.action === "create" ? b.entityId : entityOfClaim;
+    await requirePermission({ orgId, userId, entityId: entityOfAction, permission: "expense.approve" });
 
     switch (b.action) {
       case "create": {

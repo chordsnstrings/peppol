@@ -12,6 +12,16 @@ import {
 export const runtime = "nodejs";
 
 /**
+ * The actions that write the stock records rather than move the stock. Listed
+ * rather than inferred, so an action added later falls to the heavier
+ * `ledger.post` until somebody decides it belongs here, which is the way round
+ * that fails safely.
+ */
+const MASTER_DATA = new Set([
+  "add", "method", "add-location", "update-location", "close-location", "default-location", "reorder",
+]);
+
+/**
  * The stock valuation, one item's movement history, or the stocking picture —
  * where the goods are, which lots they are in, what is about to go off and what
  * needs ordering.
@@ -98,25 +108,27 @@ export async function POST(req: Request) {
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);
 
-    /* Two keys, and the line between them is whether the action is a purchase.
+    /* Three keys, and the lines between them are what the action actually does.
      *
      * A goods receipt is the purchase side — it is the same act procurement.ts
      * records against an order, reached here without one — so it takes the
      * purchase-ledger key.
      *
-     * Everything else takes `ledger.post`, because everything else either
-     * writes a journal into the general ledger (an issue to cost of sales, a
-     * count difference to stock variance, an NRV write-down under IAS 2, a
-     * sweep that writes expired stock off) or decides what a future journal
-     * will say (a cost method, a location, a reorder level, a transfer that
-     * moves the stock the valuation is built from). None of it is a bill to a
-     * supplier, so `ap.manage` would be the wrong key for it.
+     * A movement takes `ledger.post`, because a movement writes a journal into
+     * the general ledger: an issue to cost of sales, a count difference to
+     * stock variance, an NRV write-down under IAS 2, a transfer between
+     * locations, a sweep that writes expired stock off. None of it is a bill to
+     * a supplier, so `ap.manage` would be the wrong key for it.
      *
-     * What I would have wanted is an `inventory.manage` key for the master
-     * data — adding a SKU or naming a warehouse is not really posting — but the
-     * catalogue has no such key, and `ledger.post` is the closest one held by
-     * the people who keep stock records. */
-    const key = b.action === "receive" ? "ap.manage" : "ledger.post";
+     * The master data is `inventory.manage`, and it is the reason that key now
+     * exists. Adding a SKU, naming a warehouse, choosing FIFO over weighted
+     * average or setting a reorder level is not posting anything, and asking
+     * for the power to post a journal by hand before somebody may open a
+     * warehouse was asking a stock controller to be a bookkeeper. Every shipped
+     * role that could do it under `ledger.post` holds the new key. */
+    const key = b.action === "receive"
+      ? "ap.manage"
+      : MASTER_DATA.has(b.action ?? "") ? "inventory.manage" : "ledger.post";
     await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {

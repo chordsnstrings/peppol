@@ -1,9 +1,18 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
   setRule, listRules, deactivateRule, rulesFor,
-  approvalState, decide, withdraw, assertApproved, pendingFor,
+  approvalState, decide, withdraw, assertApproved, pendingFor, subjectFacts,
 } from "@/lib/server/ledger/approvals";
+
+// Whoever is signed in, for the one test below that goes through the route
+// rather than the module — the entity a decision is guarded against is decided
+// there, and that is the thing being checked.
+let session = { orgId: "t-org-apr-cross", userId: "u-appr" };
+vi.mock("@/lib/server/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/server/session")>();
+  return { ...actual, requireSession: async () => session };
+});
 import { seedBuiltInRoles } from "@/lib/server/ledger/permissions";
 import { createClaim, submitClaim } from "@/lib/server/ledger/expenses";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -283,8 +292,14 @@ d("approval workflows", () => {
     const ids = cfo.map((i) => i.subjectId);
     expect(ids).toContain("BILL-P1");
     expect(ids).not.toContain("BILL-P2");  // nothing left to do
-    expect(ids).not.toContain("BILL-P3");  // refused, not waiting
+    // The refused one IS here, and that is a change: a rejection stands until
+    // the round is withdrawn, so hiding it left the only way past a refusal off
+    // every screen. It is shown as refused rather than as waiting for a
+    // signature, and the row offers the withdrawal instead of an approval.
+    expect(ids).toContain("BILL-P3");
+    expect(cfo.find((i) => i.subjectId === "BILL-P3")!.state).toBe("rejected");
     const p1 = cfo.find((i) => i.subjectId === "BILL-P1")!;
+    expect(p1.state).toBe("pending");
     expect(p1.amountMinor).toBe(500_000n);
     expect(p1.approvalsOutstanding).toBe(1);
     expect(p1.blockers.join(" ")).toMatch(/u-cfo/);
@@ -592,5 +607,397 @@ d("approval workflows", () => {
     const after = await db.approvalDecision.findUniqueOrThrow({ where: { id: r.decision.id } });
     expect(after.decision).toBe("APPROVED");
     expect(after.decidedAt.getTime()).toBe(row.decidedAt.getTime());
+  });
+
+  /* --------------------------------- what actually puts a subject in the queue */
+
+  describe("the queue reads the registers", () => {
+    // Its own organisation, because these tests need documents in the
+    // subledgers — bills received, a payment run proposed, a month of
+    // payslips — and every test above is deliberately written with none.
+    const QORG = "t-org-apr-queue";
+    const QS = { orgId: QORG, entityId: ENT };
+    const OPEN_BILL = "inv-apr-open";
+    const POSTED_BILL = "inv-apr-posted";
+    const SALES = "inv-apr-sales";
+    let runId = "";
+
+    const doc = (id: string, o: { number: string; payableMinor: number; direction?: string; docType?: string }) =>
+      JSON.stringify({
+        id, orgId: QORG, entityId: ENT,
+        direction: o.direction ?? "INBOUND",
+        docType: o.docType ?? "TAX_INVOICE",
+        number: o.number, currency: "AED", lifecycleStatus: "DELIVERED",
+        seller: { nameEn: "Gulf Stationery LLC" },
+        totals: { payableMinor: o.payableMinor },
+      });
+
+    const wipeQueue = async () => {
+      await db.$transaction([
+        db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "Record" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "Account" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "AccountingPeriod" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "PaymentRunItem" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "PaymentRun" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "Payslip" WHERE "orgId" = '${QORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "Employee" WHERE "orgId" = '${QORG}'`),
+      ]);
+    };
+
+    beforeAll(async () => {
+      await wipeQueue();
+      // The policy the approvals screen invites somebody to write, and the one
+      // that used to make bills unpostable for ever: every bill needs the AP
+      // clerk, every payment and every payroll run needs the CFO.
+      await setRule({ ...QS, subjectType: "BILL", thresholdMinor: 0, approverUserId: "u-ops" });
+      await setRule({ ...QS, subjectType: "PAYMENT", thresholdMinor: 0, approverUserId: "u-cfo" });
+      await setRule({ ...QS, subjectType: "PAYROLL", thresholdMinor: 0, approverUserId: "u-cfo" });
+
+      await db.record.createMany({
+        data: [
+          { store: "invoices", id: OPEN_BILL, orgId: QORG, entityId: ENT, data: doc(OPEN_BILL, { number: "SUP-1001", payableMinor: 50_000 }) },
+          { store: "invoices", id: POSTED_BILL, orgId: QORG, entityId: ENT, data: doc(POSTED_BILL, { number: "SUP-0900", payableMinor: 70_000 }) },
+          { store: "invoices", id: SALES, orgId: QORG, entityId: ENT, data: doc(SALES, { number: "INV-2001", payableMinor: 90_000, direction: "OUTBOUND" }) },
+        ],
+      });
+
+      // The posted bill's journal entry, under the key postBill writes — which
+      // is how the queue knows that one is finished.
+      const book = await db.book.create({
+        data: { orgId: QORG, entityId: ENT, code: "PRIMARY", name: "Primary", isDefault: true, functionalCurrency: "AED" },
+      });
+      const year = await db.fiscalYear.create({
+        data: { orgId: QORG, entityId: ENT, label: "2026", startsOn: new Date("2026-01-01"), endsOn: new Date("2026-12-31") },
+      });
+      const period = await db.accountingPeriod.create({
+        data: {
+          orgId: QORG, entityId: ENT, fiscalYearId: year.id, seq: 1, label: "2026-01",
+          startsOn: new Date("2026-01-01"), endsOn: new Date("2026-01-31"),
+        },
+      });
+      const [expense, payables] = await Promise.all([
+        db.account.create({ data: { orgId: QORG, entityId: ENT, code: "6900", name: "Other operating expenses", type: "EXPENSE" } }),
+        db.account.create({ data: { orgId: QORG, entityId: ENT, code: "2000", name: "Trade payables", type: "LIABILITY", subtype: "AP" } }),
+      ]);
+      await db.journalEntry.create({
+        data: {
+          orgId: QORG, entityId: ENT, bookId: book.id, periodId: period.id, series: "PI", number: "1",
+          entryDate: new Date("2026-01-15"), status: "posted", externalKey: `bill:${POSTED_BILL}`,
+          // A real entry, because the ledger's own trigger refuses a posted one
+          // that does not balance across at least two lines.
+          lines: {
+            create: [
+              { orgId: QORG, lineNo: 1, accountId: expense.id, txnCurrency: "AED", txnAmountMinor: 70_000n, functionalCurrency: "AED", functionalAmountMinor: 70_000n },
+              { orgId: QORG, lineNo: 2, accountId: payables.id, txnCurrency: "AED", txnAmountMinor: -70_000n, functionalCurrency: "AED", functionalAmountMinor: -70_000n },
+            ],
+          },
+        },
+      });
+
+      const run = await db.paymentRun.create({
+        data: {
+          orgId: QORG, entityId: ENT, reference: "RUN-2026-01", runDate: new Date("2026-01-20"),
+          status: "draft", preparedBy: "u-ops",
+        },
+      });
+      runId = run.id;
+      await db.paymentRunItem.createMany({
+        data: [
+          { orgId: QORG, runId: run.id, billNumber: "SUP-1001", supplierName: "Gulf Stationery LLC", amountMinor: 40_000n },
+          {
+            orgId: QORG, runId: run.id, billNumber: "SUP-0900", supplierName: "Gulf Stationery LLC",
+            amountMinor: 30_000n, excluded: true, excludeReason: "Disputed",
+          },
+        ],
+      });
+
+      // Two employees, because the month's figure is a sum and because Article
+      // 51 gives gratuity to the foreign worker and the pension scheme to the
+      // national — the ledger refuses a payslip carrying both.
+      const [foreign, national] = await Promise.all([
+        db.employee.create({
+          data: { orgId: QORG, entityId: ENT, code: "E-1", name: "Noor Ali", joinedOn: new Date("2025-01-01"), basicMinor: 1_000_000n },
+        }),
+        db.employee.create({
+          data: {
+            orgId: QORG, entityId: ENT, code: "E-2", name: "Hamdan Al Mazrouei",
+            joinedOn: new Date("2025-01-01"), basicMinor: 800_000n, pensionScheme: "GPSSA",
+          },
+        }),
+      ]);
+      await db.payslip.createMany({
+        data: [
+          {
+            orgId: QORG, entityId: ENT, employeeId: foreign.id, period: "2026-01",
+            basicMinor: 1_000_000n, allowancesMinor: 200_000n, netMinor: 1_200_000n, gratuityMinor: 50_000n,
+          },
+          {
+            orgId: QORG, entityId: ENT, employeeId: national.id, period: "2026-01",
+            basicMinor: 800_000n, netMinor: 760_000n, pensionEmployeeMinor: 40_000n, pensionEmployerMinor: 125_000n,
+          },
+        ],
+      });
+    });
+
+    afterAll(wipeQueue);
+
+    it("puts a bill nobody has touched in front of the person the rule names", async () => {
+      // THE REGRESSION. The queue seeded itself from subjects somebody had
+      // already decided on, and the only screen that records a decision is the
+      // queue — so a bill could enter the queue only if it was already in it,
+      // and a business that wrote "every supplier bill needs one signature"
+      // could never post a bill again.
+      const q = await pendingFor({ orgId: QORG, userId: "u-ops", entityId: ENT, subjectType: "BILL" });
+      const ids = q.map((i) => i.subjectId);
+      expect(ids).toContain(OPEN_BILL);
+      expect(ids).not.toContain(POSTED_BILL);  // its journal entry says it is finished
+      expect(ids).not.toContain(SALES);        // a sales invoice is not a supplier bill
+
+      const bill = q.find((i) => i.subjectId === OPEN_BILL)!;
+      expect(bill.state).toBe("pending");
+      expect(bill.amountMinor).toBe(50_000n);
+      expect(bill.label).toContain("SUP-1001");
+      expect(bill.blockers.join(" ")).toMatch(/needs the approval of u-ops/i);
+    });
+
+    it("lets the bill post once the queue has been worked", async () => {
+      // The other half of the same defect: the guard refuses the bill, the
+      // queue is where the signature has to come from, and nothing could put
+      // the bill in front of anybody.
+      const bill = { ...QS, subjectType: "BILL" as const, subjectId: OPEN_BILL, amountMinor: 50_000 };
+      await expect(assertApproved({ ...bill, reference: "SUP-1001" })).rejects.toThrow(/needs the approval of u-ops/i);
+
+      await decide({ ...bill, decision: "APPROVED", decidedBy: "u-ops" });
+      expect((await assertApproved({ ...bill })).approved).toBe(true);
+
+      // And it stops being anybody's work the moment it is answered.
+      const after = await pendingFor({ orgId: QORG, userId: "u-ops", entityId: ENT, subjectType: "BILL" });
+      expect(after.map((i) => i.subjectId)).not.toContain(OPEN_BILL);
+    });
+
+    it("puts a payment run and a month's payroll in the queue on the register's word", async () => {
+      const q = await pendingFor({ orgId: QORG, userId: "u-cfo", entityId: ENT });
+
+      const run = q.find((i) => i.subjectId === runId);
+      expect(run).toBeTruthy();
+      // What the run will actually pay: the excluded bill is not being paid, so
+      // it is not part of the figure the threshold is tested against.
+      expect(run!.amountMinor).toBe(40_000n);
+      expect(run!.label).toContain("RUN-2026-01");
+
+      const payroll = q.find((i) => i.subjectType === "PAYROLL");
+      expect(payroll?.subjectId).toBe("2026-01");
+      // Both payslips, gross, plus the gratuity earned and the employer's
+      // pension share — the cost of employing people, which is what a payroll
+      // limit is written against and the figure postPayroll asks the guard
+      // about. Net pay would understate it by every deduction withheld.
+      expect(payroll?.amountMinor).toBe(2_175_000n);
+      expect(payroll?.label).toContain("2 payslips");
+
+      // The person who proposed the run is not waiting on themselves.
+      const ops = await pendingFor({ orgId: QORG, userId: "u-ops", entityId: ENT, subjectType: "PAYMENT" });
+      expect(ops.map((i) => i.subjectId)).not.toContain(runId);
+    });
+
+    it("will not let the person who proposed a payment run approve it", async () => {
+      // The self-approval bar used to arm only when the caller handed this
+      // module the raiser, and only the expense-claim table could — so whoever
+      // proposed a payment run could approve it here, in the file whose header
+      // calls that the one thing that is not negotiable. The run records who
+      // proposed it, so the module can ask rather than wait to be told.
+      const run = { ...QS, subjectType: "PAYMENT" as const, subjectId: runId, amountMinor: 40_000 };
+      const self = decide({ ...run, decision: "APPROVED", decidedBy: "u-ops" });
+      await expect(self).rejects.toThrow(/cannot approve it/i);
+      await expect(self).rejects.toThrow(/self-approval/i);
+      expect(await db.approvalDecision.count({ where: { orgId: QORG, subjectId: runId } })).toBe(0);
+
+      // Refusing your own is still allowed: it costs the business nothing and
+      // is how somebody stops a run they have just found a mistake in.
+      const stopped = await decide({
+        ...run, decision: "REJECTED", decidedBy: "u-ops", reason: "Wrong bank account on both bills.",
+      });
+      expect(stopped.state.rejected).toBe(true);
+    });
+
+    it("shows a refused document to somebody who can withdraw it", async () => {
+      // Four separate messages — the blocker every posting path returns among
+      // them — told people to withdraw the round, and no screen could: the
+      // queue hid the only kind of subject it applies to, so a refused bill
+      // was refused for ever.
+      const cfo = await pendingFor({ orgId: QORG, userId: "u-cfo", entityId: ENT, subjectType: "PAYMENT" });
+      const row = cfo.find((i) => i.subjectId === runId);
+      expect(row?.state).toBe("rejected");
+      expect(row!.blockers.join(" ")).toMatch(/withdrawn and resubmitted/i);
+
+      // And to the person who refused it, who is the likeliest to withdraw it
+      // once it has been fixed — and the one person the pending branch filters
+      // out, because they have already had their say.
+      const ops = await pendingFor({ orgId: QORG, userId: "u-ops", entityId: ENT, subjectType: "PAYMENT" });
+      expect(ops.map((i) => i.subjectId)).toContain(runId);
+
+      await withdraw({
+        orgId: QORG, subjectType: "PAYMENT", subjectId: runId,
+        withdrawnBy: "u-cfo", reason: "Bank details corrected on both bills.",
+      });
+      const again = await pendingFor({ orgId: QORG, userId: "u-cfo", entityId: ENT, subjectType: "PAYMENT" });
+      expect(again.find((i) => i.subjectId === runId)?.state).toBe("pending");
+    });
+
+    it("reads the entity, the amount and the raiser from the subject rather than the request", async () => {
+      // What the route decides its permission check against. A caller who could
+      // name the entity could name one they hold a role on and then decide on a
+      // document belonging to another.
+      const facts = await subjectFacts({
+        orgId: QORG, subjectType: "PAYMENT", subjectId: runId, entityId: "t-ent-somewhere-else",
+      });
+      expect(facts?.entityId).toBe(ENT);
+      expect(facts?.amountMinor).toBe(40_000n);
+      expect(facts?.submittedBy).toBe("u-ops");
+
+      // A bill answers from the invoice store, and a claim from its own table.
+      expect((await subjectFacts({ orgId: QORG, subjectType: "BILL", subjectId: OPEN_BILL }))?.entityId).toBe(ENT);
+      // A subject nothing holds and nobody has decided on has no entity to
+      // find, and says so rather than making one up.
+      expect(await subjectFacts({ orgId: QORG, subjectType: "JOURNAL", subjectId: "JV-NOBODY" })).toBeNull();
+    });
+
+    it("keeps showing new work however much history the organisation has", async () => {
+      /*
+       * The queue used to derive its candidates from `take: 5000` decisions
+       * ordered OLDEST first, with no filter for whether the subject was
+       * finished. Past five thousand lifetime decisions the oldest five
+       * thousand were kept and nothing recorded afterwards could get in: two
+       * approvers at a hundred documents a month reach that in about two years
+       * and the control silently stops working.
+       *
+       * Now the open subjects come from the registers, which no amount of
+       * history can crowd out, and the window that finds a subject with no
+       * register at all — a manual journal's reference — is ordered newest
+       * first. Two thousand and fifty older decisions is more than that window
+       * holds, so a journal decided just now is only visible if the order is
+       * the right way round.
+       */
+      await setRule({ ...QS, subjectType: "JOURNAL", thresholdMinor: 0, approverRole: "DIRECTOR", approversRequired: 2 });
+      const old = new Date("2026-02-01T00:00:00.000Z");
+      await db.approvalDecision.createMany({
+        data: Array.from({ length: 2_050 }, (_, i) => ({
+          orgId: QORG, entityId: ENT, subjectType: "EXPENSE_CLAIM", subjectId: `HIST-${i}`,
+          decision: "APPROVED", decidedBy: "u-history", amountMinor: 1_000n,
+          decidedAt: new Date(old.getTime() + i * 1_000),
+        })),
+      });
+      await decide({
+        ...QS, subjectType: "JOURNAL", subjectId: "JV-2026-04-01", amountMinor: 800_000,
+        decision: "APPROVED", decidedBy: "u-d1",
+      });
+
+      const directors = await pendingFor({ orgId: QORG, userId: "u-d2", role: "DIRECTOR", entityId: ENT });
+      expect(directors.map((i) => i.subjectId)).toContain("JV-2026-04-01");
+
+      // And the register-backed work is still there, which is the part no
+      // amount of history can push out at all.
+      const cfo = await pendingFor({ orgId: QORG, userId: "u-cfo", entityId: ENT });
+      expect(cfo.map((i) => i.subjectId)).toContain(runId);
+      expect(cfo.map((i) => i.subjectId)).toContain("2026-01");
+    });
+  });
+
+  /* ------------------------------- the entity a decision is guarded against */
+
+  describe("deciding is guarded against the entity the document is in", () => {
+    // Roles have to exist for any of this to bite: a workspace that has
+    // configured none is allowed everything, which is the escape hatch the
+    // whole product rests on and the reason every test above needs no session.
+    const XORG = "t-org-apr-cross";
+    const A = "t-ent-a";
+    const B = "t-ent-b";
+    let runInB = "";
+
+    const wipeCross = async () => {
+      await db.$transaction([
+        db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${XORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${XORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "RoleAssignment" WHERE "orgId" = '${XORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "AccountingRole" WHERE "orgId" = '${XORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "PaymentRunItem" WHERE "orgId" = '${XORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "PaymentRun" WHERE "orgId" = '${XORG}'`),
+      ]);
+    };
+
+    beforeAll(async () => {
+      await wipeCross();
+      await seedBuiltInRoles({ orgId: XORG });
+      const approver = await db.accountingRole.findFirstOrThrow({ where: { orgId: XORG, code: "APPROVER" } });
+      // A grant on one company and nothing on the other.
+      await db.roleAssignment.create({ data: { orgId: XORG, userId: "u-appr", roleId: approver.id, entityId: A } });
+      // Company B asks for a signature on its payments. Without a rule the run
+      // is already approved — nothing is asked of it — and there would be no
+      // decision to guard.
+      await setRule({ orgId: XORG, entityId: B, subjectType: "PAYMENT", thresholdMinor: 0, approverRole: "APPROVER" });
+
+      const run = await db.paymentRun.create({
+        data: {
+          orgId: XORG, entityId: B, reference: "RUN-B-01", runDate: new Date("2026-03-01"),
+          status: "draft", preparedBy: "u-someone-else",
+        },
+      });
+      runInB = run.id;
+      await db.paymentRunItem.create({
+        data: { orgId: XORG, runId: run.id, billNumber: "B-1", supplierName: "Supplier", amountMinor: 900_000n },
+      });
+      session = { orgId: XORG, userId: "u-appr" };
+    });
+
+    afterAll(wipeCross);
+
+    const post = async (body: Record<string, unknown>) => {
+      const { POST } = await import("@/app/api/ledger/approvals/route");
+      return POST(new Request("http://localhost/api/ledger/approvals", { method: "POST", body: JSON.stringify(body) }));
+    };
+
+    it("refuses a decision on another company's payment run, whatever entity the request names", async () => {
+      // The hole: the guard was run against `b.entityId`, which the client
+      // chose. Somebody who could approve in company A named company A, sent
+      // company B's run, and the decision was recorded — and read back — as if
+      // it belonged to A.
+      const res = await post({
+        action: "decide", entityId: A, subjectType: "PAYMENT", subjectId: runInB,
+        decision: "APPROVED", amountMinor: "900000",
+      });
+      expect(res.status).toBe(403);
+      expect(await db.approvalDecision.count({ where: { orgId: XORG, subjectId: runInB } })).toBe(0);
+
+      // Undoing a decision is not checked more loosely than making one.
+      const undo = await post({
+        action: "withdraw", entityId: A, subjectType: "PAYMENT", subjectId: runInB, reason: "Starting again.",
+      });
+      expect(undo.status).toBe(403);
+    });
+
+    it("records the decision against the document's own entity once the role reaches it", async () => {
+      const approver = await db.accountingRole.findFirstOrThrow({ where: { orgId: XORG, code: "APPROVER" } });
+      await db.roleAssignment.create({ data: { orgId: XORG, userId: "u-appr", roleId: approver.id, entityId: B } });
+
+      // The same request, still naming company A. It is allowed now because
+      // the role reaches company B, which is where the run is — and the row it
+      // writes says B, so the posting path in B is what reads it back.
+      const res = await post({
+        action: "decide", entityId: A, subjectType: "PAYMENT", subjectId: runInB,
+        decision: "APPROVED", amountMinor: "900000",
+      });
+      expect(res.status).toBe(200);
+      const row = await db.approvalDecision.findFirstOrThrow({ where: { orgId: XORG, subjectId: runInB } });
+      expect(row.entityId).toBe(B);
+      // And the amount is the run's own, not the one the request quoted.
+      expect(row.amountMinor).toBe(900_000n);
+    });
   });
 });

@@ -103,6 +103,14 @@ export const UAE_CHART: SeedAccount[] = [
   { code: "2470", name: "Trust receipts and trade finance", nameAr: "إيصالات أمانة وتمويل تجاري", type: "LIABILITY", parent: "20" },
   { code: "2500", name: "Long-term loans", nameAr: "قروض طويلة الأجل", type: "LIABILITY", parent: "25" },
   { code: "2600", name: "Lease liabilities", nameAr: "التزامات عقود الإيجار", type: "LIABILITY", parent: "25" },
+  // The same split IAS 1.69 asks of a loan, asked of a lease. IFRS 16.47(b)
+  // presents lease liabilities separately from every other liability, and
+  // IAS 1.69 still wants the part falling due within twelve months shown as
+  // current — so the pair is 2600 and this, exactly as borrowings are 2500 and
+  // 2450. The current sibling is numbered into the 2000-2499 band and parented
+  // to 20 for the same reason 2450 is: a statement that reads the hierarchy
+  // and one that falls back on the code band have to reach the same answer.
+  { code: "2460", name: "Lease liabilities — current portion", nameAr: "الجزء المتداول من التزامات عقود الإيجار", type: "LIABILITY", parent: "20" },
 
   // ── Equity ──────────────────────────────────────────────────────────────
   { code: "3", name: "Equity", nameAr: "حقوق الملكية", type: "EQUITY", isPostable: false },

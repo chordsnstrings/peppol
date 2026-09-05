@@ -84,10 +84,16 @@ export async function POST(req: Request) {
     /* A project is not a second way of tagging a posting — it is a value of the
      * ordinary PROJECT dimension, created through dimensions.ts's addValue().
      * So creating, renaming or closing one changes what the ledger will accept
-     * on a journal line, which is exactly the reasoning /api/ledger/dimensions
-     * gives for taking the same key. Nothing here posts, so `ledger.post` would
-     * be wrong; a `dimension.manage` key is what I would have wanted. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "chart.edit" });
+     * on a journal line. Nothing here posts, so `ledger.post` would be wrong.
+     *
+     * It was `chart.edit`, which is "add, rename, renumber and archive
+     * accounts" — the chart of accounts, not the projects run against it. A
+     * business that wants its project manager to open a job was made to hand
+     * over the chart to do it. `project.manage` is the act itself. The chart
+     * key is not asked for as well: opening a job is not editing the chart, and
+     * requiring both would put the chart back in the same hands by another
+     * route. */
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "project.manage" });
 
     switch (b.action) {
       case "create":

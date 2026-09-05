@@ -17,6 +17,9 @@ interface PL {
 interface BS {
   asOf: string; currency: string;
   assets: Section; liabilities: Section; equity: Section;
+  currentAssets: Section; nonCurrentAssets: Section; unclassifiedAssets: Section;
+  currentLiabilities: Section; nonCurrentLiabilities: Section; unclassifiedLiabilities: Section;
+  netCurrentAssetsMinor: string;
   currentYearEarningsMinor: string; totalAssetsMinor: string;
   totalLiabilitiesAndEquityMinor: string; balanced: boolean; differenceMinor: string;
 }

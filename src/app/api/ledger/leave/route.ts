@@ -100,14 +100,16 @@ export async function POST(req: Request) {
      * cost on 6000 — calculating and posting pay, which is `payroll.run` word
      * for word.
      *
-     * `record` is guarded with them rather than more lightly, and it is the
-     * uncomfortable one: writing down that somebody was away last week names
-     * no money at all, and a narrower `leave.record` is the key I would have
-     * wanted. It goes here because a leave record moves the balance that both
-     * the provision and the encashment are computed from, so a wider group
-     * able to write records would be a wider group able to move a payroll
-     * figure at one remove. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "payroll.run" });
+     * `record` has the narrower key it wanted. Writing down that somebody was
+     * away last week names no money at all, and `payroll.run` — "calculate and
+     * post a payroll, including end-of-service" — meant an office manager
+     * keeping the leave register had to be given the power to pay everybody.
+     * `leave.record` still is not nothing, and its own effect says why: a leave
+     * record moves the balance the provision and the encashment are computed
+     * from, so it moves a payroll figure at one remove. That is a reason to
+     * name the act, not a reason to hand over the payroll to do it. */
+    const key = b.action === "record" ? "leave.record" : "payroll.run";
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: key });
 
     switch (b.action) {
       case "record":

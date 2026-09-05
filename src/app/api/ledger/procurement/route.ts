@@ -92,14 +92,23 @@ export async function POST(req: Request) {
      * is reading the books; raising the order, receiving the goods and posting
      * the invoice are the purchase ledger.
      *
-     * The variance override on `post` is not given a key of its own. It commits
-     * a difference between the three documents to an account rather than
-     * relaxing a separation of duties, and nothing in the catalogue covers it —
-     * a `match.override` key is what I would have wanted. */
+     * The override on `post` now has the key of its own it wanted. Forcing an
+     * invoice past the three-way match is the one act here that overrules a
+     * control rather than operating one: the match exists to catch a price
+     * nobody agreed and goods that never arrived, and an override says a person
+     * accepted the difference anyway. `ap.manage` — "post bills and payments,
+     * and raise purchase orders" — is the clerk's ordinary work and does not
+     * describe that. It is asked for on top of `ap.manage` rather than instead
+     * of it, because posting the invoice is still posting an invoice, and only
+     * when a reason is actually supplied: an ordinary matched invoice needs
+     * nothing extra, which is what keeps the extra grant meaningful. */
     if (b.action === "match") {
       await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.read" });
     } else {
       await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ap.manage" });
+      if (b.action === "post" && b.overrideReason?.trim()) {
+        await requirePermission({ orgId, userId, entityId: b.entityId, permission: "match.override" });
+      }
     }
 
     switch (b.action) {

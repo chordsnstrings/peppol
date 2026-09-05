@@ -65,9 +65,12 @@ export async function POST(req: Request) {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
     /* Nothing here posts, but deciding which entities are added together decides
-     * what every group statement afterwards says. That is setting the books up
-     * rather than keeping them, so it takes the setup key; a "consolidation.manage"
-     * key is what this would have asked for if the catalogue had one.
+     * what every group statement afterwards says. That was guarded as setting
+     * the books up, which is the nearest thing the catalogue had and still the
+     * wrong sentence: `setup.manage` is "open books, open fiscal years, and load
+     * opening balances", and a workspace granting it to the person who opens a
+     * new company was not granting the power to take a subsidiary out of the
+     * consolidated accounts. `consolidation.manage` says what this does.
      *
      * org-wide: a group spans entities by definition, and adding one to it or
      * taking one out changes what the whole group reports. `add-member` does
@@ -75,7 +78,7 @@ export async function POST(req: Request) {
      * — it would let somebody with a grant on one small subsidiary rewrite the
      * group every other entity is reported in, and it would ask nothing at all
      * of `create`, which names no entity and decides the group exists. */
-    await requirePermission({ orgId, userId, permission: "setup.manage" });
+    await requirePermission({ orgId, userId, permission: "consolidation.manage" });
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "add-member" | "remove-member";
       code?: string;

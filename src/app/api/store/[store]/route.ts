@@ -3,6 +3,8 @@ import { json, handleError, assertStore } from "@/lib/server/http";
 import { requireWritableSession } from "@/lib/server/org-status";
 import { requireEffectiveSession } from "@/lib/server/effective-session";
 import { assertSameOrigin } from "@/lib/server/platform-admin";
+import { gatewayIsLive } from "@/lib/gateway/registry";
+import { SIMULATED_ACTIVATION_BLOCK } from "@/lib/gateway/disclosure";
 
 export const runtime = "nodejs";
 
@@ -87,6 +89,29 @@ export async function POST(req: Request, ctx: { params: Promise<{ store: string 
     if (existing && existing.orgId !== orgId) return json({ error: "Forbidden" }, 403);
 
     const prev = existing ? (JSON.parse(existing.data) as Record<string, unknown>) : null;
+
+    /* Going live is a claim about the deployment, not about the entity.
+     *
+     * The dashboard disables the control and says why, but a disabled button is
+     * a courtesy and this is the only server path that persists an entity — so
+     * without this an activation is one hand-written POST away, and the reward
+     * is a LIVE badge, a vanished sandbox banner, and an evidence bundle whose
+     * only honest field is the one nobody reads.
+     *
+     * Only the TRANSITION is refused. An entity already marked LIVE keeps
+     * round-tripping through the settings screen, because demoting somebody's
+     * row as a side effect of them editing their address would be its own kind
+     * of surprise; send.ts refuses those at send time instead, which is the
+     * moment the claim would actually be made to the FTA. */
+    if (
+      store === "entities" &&
+      body.einvoicingStatus === "LIVE" &&
+      prev?.einvoicingStatus !== "LIVE" &&
+      !gatewayIsLive()
+    ) {
+      return json({ error: SIMULATED_ACTIVATION_BLOCK }, 409);
+    }
+
     const clean = sanitizeRecord(store, body, prev);
     const entityId = (clean.entityId as string | undefined) ?? null;
     const invoiceId = (clean.invoiceId as string | undefined) ?? null;

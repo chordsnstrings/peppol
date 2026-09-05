@@ -174,6 +174,7 @@ export const CLASSIFICATION: Record<string, Bucket> = {
   "2470": "financing", // trust receipts — short-term bank borrowing against goods
   "2500": "financing", // long-term loans
   "2600": "financing", // lease liabilities
+  "2460": "financing", // lease liabilities, current portion — nets against 2600
   "3000": "financing", // share capital
   "3100": "financing", // shareholder current account
   "3200": "financing", // statutory reserve

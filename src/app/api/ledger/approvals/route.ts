@@ -5,35 +5,13 @@ import { json, handleError } from "@/lib/server/http";
 import { prisma } from "@/lib/server/prisma";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import { LedgerError } from "@/lib/server/ledger/post";
-import { totalsOf } from "@/lib/server/ledger/expenses";
 import {
   setRule, listRules, deactivateRule,
-  approvalState, decide, withdraw, pendingFor,
+  approvalState, decide, withdraw, pendingFor, subjectFacts,
   type SubjectType, type DecisionKind,
 } from "@/lib/server/ledger/approvals";
 
 export const runtime = "nodejs";
-
-/**
- * An expense claim is the one subject this ledger holds in a table of its own,
- * so its amount and its claimant are read from that table rather than taken
- * from the request. Both matter: a client that could name the amount could pick
- * one below the threshold and skip a director, and a client that could name the
- * claimant could name somebody else and approve its own claim.
- */
-async function subjectFacts(orgId: string, subjectType: SubjectType, subjectId: string) {
-  if (subjectType !== "EXPENSE_CLAIM") return null;
-  const claim = await prisma.expenseClaim.findFirst({
-    where: { id: subjectId, orgId },
-    include: { lines: { select: { netMinor: true, vatMinor: true, vatRecoverable: true } } },
-  });
-  if (!claim) return null;
-  return {
-    entityId: claim.entityId,
-    amountMinor: totalsOf(claim.lines).totalMinor,
-    submittedBy: claim.employeeCode,
-  };
-}
 
 /**
  * Which permission a decision on this kind of document takes.
@@ -43,21 +21,24 @@ async function subjectFacts(orgId: string, subjectType: SubjectType, subjectId: 
  * holds no administration at all and is exactly who this route exists for.
  * Writing the RULE is the administrative act, and it is guarded as one below.
  *
- * Two subject types have a key of their own and get it. A payment takes
- * `payment_run.approve` — "sign off a batch so it can be released" — and that
- * matters beyond fitting the sentence: propose-and-approve is one of the
- * conflicts this product reports on, and it can only report somebody signing
- * off payments if signing off payments is the permission they hold.
+ * A payment takes `payment_run.approve` — "sign off a batch so it can be
+ * released" — and that matters beyond fitting the sentence: propose-and-approve
+ * is one of the conflicts this product reports on, and it can only report
+ * somebody signing off payments if signing off payments is the permission they
+ * hold.
  *
- * The other three subject types have nothing in the catalogue. `approval.decide`
- * is the key I would have wanted. `expense.approve` is the closest that exists
- * and is also what keeps the shipped APPROVER able to do the job its
- * description promises; it is wider here than its own effect sentence, which
- * names a reimbursement claim, and that is worth knowing when the catalogue
- * next moves.
+ * The other four take `approval.decide`, which is now in the catalogue and says
+ * exactly this: record a decision on a journal, a bill, a claim or a payroll
+ * run somebody else prepared. They used to take `expense.approve`, which was
+ * the closest key that existed and was wider here than its own effect sentence
+ * — it names a colleague's claim for reimbursement, and it was being used to
+ * sign off a payroll run. The shipped APPROVER holds both keys and OWNER holds
+ * everything, so no shipped role can do less than it did; a workspace's own
+ * role that holds `expense.approve` and not `approval.decide` is listed on the
+ * roles screen, act by act, under what it stands to lose.
  */
 function decisionPermission(subjectType: SubjectType): string {
-  return subjectType === "PAYMENT" ? "payment_run.approve" : "expense.approve";
+  return subjectType === "PAYMENT" ? "payment_run.approve" : "approval.decide";
 }
 
 /** The rules in force and this person's queue, or the state of one subject. */
@@ -75,7 +56,9 @@ export async function GET(req: Request) {
     // against the entity the document actually belongs to rather than the one
     // the query string claimed — the same preference `decide` makes, for the
     // same reason.
-    const facts = subjectId && subjectType ? await subjectFacts(orgId, subjectType, subjectId) : null;
+    const facts = subjectId && subjectType
+      ? await subjectFacts({ orgId, subjectType, subjectId, entityId })
+      : null;
 
     /* Reading the rules in force, and your own queue — `ledger.read`.
      *
@@ -98,6 +81,10 @@ export async function GET(req: Request) {
           subjectType,
           subjectId,
           amountMinor: facts?.amountMinor ?? (q.get("amountMinor") ?? "0"),
+          // The document's own currency where the register keeps one, so the
+          // blockers quote euros as euros and the thresholds in the book's own
+          // unit rather than silently calling them the same thing.
+          currency: facts?.currency ?? undefined,
         }),
       }));
     }
@@ -187,14 +174,19 @@ export async function POST(req: Request) {
         if (b.decision === "REJECTED" && !b.reason?.trim()) {
           return json({ error: "A rejection has to say why, so whoever raised it knows what to fix." }, 400);
         }
-        const facts = await subjectFacts(orgId, b.subjectType, b.subjectId);
+        const facts = await subjectFacts({ orgId, subjectType: b.subjectType, subjectId: b.subjectId, entityId: b.entityId });
         /* Deciding, which is not administering — see `decisionPermission`.
          *
          * Checked against the entity the document actually belongs to and not
          * the one the request named: a client that could choose the entity
          * could name one it holds a role on and then decide on a document
-         * belonging to another, which is the same trick the amount and the
-         * claimant are read from the table to prevent. */
+         * belonging to another. That used to be true of everything but an
+         * expense claim, because a claim was the only subject this route could
+         * look up — so somebody who could approve claims in one company could
+         * approve, and un-approve, that company's sister's payroll run.
+         * `subjectFacts` now answers for all five, from the register the
+         * subject lives in or, where there is none, from the entity the round
+         * of decisions was opened in. */
         await requirePermission({ orgId, userId, entityId: facts?.entityId ?? b.entityId, permission: decisionPermission(b.subjectType) });
         // The approver is whoever is signed in — never a value the request
         // supplies. Letting the client name the approver would hand away the
@@ -206,8 +198,15 @@ export async function POST(req: Request) {
           subjectId: b.subjectId,
           decision: b.decision,
           decidedBy: userId,
+          // The amount from the register, where the register has one: a client
+          // that could name the amount could pick one below the threshold and
+          // skip a director.
           amountMinor: facts?.amountMinor ?? (b.amountMinor ?? 0),
           reason: b.reason ?? null,
+          currency: facts?.currency ?? undefined,
+          // Passed because it has already been read. `decide` asks for itself
+          // where a caller does not, so the self-approval bar does not depend
+          // on this line being here.
           submittedBy: facts?.submittedBy ?? null,
         });
         return json(ledgerJson({ decision: r.decision, state: r.state }));
@@ -222,15 +221,16 @@ export async function POST(req: Request) {
          * the round again, so it takes the same key as giving one: it is
          * un-deciding, an act on the document rather than on the rules.
          *
-         * The request carries no entity, so the document is asked for one —
-         * the same preference `decide` makes, and undoing a decision must not
-         * be checked more loosely than making it. Only an expense claim has a
-         * table of its own here, so for the other subject types `subjectFacts`
-         * returns nothing and the check falls back to the org-wide answer it
-         * has always given; see `subjectFacts` for why that is where the line
-         * currently falls. */
-        const facts = await subjectFacts(orgId, b.subjectType, b.subjectId);
-        await requirePermission({ orgId, userId, entityId: facts?.entityId, permission: decisionPermission(b.subjectType) });
+         * The document is asked which entity it is in, and undoing a decision
+         * is not checked more loosely than making it. This used to fall back
+         * to the org-wide answer for everything but an expense claim, which is
+         * the wider half of the same hole: somebody who could approve in one
+         * company could throw away the signatures collected in another. A
+         * subject with no register and no decisions on it has no entity to
+         * find, and `withdraw` below is left to say there is nothing to
+         * withdraw. */
+        const facts = await subjectFacts({ orgId, subjectType: b.subjectType, subjectId: b.subjectId, entityId: b.entityId });
+        await requirePermission({ orgId, userId, entityId: facts?.entityId ?? b.entityId, permission: decisionPermission(b.subjectType) });
         return json(ledgerJson(await withdraw({
           orgId, subjectType: b.subjectType, subjectId: b.subjectId, withdrawnBy: userId, reason: b.reason,
         })));

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import { post } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
@@ -10,6 +11,8 @@ import { recordProvision } from "@/lib/server/ledger/provisions";
 import { recordItems } from "@/lib/server/ledger/deferred-tax";
 import { declareRelatedParty, declareCompensation, attest } from "@/lib/server/ledger/related-parties";
 import { closeYear } from "@/lib/server/ledger/close";
+import { raiseAllowance } from "@/lib/server/ledger/allowance";
+import { writeOffReceivable } from "@/lib/server/ledger/write-offs";
 import {
   changesInEquity,
   notesToTheAccounts,
@@ -26,6 +29,8 @@ import {
   type ProvisionsNote,
   type TaxNote,
   type DeferredTaxNote,
+  type CreditRiskNote,
+  type StatutoryReserveNote,
   type RequiresInputNote,
 } from "@/lib/server/ledger/equity";
 
@@ -42,6 +47,8 @@ const ODD = "t-ent-eq-odd";
 const REV = "t-ent-eq-rev";
 /** A ledger whose provisions, deferred tax and related parties are all recorded. */
 const PACK = "t-ent-eq-pack";
+/** A ledger that has measured an allowance for doubtful debts and used some of it. */
+const ECL = "t-ent-eq-ecl";
 
 async function wipe() {
   await db.$transaction([
@@ -59,6 +66,7 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "KeyManagementComp" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "RelatedPartyAttestation" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Counterparty" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ReceivableWriteOff" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
@@ -358,6 +366,44 @@ d("statement of changes in equity and the notes", () => {
       { account: "3900", debit: 500_000 },
       { account: "1030", credit: 500_000 },
     ], { memo: "Dividend paid from the call deposit" });
+
+    /* ---- a ledger that measures its expected credit losses --------------- */
+
+    /*
+     * Two invoices, an allowance measured twice and part of it used, so the
+     * IFRS 7.35H reconciliation has something in every one of its lines:
+     *
+     *   2026-02-01  ECL-INV-1 raised, 100,000.00
+     *   2026-06-30  allowance measured: the debt is 150 days old, so it is in
+     *               the over-120 band at the default 50% → 50,000.00 charged
+     *   2026-09-30  25,000.00 of ECL-INV-1 written off AGAINST the allowance,
+     *               which takes no further expense — that is what an allowance
+     *               is for, and it is the line netting would lose
+     *   2026-12-20  ECL-INV-2 raised, 40,000.00, eleven days old at the year end
+     *   2026-12-31  remeasured: 75,000.00 at 50% plus 40,000.00 at 0.5%
+     *                = 37,500.00 + 200.00 = 37,700.00 against 25,000.00 carried
+     */
+    await openFiscalYear({ orgId: ORG, entityId: ECL, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG, entityId: ECL });
+    await P(ECL, "2026-01-05", [
+      { account: "1010", debit: 20_000_000 },
+      { account: "3000", credit: 20_000_000 },
+    ], { memo: "Share capital issued" });
+    await P(ECL, "2026-02-01", [
+      { account: "1100", debit: 10_000_000 },
+      { account: "4200", credit: 10_000_000, taxCode: "ZERO_EXPORT" },
+    ], { memo: "ECL-INV-1", source: "invoice", sourceId: "ECL-INV-1" });
+    await raiseAllowance({ orgId: ORG, entityId: ECL, asOf: "2026-06-30" });
+    await writeOffReceivable({
+      orgId: ORG, entityId: ECL, documentId: "ECL-INV-1",
+      amountMinor: 2_500_000, against: "allowance",
+      writtenOffOn: "2026-09-30", reason: "Customer liquidated, no distribution expected",
+    });
+    await P(ECL, "2026-12-20", [
+      { account: "1100", debit: 4_000_000 },
+      { account: "4200", credit: 4_000_000, taxCode: "ZERO_EXPORT" },
+    ], { memo: "ECL-INV-2", source: "invoice", sourceId: "ECL-INV-2" });
+    await raiseAllowance({ orgId: ORG, entityId: ECL, asOf: "2026-12-31" });
   }, 180_000);
 
   afterAll(async () => { await wipe(); await db.$disconnect(); });
@@ -492,7 +538,7 @@ d("statement of changes in equity and the notes", () => {
   describe("the notes", () => {
     it("numbers the notes and returns them all", async () => {
       const notes = await N();
-      expect(notes.map((n) => n.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(notes.map((n) => n.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
       expect(notes.map((n) => n.key)).toEqual([
         "accounting_policies",
         "property_plant_and_equipment",
@@ -502,6 +548,10 @@ d("statement of changes in equity and the notes", () => {
         "intangible_assets",
         "leases",
         "trade_receivables_and_payables",
+        // IFRS 7.35 — the provision matrix behind the allowance, straight
+        // after the gross receivables it measures. Nothing could produce this
+        // note until an allowance could be raised at all.
+        "credit_risk",
         "revenue",
         "related_parties",
         // Both of these were built, tested and reconciled in their own modules
@@ -509,6 +559,10 @@ d("statement of changes in equity and the notes", () => {
         "provisions",
         "corporate_tax",
         "deferred_tax",
+        // Article 103 of Federal Decree-Law 32/2021, which nothing ever
+        // prompted for even though the transfer was reported correctly the
+        // moment somebody made one.
+        "statutory_reserve",
         "events_after_the_reporting_period",
         "commitments_and_contingencies",
       ]);
@@ -908,7 +962,7 @@ d("statement of changes in equity and the notes", () => {
   describe("provisions, deferred tax and related parties", () => {
     it("carries the provisions register's IAS 37.84 movement table", async () => {
       const note = noteOf<ProvisionsNote>(await N(PACK), "provisions");
-      expect(note.number).toBe(8);
+      expect(note.number).toBe(9);
       expect(note.state).toBe("present");
       expect(note.rows.map((r) => r.category)).toEqual(["WARRANTY"]);
       const warranty = note.rows[0];
@@ -933,8 +987,8 @@ d("statement of changes in equity and the notes", () => {
     it("carries the deferred tax register's IAS 12.81(g) note after the tax charge", async () => {
       const notes = await N(PACK);
       const note = noteOf<DeferredTaxNote>(notes, "deferred_tax");
-      expect(note.number).toBe(10);
-      expect(notes.find((n) => n.key === "corporate_tax")!.number).toBe(9);
+      expect(note.number).toBe(11);
+      expect(notes.find((n) => n.key === "corporate_tax")!.number).toBe(10);
       expect(note.state).toBe("present");
       expect(note.rows.map((r) => r.category)).toEqual(["FIXED_ASSET"]);
       // 20,000.00 of taxable difference at 9% is 1,800.00.
@@ -973,7 +1027,7 @@ d("statement of changes in equity and the notes", () => {
       const notes = await N(PACK);
       const commitments = noteOf<RequiresInputNote>(notes, "commitments_and_contingencies");
       const question = commitments.requires.find((r) => r.key === "contingent_liabilities")!.question;
-      expect(question).toContain("disclosed in note 8");
+      expect(question).toContain("disclosed in note 9");
       // The question is still asked: a register holding one contingency is not
       // a register holding all of them.
       expect(question).toMatch(/litigation, claim or assessment/);
@@ -1007,6 +1061,240 @@ d("statement of changes in equity and the notes", () => {
       const notes = await N(BARE);
       expect(noteOf<ProvisionsNote>(notes, "provisions").state).toBe("empty");
       expect(noteOf<DeferredTaxNote>(notes, "deferred_tax").state).toBe("empty");
+    });
+  });
+
+  /* ================================== credit risk, and the provision matrix */
+
+  describe("the credit risk note", () => {
+    it("shows the provision matrix that produced the allowance", async () => {
+      const note = noteOf<CreditRiskNote>(await N(ECL), "credit_risk");
+      expect(note.number).toBe(6);
+      expect(note.state).toBe("present");
+      expect(note.basis).toContain("IFRS 7.35");
+      expect(note.asOf).toBe("2026-12-31");
+
+      // 100,000.00 invoiced less 25,000.00 written off, plus 40,000.00 raised
+      // in December.
+      expect(note.grossReceivablesMinor).toBe("11500000");
+      const byBand = Object.fromEntries(note.matrix.map((m) => [m.band, m]));
+      expect(byBand.over120.exposureMinor).toBe("7500000");
+      expect(byBand.over120.ratePercent).toBe("50.00%");
+      expect(byBand.over120.lossMinor).toBe("3750000");
+      expect(byBand.current.exposureMinor).toBe("4000000");
+      expect(byBand.current.lossMinor).toBe("20000");
+      expect(byBand.d61_90.lossMinor).toBe("0");
+
+      // 37,500.00 + 200.00, which is what was posted, so the note reports no
+      // difference and says the allowance was measured at the reporting date.
+      expect(note.targetMinor).toBe("3770000");
+      expect(note.carriedMinor).toBe("3770000");
+      expect(note.differenceMinor).toBe("0");
+      expect(note.measuredAtReportingDate).toBe(true);
+      expect(note.netReceivablesMinor).toBe("7730000");
+    });
+
+    it("reconciles the loss allowance and keeps a debt written off apart from a charge", async () => {
+      const note = noteOf<CreditRiskNote>(await N(ECL), "credit_risk");
+      const r = note.reconciliation;
+      expect(r.openingMinor).toBe("0");
+      // 50,000.00 raised in June and 12,700.00 more in December.
+      expect(r.chargedMinor).toBe("6270000");
+      expect(r.releasedMinor).toBe("0");
+      // The write-off consumed 25,000.00 of it. It is NOT a charge — the
+      // expense was taken when the allowance was raised, and netting the two
+      // would make an accurate provider look like a serial one.
+      expect(r.utilisedMinor).toBe("2500000");
+      expect(r.otherMinor).toBe("0");
+      expect(r.closingMinor).toBe("3770000");
+      expect(r.perBalanceSheetMinor).toBe("3770000");
+      expect(r.agrees).toBe(true);
+    });
+
+    it("records the matrix on the entry, not in a table beside the ledger", async () => {
+      const note = noteOf<CreditRiskNote>(await N(ECL), "credit_risk");
+      expect(note.measurements.map((m) => m.date)).toEqual(["2026-12-31", "2026-06-30"]);
+      // The judgement that produced each figure, as it stood on the day it was
+      // made — which is the only form of it that survives the next posting.
+      expect(note.measurements[1].memo).toMatch(/IFRS 9\.5\.5\.15/);
+      expect(note.measurements[1].memo).toMatch(/More than 120 days old 50\.00% of 100,000\.00 = 50,000\.00/);
+      expect(note.measurements[0].movementMinor).toBe("1270000");
+      expect(note.measurements[1].movementMinor).toBe("5000000");
+      expect(note.notDerivable.length).toBeGreaterThan(0);
+    });
+
+    it("states the policy that is true, and never cites the rule it is breaking", async () => {
+      // The entity that measures its losses.
+      const measured = noteOf<PolicyNote>(await N(ECL), "accounting_policies")
+        .policies.find((p) => p.key === "trade_receivables")!;
+      expect(measured.policy).toContain("lifetime expected credit losses");
+      expect(measured.policy).toContain("simplified approach");
+      expect(measured.basis).toContain("IFRS 9.5.5.15");
+
+      // The entity that does not. The note used to read "No allowance for
+      // doubtful debts has been recognised" under a basis of IFRS 9.5.5.15 —
+      // the paragraph that makes the allowance compulsory — which asserts
+      // compliance in the act of describing its absence.
+      const gross = noteOf<PolicyNote>(await N(), "accounting_policies")
+        .policies.find((p) => p.key === "trade_receivables")!;
+      expect(gross.policy).not.toMatch(/No allowance for doubtful debts has been recognised\.$/);
+      expect(gross.policy).toContain("IFRS 9.5.5.15 requires");
+      expect(gross.policy).toContain("none has been measured or recognised");
+      expect(gross.policy).toContain("stated gross");
+    });
+
+    it("is empty, not absent, for an entity with no receivables at all", async () => {
+      const note = noteOf<CreditRiskNote>(await N(BARE), "credit_risk");
+      expect(note.state).toBe("empty");
+      expect(note.targetMinor).toBe("0");
+      expect(note.carriedMinor).toBe("0");
+    });
+  });
+
+  /* ============================ the screen that has to render all of them = */
+
+  /*
+   * A note added on the server used to reach a screen that had never heard of
+   * it, because the page redeclared the note union by hand. The first time it
+   * happened the fallback called `.map` on a field the new note did not carry
+   * and took the whole pack down; the fix stopped the crash and left the note
+   * rendering as a heading with nothing under it, which is quieter and no
+   * better — a disclosure silently missing from a set of accounts is the
+   * failure, not the stack trace. Two notes were added to this pack in the same
+   * change that added these tests, so it is not a hypothetical.
+   *
+   * These read source. The suite runs in node with no DOM, so the page cannot
+   * be rendered here — what is asserted is the wiring, which is the part that
+   * rots silently, and it is asserted against the keys the server actually
+   * produces rather than against a list kept beside it.
+   */
+  describe("the screen that has to render every note", () => {
+    const PAGE = readFileSync("src/app/(app)/accounting/equity/page.tsx", "utf8");
+
+    it("takes the note union from the server instead of mirroring it by hand", () => {
+      expect(PAGE).toMatch(/import type \{[\s\S]*?\} from "@\/lib\/server\/ledger\/equity";/);
+      // Not one wire shape redeclared. A second copy of a discriminated union
+      // is a copy that drifts, and nothing can see that it has.
+      expect(PAGE).not.toMatch(/^interface \w*Note extends NoteBase/m);
+      expect(PAGE).not.toMatch(/^type Note =/m);
+    });
+
+    it("has a body for every note key the pack can produce", async () => {
+      const keys = new Set<string>();
+      for (const entity of [ENT, BARE, ODD, REV, PACK, ECL]) {
+        for (const note of await N(entity)) keys.add(note.key);
+      }
+      // Every key the server can emit, against every key the screen names.
+      const handled = new Set([...PAGE.matchAll(/case "([a-z_]+)":/g)].map((m) => m[1]));
+      expect([...keys].filter((k) => !handled.has(k)).sort()).toEqual([]);
+      // And the two that were added with this change are among them, so the
+      // assertion above is not passing on an empty set.
+      expect(handled.has("credit_risk")).toBe(true);
+      expect(handled.has("statutory_reserve")).toBe(true);
+    });
+
+    it("falls back to a body that renders an unknown note's own fields", () => {
+      // The compile-time half: the switch is exhaustive against the server's
+      // union, so a note added there without a body here fails the build.
+      expect(PAGE).toMatch(/const unhandled: never = note;/);
+      // The runtime half, which is not dead code: this page is a browser
+      // bundle talking to an API that can be a deploy ahead of it.
+      expect(PAGE).toMatch(/<GenericNoteBody note=\{unhandled\}/);
+      expect(PAGE).toMatch(/function GenericNoteBody/);
+      // It walks the note rather than reaching for a field by name, which is
+      // exactly what the old fallback did wrong.
+      expect(PAGE).toMatch(/Object\.entries\(note as unknown as Record<string, unknown>\)/);
+    });
+  });
+
+  /* =================================== the maturity of what the entity owes */
+
+  describe("the payables maturity table", () => {
+    it("is cut on the due date and is not the past-due ageing relabelled", async () => {
+      const note = noteOf<ReceivablesPayablesNote>(await N(), "trade_receivables_and_payables");
+      // Every ageing band now says what it measures. They used to read "Not
+      // more than 30 days" under a heading citing IFRS 7.39, which is a
+      // maturity analysis and the opposite question.
+      expect(note.payables.bands.map((b) => b.label)).toEqual([
+        "Not more than 30 days old", "31 to 60 days old", "61 to 90 days old",
+        "91 to 120 days old", "More than 120 days old",
+      ]);
+      expect(note.payablesMaturity.bands.map((b) => b.key)).toEqual([
+        "past_due", "within_30", "d31_60", "d61_90", "over_90", "undated",
+      ]);
+      // The same money as the ageing, laid out by when it has to be found.
+      expect(note.payablesMaturity.totalMinor).toBe(note.payables.totalPerAgeingMinor);
+    });
+
+    it("keeps a bill with no terms off the ladder rather than calling it due now", async () => {
+      const note = noteOf<ReceivablesPayablesNote>(await N(), "trade_receivables_and_payables");
+      // BILL-1 was raised with no payment terms, so nothing can be said about
+      // when it falls due — and saying "now" would be this report inventing a
+      // fact about the supplier's contract.
+      const bands = Object.fromEntries(note.payablesMaturity.bands.map((b) => [b.key, b.amountMinor]));
+      expect(bands.undated).toBe("3000000");
+      expect(bands.past_due).toBe("0");
+      expect(note.payablesMaturity.undatedItems).toBe(1);
+      expect(note.statement).toContain("no payment terms");
+      // The ageing still ages it, which is the report credit control wants.
+      expect(note.payables.bands.find((b) => b.key === "d91_120")!.amountMinor).toBe("0");
+      expect(note.payables.overdueMinor).toBe("0");
+    });
+  });
+
+  /* ============================== the reserve the law makes compulsory ==== */
+
+  describe("the statutory reserve", () => {
+    it("computes what Article 103 asks of the year and sets it against the transfer made", async () => {
+      const notes = await N();
+      const note = noteOf<StatutoryReserveNote>(notes, "statutory_reserve");
+      const statement = await E();
+      expect(note.number).toBe(12);
+      expect(note.state).toBe("present");
+      expect(note.basis).toContain("Federal Decree-Law 32/2021 Article 103");
+
+      expect(note.paidUpCapitalMinor).toBe("100000000");
+      // Half the paid-up capital: the point at which the deduction may stop.
+      expect(note.capMinor).toBe("50000000");
+      expect(note.openingMinor).toBe("0");
+      expect(note.transferredMinor).toBe("4000000");
+      expect(note.closingMinor).toBe("4000000");
+
+      // A tenth of the result these statements report, rounded up so a
+      // deduction is never a fil short of what the article asks.
+      const profit = BigInt(statement.profitForThePeriodMinor);
+      expect(note.profitForThePeriodMinor).toBe(profit.toString());
+      expect(note.tenPercentMinor).toBe(((profit + 9n) / 10n).toString());
+      expect(note.headroomMinor).toBe("50000000");
+      expect(note.requiredMinor).toBe(note.tenPercentMinor);
+      expect(note.capReached).toBe(false);
+    });
+
+    it("says how much is still to be appropriated, rather than only reporting what was", async () => {
+      const note = noteOf<StatutoryReserveNote>(await N(), "statutory_reserve");
+      const required = BigInt(note.requiredMinor);
+      const transferred = BigInt(note.transferredMinor);
+      const expected = required - transferred > 0n ? required - transferred : 0n;
+      expect(note.shortfallMinor).toBe(expected.toString());
+      expect(note.satisfied).toBe(expected === 0n);
+      expect(note.statement).toContain("Article 103");
+      // The honest limits are stated rather than glossed: the article says
+      // "net profits" without defining it here, and the articles of
+      // association may ask for more than the statutory tenth.
+      expect(note.statement).toContain("net profits");
+      expect(note.statement).toContain("articles");
+    });
+
+    it("asks nothing of a year that made no profit and holds no capital", async () => {
+      // ODD has capital but the reserve requirement follows the result, and
+      // BARE has capital and no trading at all.
+      const note = noteOf<StatutoryReserveNote>(await N(BARE), "statutory_reserve");
+      expect(note.paidUpCapitalMinor).toBe("1000000");
+      expect(note.profitForThePeriodMinor).toBe("0");
+      expect(note.tenPercentMinor).toBe("0");
+      expect(note.requiredMinor).toBe("0");
+      expect(note.shortfallMinor).toBe("0");
+      expect(note.satisfied).toBe(true);
     });
   });
 
@@ -1086,7 +1374,7 @@ d("statement of changes in equity and the notes", () => {
       expect(both.to).toBe("2026-12-31");
       expect(both.currency).toBe("AED");
       expect(both.availableYears.map((y) => y.label)).toEqual(["2026"]);
-      expect(both.notes).toHaveLength(12);
+      expect(both.notes).toHaveLength(14);
       expect(both.statement.reconciles).toBe(true);
     });
 

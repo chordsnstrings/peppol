@@ -12,6 +12,37 @@ import {
 export const runtime = "nodejs";
 
 /**
+ * Which books a subject belongs to, read off the subject itself.
+ *
+ * A subject id says nothing about the entity it is in, so a request that names
+ * both has told us nothing: a caller could name the entity they hold
+ * `attachment.add` on and a bill in another one, and the guard would pass for
+ * the wrong books — evidence landing on a record its uploader may not touch,
+ * and stamped with an entity that makes the GET and the DELETE guard the wrong
+ * one afterwards. So every subject this ledger holds in a table of its own is
+ * asked directly. This is the same order the two reads below use, and the same
+ * reason `approvals` reads an expense claim's entity rather than believing the
+ * request about it.
+ *
+ * INVOICE and BILL are documents in the general store rather than ledger
+ * tables, so there is nothing to ask and they fall back to what the request
+ * says — the answer this route gave before. That is the remaining gap and it is
+ * the same one the list read has for a subject with no evidence on it yet; it
+ * closes when those two become rows with an entity on them.
+ */
+async function entityOfSubject(orgId: string, subjectType: string, subjectId: string): Promise<string | undefined> {
+  const where = { id: subjectId, orgId };
+  const select = { entityId: true };
+  switch (subjectType) {
+    case "JOURNAL_ENTRY": return (await prisma.journalEntry.findFirst({ where, select }))?.entityId;
+    case "EXPENSE_CLAIM": return (await prisma.expenseClaim.findFirst({ where, select }))?.entityId;
+    case "ASSET": return (await prisma.fixedAsset.findFirst({ where, select }))?.entityId;
+    case "BANK_LINE": return (await prisma.bankStatementLine.findFirst({ where, select }))?.entityId;
+    default: return undefined;
+  }
+}
+
+/**
  * Documents attached to accounting records.
  *
  * Two reads, kept apart on purpose:
@@ -98,19 +129,28 @@ export async function POST(req: Request) {
     if (!b.filename || !b.mimeType || !b.contentBase64) {
       return json({ error: "An attachment needs a filename, a type and its content." }, 400);
     }
-    /* Attaching evidence writes into the record the books rest on, so
-     * `ledger.post` — the narrowest key the catalogue has for adding to the
-     * books by hand. An `attachment.add` is what I would have wanted, and it
-     * ought to follow the subject: a claimant photographing the receipt for
-     * their own claim should not need the power to post journals. As it
-     * stands the roles that can raise these documents are the roles that can
-     * put evidence behind them, which at least matches the expenses route
-     * next door. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+    /* Attaching evidence writes into the record the books rest on, and it now
+     * has the key it wanted: `attachment.add`. A claimant photographing the
+     * receipt for their own claim should not need the power to post journals by
+     * hand, which is what `ledger.post` was asking of them.
+     *
+     * The key still does not follow the subject — attaching to a bill and
+     * attaching to an expense claim ask the same thing — and that remains the
+     * gap worth knowing about. Splitting it means a key per subject type, and
+     * the honest version of that is for `attach()` to ask the subject who may
+     * put evidence behind it. Removing evidence is a different act again and is
+     * guarded harder, on the DELETE below.
+     *
+     * The entity is the record's and not the request's, for the reason written
+     * above `entityOfSubject`. It is also what the row is stamped with, so the
+     * entity a later read or removal is checked against is the entity the
+     * evidence actually sits in. */
+    const entityOfRecord = (await entityOfSubject(orgId, b.subjectType, b.subjectId)) ?? b.entityId;
+    await requirePermission({ orgId, userId, entityId: entityOfRecord, permission: "attachment.add" });
 
     const result = await attach({
       orgId,
-      entityId: b.entityId,
+      entityId: entityOfRecord,
       subjectType: b.subjectType,
       subjectId: b.subjectId,
       filename: b.filename,

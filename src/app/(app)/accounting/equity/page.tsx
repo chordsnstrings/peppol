@@ -5,210 +5,48 @@ import Link from "next/link";
 import { useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading } from "@/components/ledger/primitives";
 
-/* The wire shapes, mirroring `src/lib/server/ledger/equity.ts`. Amounts arrive
- * as decimal strings of minor units and are formatted by <Figure>; nothing on
- * this page turns money into a JavaScript number. */
-
-interface Column { code: string; name: string; nameAr: string | null }
-interface Row {
-  key: string;
-  label: string;
-  kind: "balance" | "movement";
-  cells: Record<string, string>;
-  totalMinor: string;
-  origin: "posted" | "derived" | "mixed";
-  note: string;
-}
-interface Statement {
-  fiscalYear: string;
-  from: string;
-  to: string;
-  currency: string;
-  closed: boolean;
-  columns: Column[];
-  opening: Row;
-  movements: Row[];
-  closing: Row;
-  totalByColumnsMinor: string;
-  totalByRowsMinor: string;
-  foots: boolean;
-  equityPerBalanceSheetMinor: string;
-  reconciles: boolean;
-  differenceMinor: string;
-  profitForThePeriodMinor: string;
-  warnings: string[];
-}
-
-type NoteState = "present" | "empty" | "requires_input";
-interface NoteBase { number: number; key: string; title: string; basis: string; state: NoteState; statement: string }
-
-interface PolicyNote extends NoteBase {
-  key: "accounting_policies";
-  functionalCurrency: string;
-  presentationCurrency: string;
-  policies: { key: string; label: string; policy: string; basis: string; evidence: string }[];
-}
-interface Movement {
-  openingMinor: string;
-  closingMinor: string;
-  perBalanceSheetMinor: string;
-  agrees: boolean;
-}
-interface PpeNote extends NoteBase {
-  key: "property_plant_and_equipment";
-  costAccounts: string[];
-  accumulatedDepreciationAccount: string;
-  cost: Movement & { additionsMinor: string; disposalsMinor: string };
-  accumulatedDepreciation: Movement & { chargeMinor: string; releasedOnDisposalMinor: string };
-  netBookValue: { openingMinor: string; closingMinor: string };
-  register: {
-    assets: number; costMinor: string; accumulatedMinor: string; netBookValueMinor: string;
-    costAgrees: boolean; accumulatedAgrees: boolean;
-  };
-  byCategory: { category: string; count: number; costMinor: string; accumulatedMinor: string; netBookValueMinor: string }[];
-}
-interface LeaseNote extends NoteBase {
-  key: "leases";
-  rightOfUseAssets: Movement & { additionsMinor: string; depreciationMinor: string };
-  liabilities: Movement & { additionsMinor: string; interestMinor: string; paymentsMinor: string };
-  interestExpenseMinor: string;
-  shortTermAndLowValueExpenseMinor: string;
-  totalCashOutflowMinor: string;
-  maturity: { key: string; label: string; amountMinor: string }[];
-  exemptions: { code: string; name: string; reason: string; note: string; annualRentMinor: string }[];
-  notDerivable: string[];
-  leases: number;
-}
-interface Ageing {
-  account: string;
-  name: string;
-  asOf: string;
-  bands: { key: string; label: string; amountMinor: string }[];
-  totalPerAgeingMinor: string;
-  totalPerLedgerMinor: string;
-  agrees: boolean;
-  differenceMinor: string;
-  openItems: number;
-  oldestDays: number | null;
-}
-interface ReceivablesPayablesNote extends NoteBase {
-  key: "trade_receivables_and_payables";
-  receivables: Ageing;
-  payables: Ageing;
-  allowanceForDoubtfulDebtsMinor: string;
-  netReceivablesMinor: string;
-}
-interface RevenueNote extends NoteBase {
-  key: "revenue";
-  byTaxTreatment: { taxCode: string | null; label: string; amountMinor: string; shareBps: number | null }[];
-  byAccount: { code: string; name: string; nameAr: string | null; amountMinor: string }[];
-  totalMinor: string;
-  untaggedMinor: string;
-  untaggedLines: number;
-  agrees: boolean;
-}
-interface RelatedPartyNote extends NoteBase {
-  key: "related_parties";
-  account: { code: string; name: string; nameAr: string | null };
-  openingMinor: string;
-  closingMinor: string;
-  movements: { key: string; label: string; amountMinor: string }[];
-  postings: number;
-  requiresInput: string[];
-}
-interface TaxNote extends NoteBase {
-  key: "corporate_tax";
-  chargePerLedgerMinor: string;
-  payableClosingMinor: string;
-  computedChargeMinor: string;
-  accountingProfitPerComputationMinor: string;
-  profitForThePeriodMinor: string;
-  computationReadsClosedYear: boolean;
-  taxableIncomeMinor: string;
-  effectiveRateBps: string | null;
-  reconciliation: { key: string; label: string; basis: string; amountMinor: string }[];
-  reconciliationTotalMinor: string;
-  foots: boolean;
-  adjustments: { key: string; label: string; basis: string; amountMinor: string; origin: string }[];
-  smallBusinessRelief: { elected: boolean; applied: boolean; eligible: boolean; reason: string };
-  provisionPosted: boolean;
-  provisionAgrees: boolean;
-  warnings: string[];
-}
-interface RequiresInputNote extends NoteBase {
-  key: "events_after_the_reporting_period" | "commitments_and_contingencies";
-  requires: { key: string; question: string; basis: string }[];
-}
-
-interface ProvisionsNote extends NoteBase {
-  key: "provisions";
-  asOf: string;
-  from: string;
-  periodLabel: string;
-  rows: {
-    category: string; label: string;
-    openingMinor: string; additionsMinor: string; usedMinor: string;
-    releasedMinor: string; unwoundMinor: string; closingMinor: string;
-  }[];
-  totals: {
-    openingMinor: string; additionsMinor: string; usedMinor: string;
-    releasedMinor: string; unwoundMinor: string; closingMinor: string;
-  };
-  carryingPerRegisterMinor: string;
-  agreesWithRegister: boolean;
-  movementsAfterAsOf: number;
-  contingentLiabilities: { code: string; name: string; label: string; estimateMinor: string; expectedOn: string | null; note: string | null }[];
-  contingentAssets: { code: string; name: string; label: string; estimateMinor: string; expectedOn: string | null; note: string | null }[];
-  narrative: string[];
-}
-
-interface DeferredTaxNote extends NoteBase {
-  key: "deferred_tax";
-  asOf: string;
-  previousAsOf: string | null;
-  rows: {
-    category: string; label: string;
-    openingNetMinor: string; closingAssetMinor: string; closingLiabilityMinor: string;
-    closingNetMinor: string; movementMinor: string;
-    unrecognisedDifferenceMinor: string; unrecognisedTaxMinor: string;
-  }[];
-  totals: {
-    openingNetMinor: string; closingAssetMinor: string; closingLiabilityMinor: string;
-    closingNetMinor: string; movementMinor: string;
-    unrecognisedDifferenceMinor: string; unrecognisedTaxMinor: string;
-  };
-  offsetBasis: string;
-  narrative: string[];
-}
-
-interface IntangiblesNote extends NoteBase {
-  key: "intangible_assets";
-  costAccount: string;
-  accumulatedAmortisationAccount: string;
-  cost: Movement & { additionsMinor: string; disposalsMinor: string };
-  accumulatedAmortisation: Movement & { chargeMinor: string; releasedOnDisposalMinor: string };
-  netBookValue: { openingMinor: string; closingMinor: string };
-  byCategory: {
-    category: string; count: number; costMinor: string; accumulatedMinor: string;
-    netBookValueMinor: string; shortestLifeMonths: number; longestLifeMonths: number;
-  }[];
-  notDerivable: string[];
-}
-
-type Note =
-  | PolicyNote | PpeNote | IntangiblesNote | LeaseNote | ReceivablesPayablesNote
-  | RevenueNote | RelatedPartyNote | ProvisionsNote | DeferredTaxNote
-  | TaxNote | RequiresInputNote;
-
-interface Payload {
-  fiscalYear: string;
-  from: string;
-  to: string;
-  currency: string;
-  availableYears: { label: string; startsOn: string; endsOn: string; status: string }[];
-  statement: Statement;
-  notes: Note[];
-}
+/*
+ * The wire shapes are the server's own, imported rather than copied.
+ *
+ * They used to be redeclared here, and the copy was the defect. `notes` is a
+ * discriminated union that grows whenever a disclosure is added; this file held
+ * its own version of that union, the compiler had nothing to hold the two
+ * against, and a note added on the server therefore reached a `switch` that had
+ * never heard of its key. The first time that happened the fallback called
+ * `.map` on a field the new note did not carry and the whole pack went down;
+ * the fix at the time stopped the crash and left the note rendering as a bare
+ * heading with nothing under it, which is quieter and no better — a disclosure
+ * that is silently missing from a set of financial statements is the failure,
+ * not the stack trace.
+ *
+ * `import type` is erased at build, so nothing server-side is bundled: what
+ * crosses is the shape. Amounts arrive as decimal strings of minor units and
+ * are formatted by <Figure>; nothing on this page turns money into a
+ * JavaScript number.
+ */
+import type {
+  EquityAndNotes as Payload,
+  EquityColumn as Column,
+  EquityRow as Row,
+  StatementOfChangesInEquity as Statement,
+  Note,
+  NoteState,
+  PolicyNote,
+  PpeNote,
+  IntangiblesNote,
+  LeaseNote,
+  ReceivablesPayablesNote,
+  CreditRiskNote,
+  RevenueNote,
+  RelatedPartyNote,
+  ProvisionsNote,
+  DeferredTaxNote,
+  StatutoryReserveNote,
+  TaxNote,
+  RequiresInputNote,
+  AgeingDisclosure as Ageing,
+  MaturityDisclosure,
+} from "@/lib/server/ledger/equity";
 
 /**
  * A note's state is three-valued on purpose, and the chips say which: a note
@@ -485,13 +323,171 @@ function NoteBody({ note, currency }: { note: Note; currency: string }) {
     case "intangible_assets": return <IntangiblesBody note={note} currency={currency} />;
     case "leases": return <LeaseBody note={note} currency={currency} />;
     case "trade_receivables_and_payables": return <TradeBody note={note} currency={currency} />;
+    case "credit_risk": return <CreditRiskBody note={note} currency={currency} />;
     case "revenue": return <RevenueBody note={note} currency={currency} />;
     case "related_parties": return <RelatedBody note={note} currency={currency} />;
     case "provisions": return <ProvisionsBody note={note} currency={currency} />;
     case "deferred_tax": return <DeferredTaxBody note={note} currency={currency} />;
     case "corporate_tax": return <TaxBody note={note} currency={currency} />;
-    default: return <RequiresInputBody note={note} />;
+    case "statutory_reserve": return <StatutoryReserveBody note={note} currency={currency} />;
+    case "events_after_the_reporting_period":
+    case "commitments_and_contingencies":
+      return <RequiresInputBody note={note} />;
+    default: {
+      /*
+       * Two guards, and they catch different failures.
+       *
+       * `unhandled` is `never` for as long as the cases above cover the whole
+       * of the server's union, so adding a disclosure without teaching this
+       * page fails the build instead of shipping a note that renders as a bare
+       * heading. That is the compile-time half.
+       *
+       * The generic body underneath is the runtime half and it is not dead
+       * code. A type is a promise about one build; this page is a browser
+       * bundle being served JSON by an API that can be a deploy ahead of it,
+       * and a deployment window is exactly when a new note appears. So an
+       * unknown note renders its own contents — every field it carries, in the
+       * shapes it carries them — rather than nothing at all.
+       */
+      const unhandled: never = note;
+      return <GenericNoteBody note={unhandled} currency={currency} />;
+    }
   }
+}
+
+/* ------------------------------------------- the body for a note not taught */
+
+/** The fields every note has, which the panel header has already shown. */
+const NOTE_HEADER_FIELDS = new Set(["number", "key", "title", "basis", "state", "statement"]);
+
+/** `netReceivablesMinor` → "Net receivables". Good enough to read, always. */
+function humanise(key: string): string {
+  const words = key
+    .replace(/Minor$/, "")
+    .replace(/Bps$/, " (basis points)")
+    .replace(/([A-Z])/g, " $1")
+    .replace(/_/g, " ")
+    .trim()
+    .toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+const isMoney = (key: string) => key.endsWith("Minor");
+
+/** A scalar, rendered as what it is: money, a flag, or text. */
+function GenericValue({ name, value, currency }: { name: string; value: unknown; currency: string }) {
+  if (value === null || value === undefined) return <span className="sw-sub">not stated</span>;
+  if (typeof value === "boolean") return <span className="sw-chip">{value ? "yes" : "no"}</span>;
+  if (isMoney(name) && (typeof value === "string" || typeof value === "number")) {
+    return <Figure minor={String(value)} currency={currency} zero="zero" />;
+  }
+  return <>{String(value)}</>;
+}
+
+/**
+ * Any note, rendered from its own shape.
+ *
+ * Deliberately plain. It is not trying to be the hand-built table a disclosure
+ * eventually deserves — it is trying to make sure every figure the server sent
+ * reaches the page, in a form somebody can read, on the day the note appears
+ * rather than on the day this file is next edited.
+ */
+function GenericNoteBody({ note, currency }: { note: Note; currency: string }) {
+  const fields = Object.entries(note as unknown as Record<string, unknown>)
+    .filter(([k]) => !NOTE_HEADER_FIELDS.has(k));
+  if (fields.length === 0) return null;
+
+  const scalars = fields.filter(([, v]) => v === null || typeof v !== "object");
+  const objects = fields.filter(([, v]) => v !== null && typeof v === "object" && !Array.isArray(v));
+  const lists = fields.filter(([, v]) => Array.isArray(v)) as [string, unknown[]][];
+
+  return (
+    <div className="grid gap-4 px-3 pb-3" data-testid={`generic-${note.key}`}>
+      {(scalars.length > 0 || objects.length > 0) && (
+        <div className="sw-scroll">
+          <table className="sw-table">
+            <caption className="sr-only">Everything this note carries, field by field</caption>
+            <tbody>
+              {scalars.map(([k, v]) => (
+                <tr key={k}>
+                  <th scope="row" style={{ fontWeight: 400 }}>{humanise(k)}</th>
+                  <td className={isMoney(k) ? "sw-num" : ""}>
+                    <GenericValue name={k} value={v} currency={currency} />
+                  </td>
+                </tr>
+              ))}
+              {objects.flatMap(([k, v]) =>
+                Object.entries(v as Record<string, unknown>).map(([ik, iv]) => (
+                  <tr key={`${k}.${ik}`}>
+                    <th scope="row" style={{ fontWeight: 400 }}>
+                      {humanise(k)} — {humanise(ik)}
+                    </th>
+                    <td className={isMoney(ik) ? "sw-num" : ""}>
+                      <GenericValue name={ik} value={iv} currency={currency} />
+                    </td>
+                  </tr>
+                )),
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {lists.map(([k, rows]) => (
+        <GenericList key={k} name={k} rows={rows} currency={currency} />
+      ))}
+    </div>
+  );
+}
+
+function GenericList({ name, rows, currency }: { name: string; rows: unknown[]; currency: string }) {
+  if (rows.length === 0) return null;
+  const asObjects = rows.every((r) => r !== null && typeof r === "object" && !Array.isArray(r));
+  if (!asObjects) {
+    return (
+      <div>
+        <div className="sw-label">{humanise(name)}</div>
+        <ul className="grid gap-1">
+          {rows.map((r, i) => (
+            <li key={i} className="sw-sub" style={{ maxWidth: "80ch" }}>{String(r)}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  // The union of keys, in the order the first row that carries each one puts
+  // it, so a row with an extra field still shows it rather than losing it.
+  const columns: string[] = [];
+  for (const r of rows as Record<string, unknown>[]) {
+    for (const k of Object.keys(r)) if (!columns.includes(k)) columns.push(k);
+  }
+  return (
+    <div>
+      <div className="sw-label">{humanise(name)}</div>
+      <div className="sw-scroll mt-1">
+        <table className="sw-table">
+          <caption className="sr-only">{humanise(name)}</caption>
+          <thead>
+            <tr>
+              {columns.map((c) => (
+                <th key={c} scope="col" className={isMoney(c) ? "sw-num" : ""}>{humanise(c)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(rows as Record<string, unknown>[]).map((r, i) => (
+              <tr key={i}>
+                {columns.map((c) => (
+                  <td key={c} className={isMoney(c) ? "sw-num" : ""}>
+                    <GenericValue name={c} value={r[c]} currency={currency} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------- note bodies */
@@ -889,7 +885,60 @@ function AgeingTable({ ageing, currency, testId }: { ageing: Ageing; currency: s
       </table>
       <p className="sw-sub pt-1">
         {ageing.openItems} open item{ageing.openItems === 1 ? "" : "s"}
-        {ageing.oldestDays === null ? "" : `, the oldest ${ageing.oldestDays} days old`}.
+        {ageing.oldestDays === null ? "" : `, the oldest ${ageing.oldestDays} days old`}. Of the total,{" "}
+        <Figure minor={ageing.overdueMinor} currency={currency} zero="zero" colour={false} /> is past its own due
+        date — which is a different question from how old it is, and only the terms on the document answer it.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * IFRS 7.39(a): the same payables, laid out by when they have to be paid.
+ *
+ * A table of its own and not a relabelled ageing. The ageing beside it counts
+ * forwards from the day each bill was raised, which is what credit control
+ * needs; this counts forwards from the reporting date to the day the supplier
+ * may demand the money, which is what a reader assessing liquidity needs. On
+ * ninety-day terms the two say opposite things about the same bill.
+ */
+function MaturityTable({ maturity, currency }: { maturity: MaturityDisclosure; currency: string }) {
+  return (
+    <div className="sw-scroll">
+      <table className="sw-table" data-testid="maturity-payables">
+        <caption className="sr-only">
+          {maturity.name} at {maturity.asOf}, by remaining contractual maturity
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">
+              <span className="sw-code me-2">{maturity.account}</span>When it falls due
+            </th>
+            <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Undiscounted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {maturity.bands.map((b) => (
+            <tr key={b.key}>
+              <th scope="row" style={{ fontWeight: 400 }}>{b.label}</th>
+              <td className="sw-num"><Figure minor={b.amountMinor} currency={currency} colour={false} /></td>
+            </tr>
+          ))}
+          <tr>
+            <th scope="row" style={{ fontWeight: 600 }}>Total contractual payments</th>
+            <td className="sw-num" style={{ fontWeight: 600 }}>
+              <Figure minor={maturity.totalMinor} currency={currency} zero="zero" colour={false} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="sw-sub pt-1">
+        {maturity.undatedItems === 0
+          ? "Every payable carries terms, so every one of them is on the ladder above."
+          : `${maturity.undatedItems} payable${maturity.undatedItems === 1 ? "" : "s"} carr` +
+            `${maturity.undatedItems === 1 ? "ies" : "y"} no payment terms. They are shown on their own row rather ` +
+            `than assumed to be payable on demand — no terms recorded is a fact about the keying, not about the ` +
+            `supplier's contract.`}
       </p>
     </div>
   );
@@ -901,11 +950,293 @@ function TradeBody({ note, currency }: { note: ReceivablesPayablesNote; currency
     <div className="grid gap-4 px-3 pb-3 lg:grid-cols-2">
       <AgeingTable ageing={note.receivables} currency={currency} testId="ageing-receivables" />
       <AgeingTable ageing={note.payables} currency={currency} testId="ageing-payables" />
-      <p className="sw-sub lg:col-span-2">
+      <MaturityTable maturity={note.payablesMaturity} currency={currency} />
+      <p className="sw-sub">
         Receivables are stated after an allowance for doubtful debts of{" "}
         <Figure minor={note.allowanceForDoubtfulDebtsMinor} currency={currency} colour={false} />, giving a net{" "}
-        <Figure minor={note.netReceivablesMinor} currency={currency} zero="zero" colour={false} />.
+        <Figure minor={note.netReceivablesMinor} currency={currency} zero="zero" colour={false} />. How that
+        allowance was measured is in the credit risk note.
       </p>
+    </div>
+  );
+}
+
+/**
+ * IFRS 7.35M and 7.35H: the provision matrix, and the loss allowance it moved.
+ *
+ * The matrix table shows the gross beside the exposure the rate was applied to,
+ * because they differ wherever a band holds an unapplied credit note and a
+ * reader who sees only one of the two cannot check the arithmetic. The
+ * reconciliation keeps "charged" apart from "utilised" for the reason IFRS
+ * 7.35I asks it to: a debt written off against the allowance is the allowance
+ * doing its job, not a second charge to profit, and netting the two would make
+ * a business that provides accurately look like one that keeps providing.
+ */
+function CreditRiskBody({ note, currency }: { note: CreditRiskNote; currency: string }) {
+  if (note.state === "empty") return null;
+  const r = note.reconciliation;
+  return (
+    <div className="grid gap-4 px-3 pb-3">
+      <div className="sw-scroll">
+        <table className="sw-table" data-testid="credit-risk-matrix">
+          <caption className="sr-only">
+            Trade receivables at {note.asOf} by age of the debt, with the loss rate applied to each band
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Age of the debt</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Gross</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Exposure</th>
+              <th scope="col" className="sw-num" style={{ width: "6rem" }}>Loss rate</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>
+                Expected credit loss
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {note.matrix.map((m) => (
+              <tr key={m.band}>
+                <th scope="row" style={{ fontWeight: 400 }}>{m.label}</th>
+                <td className="sw-num"><Figure minor={m.grossMinor} currency={currency} /></td>
+                <td className="sw-num"><Figure minor={m.exposureMinor} currency={currency} colour={false} /></td>
+                <td className="sw-num">{m.ratePercent}</td>
+                <td className="sw-num"><Figure minor={m.lossMinor} currency={currency} colour={false} /></td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th scope="row">Lifetime expected credit losses at {note.asOf}</th>
+              <td className="sw-num">
+                <Figure minor={note.grossReceivablesMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+              <td className="sw-num" />
+              <td className="sw-num" />
+              <td className="sw-num" data-testid="credit-risk-target">
+                <Figure minor={note.targetMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="sw-scroll">
+        <table className="sw-table" data-testid="credit-risk-reconciliation">
+          <caption className="sr-only">Movement in the loss allowance for the year</caption>
+          <thead>
+            <tr>
+              <th scope="col">Loss allowance — account {note.allowanceAccount}</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>At the start of the year</th>
+              <td className="sw-num"><Figure minor={r.openingMinor} currency={currency} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Charged to profit or loss</th>
+              <td className="sw-num"><Figure minor={r.chargedMinor} currency={currency} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Released to profit or loss</th>
+              <td className="sw-num"><Figure minor={`-${r.releasedMinor}`} currency={currency} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>
+                Used against debts written off
+                <div className="sw-sub">
+                  The expense was taken when the allowance was raised, so this is not a further charge.
+                </div>
+              </th>
+              <td className="sw-num"><Figure minor={`-${r.utilisedMinor}`} currency={currency} /></td>
+            </tr>
+            {r.otherMinor !== "0" && (
+              <tr>
+                <th scope="row" style={{ fontWeight: 400 }}>
+                  Other movements
+                  <div className="sw-sub">
+                    Postings to the allowance account from outside the measurement and the write-off, shown rather
+                    than absorbed.
+                  </div>
+                </th>
+                <td className="sw-num"><Figure minor={r.otherMinor} currency={currency} /></td>
+              </tr>
+            )}
+            <tr>
+              <th scope="row" style={{ fontWeight: 600 }}>At the end of the year</th>
+              <td className="sw-num" style={{ fontWeight: 600 }}>
+                <Figure minor={r.closingMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>
+                Per the balance sheet
+                <span className={`sw-chip ms-2 ${r.agrees ? "sw-chip-ok" : "sw-chip-bad"}`}>
+                  {r.agrees ? "agrees" : "does not agree"}
+                </span>
+              </th>
+              <td className="sw-num">
+                <Figure minor={r.perBalanceSheetMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p className="sw-sub" style={{ maxWidth: "80ch" }} data-testid="credit-risk-difference">
+        The matrix measures{" "}
+        <Figure minor={note.targetMinor} currency={currency} zero="zero" colour={false} /> and the ledger carries{" "}
+        <Figure minor={note.carriedMinor} currency={currency} zero="zero" colour={false} />, a difference of{" "}
+        <Figure minor={note.differenceMinor} currency={currency} zero="zero" />. Receivables are stated net at{" "}
+        <Figure minor={note.netReceivablesMinor} currency={currency} zero="zero" colour={false} />.{" "}
+        {note.ratesAreDefault
+          ? "The rates above are the product's default matrix rather than this entity's measured collection history, so read the difference as a reason to remeasure on the allowance screen rather than as a quantified under-provision."
+          : ""}
+      </p>
+
+      {note.measurements.length > 0 && (
+        <div>
+          <div className="sw-label">Measured during the year</div>
+          <div className="sw-scroll mt-1">
+            <table className="sw-table" data-testid="credit-risk-measurements">
+              <caption className="sr-only">
+                Allowance measurements posted in the year, with the matrix recorded on each entry
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col" style={{ width: "7rem" }}>Measured at</th>
+                  <th scope="col" style={{ width: "8rem" }}>Entry</th>
+                  <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Movement</th>
+                  <th scope="col">The matrix it was measured on</th>
+                </tr>
+              </thead>
+              <tbody>
+                {note.measurements.map((m) => (
+                  <tr key={m.reference}>
+                    <th scope="row" style={{ fontWeight: 400 }}>{m.date}</th>
+                    <td>{m.reference}</td>
+                    <td className="sw-num"><Figure minor={m.movementMinor} currency={currency} /></td>
+                    <td className="sw-sub" style={{ maxWidth: "60ch" }}>{m.memo}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="sw-label">What this note cannot say</div>
+        <ul className="grid gap-1">
+          {note.notDerivable.map((line) => (
+            <li key={line} className="sw-sub" style={{ maxWidth: "80ch" }}>{line}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Article 103 of Federal Decree-Law 32/2021, computed rather than remembered.
+ *
+ * The transfer is an appropriation within equity: it moves value from retained
+ * earnings to the reserve and changes neither the total of equity nor the
+ * result. What it does change is what may be distributed, which is why it is
+ * worth being told about before the accounts are signed rather than after.
+ */
+function StatutoryReserveBody({ note, currency }: { note: StatutoryReserveNote; currency: string }) {
+  if (note.state === "empty") return null;
+  return (
+    <div className="grid gap-4 px-3 pb-3 lg:grid-cols-2">
+      <div className="sw-scroll">
+        <table className="sw-table" data-testid="statutory-reserve">
+          <caption className="sr-only">The statutory reserve, and what Article 103 asks of this year</caption>
+          <thead>
+            <tr>
+              <th scope="col">
+                <span className="sw-code me-2">{note.account}</span>Statutory reserve
+              </th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>At the start of the year</th>
+              <td className="sw-num"><Figure minor={note.openingMinor} currency={currency} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Transferred in the year</th>
+              <td className="sw-num" data-testid="reserve-transferred">
+                <Figure minor={note.transferredMinor} currency={currency} />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 600 }}>At the end of the year</th>
+              <td className="sw-num" style={{ fontWeight: 600 }}>
+                <Figure minor={note.closingMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="sw-scroll">
+        <table className="sw-table" data-testid="statutory-reserve-requirement">
+          <caption className="sr-only">The Article 103 computation for the year</caption>
+          <thead>
+            <tr>
+              <th scope="col">What Article 103 asks of this year</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>
+                Paid-up capital
+                <span className="sw-code ms-2">{note.capitalAccount}</span>
+              </th>
+              <td className="sw-num">
+                <Figure minor={note.paidUpCapitalMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Half of it, where the deduction may stop</th>
+              <td className="sw-num"><Figure minor={note.capMinor} currency={currency} zero="zero" colour={false} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Result for the year</th>
+              <td className="sw-num"><Figure minor={note.profitForThePeriodMinor} currency={currency} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Ten per cent of it</th>
+              <td className="sw-num"><Figure minor={note.tenPercentMinor} currency={currency} zero="zero" colour={false} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Room below the cap before this year&rsquo;s transfer</th>
+              <td className="sw-num"><Figure minor={note.headroomMinor} currency={currency} zero="zero" colour={false} /></td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 600 }}>
+                Required this year
+                <span className={`sw-chip ms-2 ${note.satisfied ? "sw-chip-ok" : "sw-chip-warn"}`}>
+                  {note.capReached ? "cap reached" : note.satisfied ? "appropriated" : "outstanding"}
+                </span>
+              </th>
+              <td className="sw-num" style={{ fontWeight: 600 }} data-testid="reserve-required">
+                <Figure minor={note.requiredMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+            <tr>
+              <th scope="row" style={{ fontWeight: 400 }}>Still to be appropriated</th>
+              <td className="sw-num" data-testid="reserve-shortfall">
+                <Figure minor={note.shortfallMinor} currency={currency} zero="zero" colour={false} />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1122,13 +1453,12 @@ function TaxBody({ note, currency }: { note: TaxNote; currency: string }) {
  * asked" is the whole point of showing this note at all.
  */
 function RequiresInputBody({ note }: { note: RequiresInputNote }) {
-  // A note key this page has not been taught lands here, and it will not carry
-  // `requires` at all. That used to be a thrown `undefined.map` taking the
-  // whole notes pack down — a note added on the server crashing the screen that
-  // reads it, because this file mirrors the wire shapes by hand and the
-  // compiler therefore has nothing to check the two against. The note's own
-  // statement is always present, so an untaught note degrades to it.
-  const questions = note.requires ?? [];
+  // Reached only by the two keys named in the switch above, so `requires` is
+  // there by construction. It used to be the catch-all arm, which is how a note
+  // added on the server reached it, failed to find `requires` and took the
+  // whole pack down with an `undefined.map`. An unknown key now goes to the
+  // generic body instead, and this one only handles what it was written for.
+  const questions = note.requires;
   if (questions.length === 0) return null;
   return (
     <ol className="grid gap-2 px-3 pb-3" data-testid={`requires-${note.key}`}>

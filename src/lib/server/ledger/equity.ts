@@ -12,6 +12,7 @@ import { revaluationRegister } from "./asset-revaluation";
 import { provisionNote, type ProvisionNoteResult } from "./provisions";
 import { deferredTaxNote, type DeferredTaxNoteResult } from "./deferred-tax";
 import { relatedPartyNote as relatedPartyDisclosure, type RelatedPartyNoteData } from "./related-parties";
+import { allowanceView, ALLOWANCE_SOURCE_TYPE } from "./allowance";
 
 /**
  * The statement of changes in equity (IAS 1.106), and the notes.
@@ -377,6 +378,7 @@ export interface AgeingDisclosure {
   account: string;
   name: string;
   asOf: string;
+  /** By age of the document — how long ago it was raised, not when it falls due. */
   bands: AgeingBand[];
   /** The ageing report's own total. */
   totalPerAgeingMinor: string;
@@ -386,15 +388,140 @@ export interface AgeingDisclosure {
   differenceMinor: string;
   openItems: number;
   oldestDays: number | null;
+  /**
+   * Of the total, what is past its own due date. Nil where no document carries
+   * terms — which is not the same as nothing being late, and is why the ageing
+   * bands beside it cannot be read as lateness.
+   */
+  overdueMinor: string;
+}
+
+/**
+ * IFRS 7.39(a): what is owed, laid out by when it has to be paid.
+ *
+ * A separate disclosure from the ageing above and not a relabelling of it. The
+ * ageing answers "how long has this been on the ledger", which is a credit
+ * control question; the maturity answers "what must this business find, and by
+ * when", which is the liquidity question IFRS 7.39 asks. They agree in total
+ * and in nothing else: a bill raised sixty days ago on ninety-day terms is in
+ * the third ageing band and the first maturity band, and it is not overdue.
+ */
+export interface MaturityDisclosure {
+  account: string;
+  name: string;
+  asOf: string;
+  bands: AgeingBand[];
+  totalMinor: string;
+  /** The first band restated, because it is the figure a reader looks for. */
+  pastDueMinor: string;
+  /** What no maturity can be stated for, because no terms were recorded. */
+  undatedMinor: string;
+  undatedItems: number;
 }
 
 export interface ReceivablesPayablesNote extends NoteBase {
   key: "trade_receivables_and_payables";
   receivables: AgeingDisclosure;
   payables: AgeingDisclosure;
+  /** The same payables, on the contractual maturity IFRS 7.39(a) asks for. */
+  payablesMaturity: MaturityDisclosure;
   /** Held on 1150; a contra-asset, so it is shown as a positive deduction. */
   allowanceForDoubtfulDebtsMinor: string;
   netReceivablesMinor: string;
+}
+
+/**
+ * IFRS 7.35H and 7.35M, which the provision matrix in `allowance.ts` is what
+ * makes possible at all.
+ *
+ * Two disclosures in one note, because they are two halves of one answer. The
+ * matrix is the credit risk exposure by grade — for a trade receivable under
+ * the simplified approach, IFRS 7.35N lets the grade be the age of the debt —
+ * and the reconciliation is the movement in the loss allowance that the matrix
+ * produced. Neither is worth much without the other: a matrix with no
+ * reconciliation does not say whether it was ever posted, and a reconciliation
+ * with no matrix does not say where the number came from.
+ */
+export interface CreditRiskNote extends NoteBase {
+  key: "credit_risk";
+  asOf: string;
+  allowanceAccount: string;
+  /** The loss rates that produced the target below, and where they came from. */
+  ratesAreDefault: boolean;
+  matrix: {
+    band: string;
+    label: string;
+    grossMinor: string;
+    exposureMinor: string;
+    rateBps: number;
+    ratePercent: string;
+    lossMinor: string;
+  }[];
+  grossReceivablesMinor: string;
+  /** What the matrix above measures the lifetime expected credit loss to be. */
+  targetMinor: string;
+  /** What the ledger actually carries on the allowance account. */
+  carriedMinor: string;
+  /**
+   * Target less carried, and it is called a difference rather than a shortfall
+   * on purpose. Where the rates are the product's default it is the gap against
+   * an assumed matrix, which is an indication to act on and not a measured
+   * under-provision.
+   */
+  differenceMinor: string;
+  /** Whether an allowance was measured and posted at the reporting date itself. */
+  measuredAtReportingDate: boolean;
+  netReceivablesMinor: string;
+  /** IFRS 7.35H: how the loss allowance moved in the year, and why. */
+  reconciliation: {
+    openingMinor: string;
+    chargedMinor: string;
+    releasedMinor: string;
+    utilisedMinor: string;
+    otherMinor: string;
+    closingMinor: string;
+    perBalanceSheetMinor: string;
+    agrees: boolean;
+  };
+  /** Every matrix posted, with the judgement recorded on the entry that used it. */
+  measurements: { reference: string; date: string; movementMinor: string; memo: string }[];
+  /** What this note cannot say, listed rather than left out. */
+  notDerivable: string[];
+}
+
+/**
+ * The statutory reserve UAE Commercial Companies Law makes compulsory.
+ *
+ * Article 103 of Federal Decree-Law 32/2021 requires 10% of the year's net
+ * profit to be set aside into a statutory reserve until the reserve reaches
+ * half the paid-up capital, at which point the deduction may stop. Account 3200
+ * exists, the statement reports the transfer correctly when somebody makes one,
+ * and nothing ever asked for one — so an entity could trade profitably for
+ * years, never appropriate a fil, and see nothing anywhere saying so.
+ */
+export interface StatutoryReserveNote extends NoteBase {
+  key: "statutory_reserve";
+  account: string;
+  capitalAccount: string;
+  paidUpCapitalMinor: string;
+  /** Half the paid-up capital: the point at which the deduction may stop. */
+  capMinor: string;
+  openingMinor: string;
+  /** What was appropriated into the reserve during the year, per the ledger. */
+  transferredMinor: string;
+  closingMinor: string;
+  /** The year's result, as the statement of changes in equity derives it. */
+  profitForThePeriodMinor: string;
+  /** Ten per cent of it, which is nil where the year made a loss. */
+  tenPercentMinor: string;
+  /** How much room is left below the cap before the transfer was made. */
+  headroomMinor: string;
+  /** The lesser of the two above — what Article 103 asks of this year. */
+  requiredMinor: string;
+  /** Required less transferred, floored at nil. */
+  shortfallMinor: string;
+  satisfied: boolean;
+  capReached: boolean;
 }
 
 export interface RevenueNote extends NoteBase {
@@ -536,11 +663,13 @@ export type Note =
   | IntangiblesNote
   | LeaseNote
   | ReceivablesPayablesNote
+  | CreditRiskNote
   | RevenueNote
   | RelatedPartyNote
   | ProvisionsNote
   | TaxNote
   | DeferredTaxNote
+  | StatutoryReserveNote
   | RequiresInputNote;
 
 export interface FiscalYearRef {
@@ -1057,13 +1186,23 @@ const TAX_TREATMENT_LABEL: Record<string, string> = {
   MARGIN_SCHEME: "Margin scheme",
 };
 
-/** The ageing bands as `ar.ts` and `ap.ts` cut them, spelled out for the note. */
+/**
+ * The ageing bands as `ar.ts` and `ap.ts` cut them, spelled out for the note.
+ *
+ * Every label says "old", and that is a correction rather than a flourish.
+ * These bands are measured from the day the document was raised, and they used
+ * to be captioned "Not more than 30 days", "31 to 60 days" and so on under a
+ * heading citing IFRS 7.39 — which is a maturity analysis, measured forwards to
+ * the day the money falls due. A reader had no way to tell the two apart, and
+ * the two say opposite things about a business on long terms. The maturity
+ * ladder is now its own table, cut on the due date, with its own labels.
+ */
 const AGEING_BANDS: { key: string; label: string }[] = [
-  { key: "current", label: "Not more than 30 days" },
-  { key: "d31_60", label: "31 to 60 days" },
-  { key: "d61_90", label: "61 to 90 days" },
-  { key: "d91_120", label: "91 to 120 days" },
-  { key: "over120", label: "More than 120 days" },
+  { key: "current", label: "Not more than 30 days old" },
+  { key: "d31_60", label: "31 to 60 days old" },
+  { key: "d61_90", label: "61 to 90 days old" },
+  { key: "d91_120", label: "91 to 120 days old" },
+  { key: "over120", label: "More than 120 days old" },
 ];
 
 function accountingPolicies(ctx: Context, n: number, registerAssets: number, registerLeases: number): PolicyNote {
@@ -1188,16 +1327,37 @@ function accountingPolicies(ctx: Context, n: number, registerAssets: number, reg
   }
 
   if (has([TRADE_RECEIVABLES])) {
+    /*
+     * The nil case is a departure, and it now says so.
+     *
+     * This policy used to read "Trade receivables are stated at the amount
+     * invoiced. No allowance for doubtful debts has been recognised" under a
+     * basis of IFRS 9.5.5.15 — which is the paragraph that makes a lifetime
+     * expected credit loss allowance compulsory on a trade receivable. Citing
+     * the rule that forbids what the sentence describes reads as compliance to
+     * everyone except the auditor who looks the paragraph up. There is no
+     * materiality get-out to hide behind either: whether the loss is material
+     * is a judgement about the amount, not a reason the measurement was never
+     * made.
+     */
+    const carried = has([DOUBTFUL_DEBT_ALLOWANCE]);
     policies.push({
       key: "trade_receivables",
       label: "Trade receivables",
-      policy: has([DOUBTFUL_DEBT_ALLOWANCE])
-        ? "Trade receivables are stated at the amount invoiced less an allowance for amounts considered doubtful."
-        : "Trade receivables are stated at the amount invoiced. No allowance for doubtful debts has been recognised.",
-      basis: "IFRS 9.5.5.15",
-      evidence: has([DOUBTFUL_DEBT_ALLOWANCE])
-        ? "An allowance is carried on account 1150."
-        : "Account 1150 carries nothing, so no allowance is claimed.",
+      policy: carried
+        ? "Trade receivables are stated at the amount invoiced less a loss allowance measured at lifetime " +
+          "expected credit losses. The entity applies the simplified approach, which requires that measurement " +
+          "for a trade receivable from the day it is recognised, and the allowance is computed on a provision " +
+          "matrix of loss rates applied to the receivables in each ageing band."
+        : "Trade receivables are stated at the amount invoiced, with no loss allowance deducted. IFRS 9.5.5.15 " +
+          "requires a trade receivable to be carried at the amount invoiced less a lifetime expected credit loss " +
+          "allowance; none has been measured or recognised, so the receivables in these accounts are stated gross " +
+          "and no expected credit loss has been charged against the result for the year.",
+      basis: "IFRS 9.5.5.15, IFRS 9.B5.5.35",
+      evidence: carried
+        ? `An allowance is carried on account ${DOUBTFUL_DEBT_ALLOWANCE}, and the matrix behind it is in the ` +
+          `credit risk note.`
+        : `Account ${DOUBTFUL_DEBT_ALLOWANCE} has neither a balance nor a movement in ${ctx.year.label}.`,
     });
   }
 
@@ -1682,6 +1842,7 @@ function receivablesPayablesNote(
     differenceMinor: (BigInt(ar.totalMinor) - arLedger).toString(),
     openItems: ar.open.length,
     oldestDays: ar.open.length ? ar.open[0].daysOld : null,
+    overdueMinor: ar.overdueMinor,
   };
 
   const payables: AgeingDisclosure = {
@@ -1695,9 +1856,26 @@ function receivablesPayablesNote(
     differenceMinor: (BigInt(ap.totalMinor) - apLedger).toString(),
     openItems: ap.open.length,
     oldestDays: ap.open.length ? ap.open[0].daysOld : null,
+    overdueMinor: ap.overdueMinor,
+  };
+
+  // Cut on the due date rather than the document date, which is the whole
+  // difference between a liquidity disclosure and a credit-control one. The
+  // subledger builds it in the same pass as the ageing and from the same netted
+  // open items, so the two tables come to the same total by construction.
+  const payablesMaturity: MaturityDisclosure = {
+    account: TRADE_PAYABLES,
+    name: ctx.accountNames.get(TRADE_PAYABLES)?.name ?? "Trade payables",
+    asOf: ap.maturity.asOf,
+    bands: ap.maturity.bands,
+    totalMinor: ap.maturity.totalMinor,
+    pastDueMinor: ap.maturity.pastDueMinor,
+    undatedMinor: ap.maturity.undatedMinor,
+    undatedItems: ap.maturity.undatedItems,
   };
 
   const anything = arLedger !== 0n || apLedger !== 0n || ar.open.length > 0 || ap.open.length > 0;
+  const undated = BigInt(payablesMaturity.undatedMinor) !== 0n;
 
   return {
     number: n,
@@ -1708,13 +1886,210 @@ function receivablesPayablesNote(
     statement: anything
       ? `Both ageings are built by netting each document down to what is still open on it, from the control ` +
         `accounts themselves. The band totals are shown against the control account balance at ${ctx.to}: if the ` +
-        `two differ, the ageing has lost a document, and the difference says by how much.`
+        `two differ, the ageing has lost a document, and the difference says by how much. The ageings measure how ` +
+        `long ago each document was raised; the maturity table measures how long there is left to pay, which is a ` +
+        `different question and the one IFRS 7.39 asks.` +
+        (undated
+          ? ` ${payablesMaturity.undatedItems} payable${payablesMaturity.undatedItems === 1 ? "" : "s"} carr` +
+            `${payablesMaturity.undatedItems === 1 ? "ies" : "y"} no payment terms, so no maturity can be stated ` +
+            `for ${payablesMaturity.undatedItems === 1 ? "it" : "them"} and ${payablesMaturity.undatedItems === 1 ? "it is" : "they are"} ` +
+            `shown apart rather than assumed to be payable on demand.`
+          : "")
       : `Nothing is owed to the entity and nothing is owed by it at ${ctx.to}. Accounts ${TRADE_RECEIVABLES} and ` +
         `${TRADE_PAYABLES} are both nil and neither ageing carries an open item.`,
     receivables,
     payables,
+    payablesMaturity,
     allowanceForDoubtfulDebtsMinor: allowance.toString(),
     netReceivablesMinor: (arLedger - allowance).toString(),
+  };
+}
+
+/**
+ * IFRS 7.35H and 7.35M — the credit risk note the provision matrix makes
+ * possible.
+ *
+ * The matrix is recomputed at the reporting date rather than read off the last
+ * posting, so the note says whether the allowance the ledger carries is still
+ * the allowance the matrix asks for. That comparison is the disclosure's whole
+ * value: an allowance measured once and never revisited is the failure this
+ * note exists to make visible, and reporting only the posted figure would hide
+ * exactly that.
+ */
+function creditRiskNote(
+  ctx: Context,
+  n: number,
+  view: Awaited<ReturnType<typeof allowanceView>>,
+): CreditRiskNote {
+  const allowanceLines = ctx.lines.filter((l) => l.code === DOUBTFUL_DEBT_ALLOWANCE);
+  const opening = -balanceOf(ctx.openingBs, DOUBTFUL_DEBT_ALLOWANCE);
+  const perSheet = -balanceOf(ctx.closingBs, DOUBTFUL_DEBT_ALLOWANCE);
+
+  // Signs, once, so the rest reads as English. The allowance is a contra-asset,
+  // so a credit raises it and a debit consumes it; the ledger holds a credit
+  // negative, hence the negation.
+  const measured = allowanceLines.filter((l) => l.sourceType === ALLOWANCE_SOURCE_TYPE);
+  const charged = -measured.filter((l) => l.amount < 0n).reduce((a, l) => a + l.amount, 0n);
+  const released = measured.filter((l) => l.amount > 0n).reduce((a, l) => a + l.amount, 0n);
+  // A debt written off against the allowance consumes it: the expense was taken
+  // when the allowance was raised, so this is not a second charge and must not
+  // read as one. IFRS 7.35I asks for it as its own line for that reason.
+  const utilised = allowanceLines
+    .filter((l) => l.source === "write_off")
+    .reduce((a, l) => a + l.amount, 0n);
+  // Anything else that reached 1150 — a hand-keyed journal, an opening balance.
+  // It is shown rather than absorbed, because a reconciliation that plugs is
+  // not a reconciliation.
+  const other = allowanceLines
+    .filter((l) => l.sourceType !== ALLOWANCE_SOURCE_TYPE && l.source !== "write_off")
+    .reduce((a, l) => a - l.amount, 0n);
+  const closing = opening + charged - released - utilised + other;
+
+  const target = BigInt(view.targetMinor);
+  const carried = BigInt(view.carriedMinor);
+  const gross = BigInt(view.grossReceivablesMinor);
+  const anything = gross !== 0n || carried !== 0n || allowanceLines.length > 0;
+  const measuredAtReportingDate = view.postedEntryId !== null;
+
+  return {
+    number: n,
+    key: "credit_risk",
+    title: "Credit risk and the allowance for doubtful debts",
+    basis: "IFRS 9.5.5.15, IFRS 9.B5.5.35, IFRS 7.35H, IFRS 7.35M, IFRS 7.35N",
+    state: anything ? "present" : "empty",
+    statement: anything
+      ? `Trade receivables are measured at lifetime expected credit losses under the simplified approach, on a ` +
+        `provision matrix of loss rates by age of the debt. The matrix below is recomputed at ${ctx.to} ` +
+        (view.ratesSupplied
+          ? `on the loss rates the preparer set`
+          : `on the product's default loss rates — which are a starting point and not a measurement of this ` +
+            `entity's own collection history, and IFRS 9.B5.5.35 asks for the latter`) +
+        `, and set against what account ${DOUBTFUL_DEBT_ALLOWANCE} actually carries: ` +
+        (target === carried
+          ? `the two agree.`
+          : `they differ by ${money(target - carried, ctx.currency)}. Read that as an indication to remeasure ` +
+            `rather than as a measured under-provision, because the rates each allowance was actually posted on ` +
+            `are recorded on its own entry and listed below.`) +
+        (measuredAtReportingDate
+          ? ` The allowance was measured at the reporting date.`
+          : ` No allowance was measured at ${ctx.to} itself, so what the ledger carries was last set on an ` +
+            `earlier ageing.`)
+      : `The entity carries no trade receivables at ${ctx.to} and no allowance for doubtful debts, so there is no ` +
+        `credit risk on trade receivables to disclose.`,
+    asOf: view.asOf,
+    allowanceAccount: DOUBTFUL_DEBT_ALLOWANCE,
+    ratesAreDefault: !view.ratesSupplied,
+    matrix: view.matrix.map((r) => ({
+      band: r.band,
+      label: r.label,
+      grossMinor: r.grossMinor,
+      exposureMinor: r.exposureMinor,
+      rateBps: r.rateBps,
+      ratePercent: r.ratePercent,
+      lossMinor: r.lossMinor,
+    })),
+    grossReceivablesMinor: view.grossReceivablesMinor,
+    targetMinor: view.targetMinor,
+    carriedMinor: view.carriedMinor,
+    differenceMinor: (target - carried).toString(),
+    measuredAtReportingDate,
+    netReceivablesMinor: view.netReceivablesMinor,
+    reconciliation: {
+      openingMinor: opening.toString(),
+      chargedMinor: charged.toString(),
+      releasedMinor: released.toString(),
+      utilisedMinor: utilised.toString(),
+      otherMinor: other.toString(),
+      closingMinor: closing.toString(),
+      perBalanceSheetMinor: perSheet.toString(),
+      agrees: closing === perSheet,
+    },
+    measurements: view.history
+      .filter((m) => m.date >= ctx.from && m.date <= ctx.to)
+      .map((m) => ({ reference: m.reference, date: m.date, movementMinor: m.movementMinor, memo: m.memo })),
+    notDerivable: [
+      "Collateral and other credit enhancements held (IFRS 7.35K(b)) — the ledger records no security over a trade receivable.",
+      "Concentrations of credit risk by counterparty or by geography (IFRS 7.34(c)) — the matrix grades by age of the debt alone.",
+      "Forward-looking adjustments to the loss rates (IFRS 9.5.5.17(c)) — the rates are entered as a judgement, and the ledger holds no macroeconomic input to derive one from.",
+    ],
+  };
+}
+
+/**
+ * The statutory reserve Article 103 of Federal Decree-Law 32/2021 requires.
+ *
+ * Ten per cent of the year's net profit goes to a statutory reserve until the
+ * reserve reaches half the paid-up capital. This computes what that comes to
+ * and sets it against what the ledger shows was actually appropriated, because
+ * account 3200 was seeded and the statement reported a transfer correctly the
+ * moment somebody made one — and nothing ever asked for one.
+ *
+ * Two honest limits, stated in the note rather than glossed. The profit here is
+ * the accounting profit these statements report, and Article 103 says "net
+ * profits" without defining it for this purpose; and a company's own articles
+ * may require more than the statutory ten per cent. Neither is knowable from a
+ * ledger, so both are said out loud.
+ */
+function statutoryReserveNote(
+  ctx: Context,
+  n: number,
+  statement: StatementOfChangesInEquity,
+): StatutoryReserveNote {
+  const paidUpCapital = -balanceOf(ctx.closingBs, SHARE_CAPITAL);
+  const cap = (paidUpCapital + 1n) / 2n;
+  const opening = -balanceOf(ctx.openingBs, STATUTORY_RESERVE);
+  const closing = -balanceOf(ctx.closingBs, STATUTORY_RESERVE);
+  const transferred = closing - opening;
+
+  const profit = BigInt(statement.profitForThePeriodMinor);
+  // A loss is not a profit to deduct a tenth of, and Article 103 has nothing to
+  // say about one. Rounded up on the fil, so a deduction is never a fil short of
+  // the tenth the article asks for.
+  const tenPercent = profit > 0n ? (profit + 9n) / 10n : 0n;
+  // Measured before this year's transfer, because the question the article asks
+  // is how much room there was to fill.
+  const headroom = cap - opening > 0n ? cap - opening : 0n;
+  const required = tenPercent < headroom ? tenPercent : headroom;
+  const shortfall = required - transferred > 0n ? required - transferred : 0n;
+
+  const anything = paidUpCapital !== 0n || closing !== 0n || profit !== 0n;
+
+  return {
+    number: n,
+    key: "statutory_reserve",
+    title: "Statutory reserve",
+    basis: "Federal Decree-Law 32/2021 Article 103, IAS 1.79(b)",
+    state: anything ? "present" : "empty",
+    statement: anything
+      ? (closing >= cap && cap > 0n
+          ? `The statutory reserve stands at ${money(closing, ctx.currency)}, which is at least half the paid-up ` +
+            `capital of ${money(paidUpCapital, ctx.currency)}. Article 103 permits the annual deduction to stop.`
+          : shortfall === 0n
+            ? `Article 103 requires ${money(required, ctx.currency)} of this year's profit to be appropriated to ` +
+              `the statutory reserve, and ${money(transferred, ctx.currency)} was. Nothing is outstanding.`
+            : `Article 103 requires ${money(required, ctx.currency)} of this year's profit to be appropriated to ` +
+              `the statutory reserve. ${transferred === 0n ? "No transfer has been made" : `${money(transferred, ctx.currency)} was transferred`}, ` +
+              `so ${money(shortfall, ctx.currency)} is still to be appropriated. It is a movement within equity ` +
+              `and changes neither the total of equity nor the result for the year.`) +
+        ` The percentage is applied to the result these statements report; Article 103 says "net profits" without ` +
+        `defining the term for this purpose, and a company's own articles may require more than the statutory ` +
+        `tenth. Neither can be read off a ledger.`
+      : `The entity has no paid-up capital, no statutory reserve and no result for ${ctx.year.label}, so Article ` +
+        `103 asks nothing of it this year.`,
+    account: STATUTORY_RESERVE,
+    capitalAccount: SHARE_CAPITAL,
+    paidUpCapitalMinor: paidUpCapital.toString(),
+    capMinor: cap.toString(),
+    openingMinor: opening.toString(),
+    transferredMinor: transferred.toString(),
+    closingMinor: closing.toString(),
+    profitForThePeriodMinor: profit.toString(),
+    tenPercentMinor: tenPercent.toString(),
+    headroomMinor: headroom.toString(),
+    requiredMinor: required.toString(),
+    shortfallMinor: shortfall.toString(),
+    satisfied: shortfall === 0n,
+    capReached: cap > 0n && closing >= cap,
   };
 }
 
@@ -2195,12 +2570,18 @@ function requiresInputNotes(
 /* ------------------------------------------------------------------- entry */
 
 async function buildNotes(ctx: Context, statement: StatementOfChangesInEquity): Promise<Note[]> {
-  const [assets, revaluations, leases, ar, ap, provisions, deferredTax, relatedParties] = await Promise.all([
+  const [assets, revaluations, leases, ar, ap, allowance, provisions, deferredTax, relatedParties] = await Promise.all([
     assetRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
     revaluationRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
     leaseRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
     receivablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.year.endsOn }),
     payablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.year.endsOn }),
+    // No rates are passed, so the matrix in the note is the product's default
+    // one. The pack has nowhere to take a preparer's rates from — they are
+    // entered on the allowance screen and recorded on the entry they produced
+    // — and the note says which of the two it used rather than implying the
+    // figure is this entity's measured loss experience.
+    allowanceView({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.year.endsOn }),
     provisionNote({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.to }),
     deferredTaxNote({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.to }),
     relatedPartyDisclosure({
@@ -2220,13 +2601,17 @@ async function buildNotes(ctx: Context, statement: StatementOfChangesInEquity): 
   notes.push(intangiblesNote(ctx, 3, assets));
   notes.push(leaseNote(ctx, 4, leases));
   notes.push(receivablesPayablesNote(ctx, 5, ar, ap));
-  notes.push(revenueNote(ctx, 6));
-  notes.push(relatedPartyNote(ctx, 7, statement, relatedParties));
-  const provisionsNoteNumber = 8;
+  // Directly after the receivables it measures, because a reader who has just
+  // seen the gross ageing is the reader asking how much of it will arrive.
+  notes.push(creditRiskNote(ctx, 6, allowance));
+  notes.push(revenueNote(ctx, 7));
+  notes.push(relatedPartyNote(ctx, 8, statement, relatedParties));
+  const provisionsNoteNumber = 9;
   notes.push(provisionsNote(provisionsNoteNumber, provisions));
-  notes.push(await taxNote(ctx, 9, BigInt(statement.profitForThePeriodMinor)));
-  notes.push(deferredTaxPackNote(10, deferredTax));
-  notes.push(...requiresInputNotes(11, ctx.to, {
+  notes.push(await taxNote(ctx, 10, BigInt(statement.profitForThePeriodMinor)));
+  notes.push(deferredTaxPackNote(11, deferredTax));
+  notes.push(statutoryReserveNote(ctx, 12, statement));
+  notes.push(...requiresInputNotes(13, ctx.to, {
     contingentLiabilities: provisions.contingentLiabilities.length,
     contingentAssets: provisions.contingentAssets.length,
     number: provisionsNoteNumber,

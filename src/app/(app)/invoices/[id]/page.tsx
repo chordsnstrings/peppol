@@ -25,6 +25,7 @@ import {
   Bell,
   Link2,
   MessageCircle,
+  BookOpen,
 } from "lucide-react";
 import { createPaymentLink, markPaid, sendReminder } from "@/lib/payments-client";
 import { sendInvoiceWhatsApp } from "@/lib/whatsapp-client";
@@ -38,6 +39,23 @@ import { generateUBL, downloadText } from "@/lib/domain/ubl";
 import { useAppState } from "@/lib/app-state";
 import { useRecord, useCollection } from "@/lib/db/hooks";
 import { cancelInvoice, deleteInvoice, sendInvoice } from "@/lib/db/repo";
+import { useGatewayMode } from "@/lib/gateway/mode";
+import {
+  SIMULATED_LABEL,
+  SIMULATED_SEND_NOTE,
+  SIMULATED_SEND_WARNING,
+} from "@/lib/gateway/disclosure";
+import {
+  AR_CONTROL,
+  BOOK_CURRENCY,
+  dayAfter,
+  journalHref,
+  ledgerProblem,
+  postInvoiceToLedger,
+  useSalesLedger,
+  whyNotPostable,
+} from "@/components/ledger/ar-posting";
+import { ReceiptModal } from "@/components/ledger/ar-receipt-modal";
 import type { Invoice, InvoiceEvent } from "@/lib/domain/types";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
@@ -66,6 +84,27 @@ export default function InvoiceDetailPage() {
   const [confirmCancel, setConfirmCancel] = React.useState(false);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [postingToLedger, setPostingToLedger] = React.useState(false);
+  const [ledgerError, setLedgerError] = React.useState<string | null>(null);
+  const [receiptOpen, setReceiptOpen] = React.useState(false);
+  const [receiptSuggestion, setReceiptSuggestion] = React.useState<bigint | null>(null);
+  const gateway = useGatewayMode();
+
+  /* Why this document does not belong in the sales ledger, where it does not.
+   * The sentence is shown instead of the action, so somebody looking for the
+   * button finds out why there isn't one. */
+  const notPostable = invoice ? whyNotPostable(invoice) : null;
+
+  /* Whether this invoice is on the books, read from the receivables control
+   * account itself rather than from a flag on the document. The entry an
+   * invoice makes is dated on the invoice, so the read only has to cover that
+   * day — see `dayAfter` for why the window closes a day late. Nothing is read
+   * at all for a document that could never be in there. */
+  const issuedOn = invoice?.issueDate?.slice(0, 10);
+  const ledger = useSalesLedger(
+    invoice && !notPostable ? invoice.entityId : undefined,
+    issuedOn ? { from: issuedOn, to: dayAfter(issuedOn) } : undefined,
+  );
 
   if (loading) return <DetailSkeleton />;
   if (!invoice) {
@@ -82,18 +121,58 @@ export default function InvoiceDetailPage() {
   const isDraft = invoice.lifecycleStatus === "DRAFT" || invoice.lifecycleStatus === "READY";
   const isCompleted = invoice.lifecycleStatus === "COMPLETED";
   const isProforma = invoice.docType === "PROFORMA";
+  const posted = ledger.index?.postings.get(invoice.id) ?? null;
 
   const doSend = async () => {
     if (!currentEntity) return;
     setBusy(true);
     try {
       await sendInvoice(invoice, currentEntity);
-      toast.success("Sent, delivered & reported");
+      /* On a simulated gateway the acceptance came from this deployment, not
+       * from the buyer's Access Point or the FTA, so it is reported as the
+       * rehearsal it was. `simulated` stays true until the server says
+       * otherwise, so an unanswered health check errs toward the warning. */
+      if (gateway.simulated) {
+        toast.warning("Simulated — nothing was transmitted", { description: SIMULATED_SEND_NOTE });
+      } else {
+        toast.success("Sent, delivered & reported");
+      }
     } catch {
       toast.error("Can't send", { description: "This invoice has blocking issues." });
     }
     setBusy(false);
     setConfirmSend(false);
+  };
+
+  /**
+   * Put this invoice into the general ledger.
+   *
+   * Idempotent on the invoice id, so the route answers `alreadyPosted` when the
+   * entry was already there — and this says so rather than claiming a posting
+   * it did not make. Every refusal the route makes carries a sentence written
+   * to be read, so it is shown as it stands.
+   */
+  const postToLedger = async () => {
+    setPostingToLedger(true);
+    setLedgerError(null);
+    try {
+      const entry = await postInvoiceToLedger(invoice.id);
+      ledger.reload();
+      if (entry.alreadyPosted) {
+        toast("Already on the books", {
+          description: `${invoice.number} was posted as ${entry.reference}. Nothing was posted again.`,
+        });
+      } else {
+        toast.success(`Posted as ${entry.reference}`, {
+          description: "Receivables, revenue and VAT output now carry this invoice.",
+        });
+      }
+    } catch (e) {
+      const message = ledgerProblem(e);
+      setLedgerError(message);
+      toast.error("Not posted", { description: message });
+    }
+    setPostingToLedger(false);
   };
 
   const exportXML = () => {
@@ -142,9 +221,18 @@ export default function InvoiceDetailPage() {
 
   const doMarkPaid = async () => {
     setBusy(true);
+    /* What is outstanding now, before the document records the payment — it is
+     * the amount that reached the bank, and a moment later the document will
+     * say nothing is due. Only in the book's own currency: a receipt is posted
+     * in dirhams, and this figure is in whatever the invoice was raised in. */
+    const banked = invoice.currency === BOOK_CURRENCY ? outstandingMinor(invoice) : 0;
     try {
       await markPaid(invoice.id, "Bank transfer");
-      toast.success("Marked as paid");
+      toast.success("Marked as paid", {
+        description: "Recorded on the document. The books do not know yet — post the receipt.",
+      });
+      setReceiptSuggestion(Number.isInteger(banked) && banked > 0 ? BigInt(banked) : null);
+      setReceiptOpen(true);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't mark paid");
     }
@@ -255,6 +343,11 @@ export default function InvoiceDetailPage() {
                     Re-check status
                   </DropdownItem>
                 )}
+                {!notPostable && !posted && (
+                  <DropdownItem icon={<BookOpen />} onSelect={postToLedger}>
+                    Post to the ledger
+                  </DropdownItem>
+                )}
                 <DropdownSeparator />
                 {isDraft ? (
                   <>
@@ -335,16 +428,116 @@ export default function InvoiceDetailPage() {
               <CardTitle className="text-base">Delivery status</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              {/* The two status maps have no gateway knowledge and should not
+                  gain any, so the qualifier is added here: on a simulated
+                  deployment "Delivered" and "Reported" are outcomes this
+                  deployment wrote for itself. A leg that has not moved carries
+                  no badge — there is nothing simulated about "not sent". */}
               <StatusLeg
                 icon={<ArrowLeftRight />}
                 label="Exchange (to buyer)"
                 meta={EXCHANGE_META[invoice.exchangeStatus]}
+                qualifier={
+                  gateway.known && gateway.simulated && invoice.exchangeStatus !== "NOT_SENT"
+                    ? SIMULATED_LABEL
+                    : undefined
+                }
               />
               <StatusLeg
                 icon={<Landmark />}
                 label="Reporting (to FTA)"
                 meta={REPORTING_META[invoice.reportingStatusC2]}
+                qualifier={
+                  gateway.known && gateway.simulated && invoice.reportingStatusC2 !== "NOT_REPORTED"
+                    ? SIMULATED_LABEL
+                    : undefined
+                }
               />
+              {gateway.known && gateway.simulated && invoice.exchangeStatus !== "NOT_SENT" && (
+                <p className="text-xs text-muted-foreground">{SIMULATED_SEND_NOTE}</p>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Sales ledger — what this document did to the books, which is a
+              different question from what the network did with it. */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <BookOpen className="size-4" /> Sales ledger
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              {notPostable ? (
+                <p className="text-muted-foreground">{notPostable}</p>
+              ) : (
+                <>
+                  {ledger.loading && <p className="text-muted-foreground">Checking the books…</p>}
+                  {ledger.error && (
+                    <p className="text-muted-foreground">
+                      The books could not be read: {ledger.error} Posting is still safe to try — the
+                      ledger keeps one entry per invoice.
+                    </p>
+                  )}
+                  {posted ? (
+                    <>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">Journal</span>
+                        <Link
+                          href={journalHref(posted.entryId)}
+                          className="font-medium tnum underline-offset-4 hover:underline"
+                        >
+                          {posted.reference}
+                        </Link>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {posted.reversed
+                          ? "Posted and since reversed. Both entries stand and they net to nothing, so the books carry no receivable for this invoice — a correction is a new document, not a second posting."
+                          : "Receivables, revenue and VAT output carry this invoice."}
+                      </p>
+                    </>
+                  ) : ledger.index && !ledger.index.complete ? (
+                    <p className="text-muted-foreground">
+                      Not among the {ledger.index.read} movements on {AR_CONTROL} read for this issue
+                      date, and the older ones were not read — so from here it is unknown whether this
+                      invoice is on the books. Posting it says which: the entry is keyed on the invoice,
+                      so a second attempt finds the first entry rather than doubling the revenue.
+                    </p>
+                  ) : ledger.index ? (
+                    <p className="text-muted-foreground">
+                      Not on the books. Nothing in the ageing, the VAT return or the trial balance
+                      carries this invoice yet.
+                    </p>
+                  ) : null}
+
+                  {!posted && (
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      icon={<BookOpen />}
+                      loading={postingToLedger}
+                      onClick={postToLedger}
+                    >
+                      Post to the ledger
+                    </Button>
+                  )}
+                  {posted && !posted.reversed && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full"
+                      icon={<Landmark />}
+                      onClick={() => {
+                        setReceiptSuggestion(null);
+                        setReceiptOpen(true);
+                      }}
+                    >
+                      Record a receipt
+                    </Button>
+                  )}
+                  {ledgerError && <p className="text-xs text-destructive">{ledgerError}</p>}
+                </>
+              )}
             </CardContent>
           </Card>
 
@@ -465,10 +658,21 @@ export default function InvoiceDetailPage() {
 
       <Modal open={confirmSend} onClose={() => setConfirmSend(false)} title="Send this invoice?" size="sm">
         <div className="p-5">
-          <p className="text-sm text-muted-foreground">
-            {invoice.number} will be delivered to {invoice.buyer.nameEn || "the buyer"} and reported to
-            the FTA.
-          </p>
+          {/* Said while the person can still decide not to send: on a simulated
+              gateway nothing is delivered and nothing is reported, and the
+              acceptance that follows is one this deployment writes itself. */}
+          {gateway.simulated ? (
+            <p className="text-sm text-muted-foreground">
+              {invoice.number} will be built and run through the send pipeline, but it will not reach{" "}
+              {invoice.buyer.nameEn || "the buyer"} and it will not be reported to the FTA.{" "}
+              {SIMULATED_SEND_WARNING}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {invoice.number} will be delivered to {invoice.buyer.nameEn || "the buyer"} and reported to
+              the FTA.
+            </p>
+          )}
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmSend(false)}>
               Cancel
@@ -479,6 +683,32 @@ export default function InvoiceDetailPage() {
           </div>
         </div>
       </Modal>
+
+      {receiptOpen && (
+        <ReceiptModal
+          invoice={invoice}
+          suggestMinor={receiptSuggestion}
+          warning={
+            ledger.index && ledger.index.complete && !posted
+              ? "This invoice is not on the books, so a receipt against it would credit receivables with no invoice to clear and stand in the ageing as an unapplied credit. Post the invoice first."
+              : undefined
+          }
+          onClose={() => setReceiptOpen(false)}
+          onPosted={(entry) => {
+            setReceiptOpen(false);
+            ledger.reload();
+            if (entry.alreadyPosted) {
+              toast("That receipt is already on the books", {
+                description: `A receipt for this invoice on that date and for that amount was posted as ${entry.reference}. Nothing was posted again.`,
+              });
+            } else {
+              toast.success(`Receipt posted as ${entry.reference}`, {
+                description: "The bank is debited and the invoice is cleared in the ageing.",
+              });
+            }
+          }}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmCancel}
@@ -515,10 +745,13 @@ function StatusLeg({
   icon,
   label,
   meta,
+  qualifier,
 }: {
   icon: React.ReactNode;
   label: string;
   meta: { label: string; tone: string; description: string };
+  /** Said beside the status where the status is not the whole truth. */
+  qualifier?: string;
 }) {
   return (
     <div className="flex items-start gap-3">
@@ -526,9 +759,16 @@ function StatusLeg({
         {icon}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-medium">{label}</p>
-          <StatusBadge label={meta.label} tone={meta.tone as never} size="sm" />
+          <span className="flex items-center gap-1.5">
+            {qualifier && (
+              <Badge tone="warning" size="sm">
+                {qualifier}
+              </Badge>
+            )}
+            <StatusBadge label={meta.label} tone={meta.tone as never} size="sm" />
+          </span>
         </div>
         <p className="text-xs text-muted-foreground">{meta.description}</p>
       </div>

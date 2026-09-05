@@ -16,6 +16,7 @@ import {
   Trash2,
   Copy,
   Eye,
+  BookOpen,
 } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
@@ -23,9 +24,21 @@ import { DOC_TYPE_LABEL } from "@/lib/domain/tax";
 import { useAppState } from "@/lib/app-state";
 import { useInvoices } from "@/hooks/use-entity-data";
 import { deleteInvoice, sendInvoice } from "@/lib/db/repo";
+import { useGatewayMode } from "@/lib/gateway/mode";
+import { SIMULATED_SEND_NOTE } from "@/lib/gateway/disclosure";
+import {
+  AR_CONTROL,
+  isPostable,
+  journalHref,
+  ledgerProblem,
+  postInvoiceToLedger,
+  useSalesLedger,
+  type SalesLedgerIndex,
+} from "@/components/ledger/ar-posting";
 import type { Invoice, LifecycleStatus } from "@/lib/domain/types";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/controls";
@@ -60,6 +73,24 @@ export default function InvoicesPage() {
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
   const [confirmDelete, setConfirmDelete] = React.useState<Invoice | null>(null);
+  const gateway = useGatewayMode();
+
+  /* Which of these have reached the books, read from the receivables control
+   * account. The window opens at the oldest invoice on the screen, because a
+   * general-ledger read is capped and a window wider than the question makes
+   * the oldest answers "unknown" for nothing. */
+  const ledgerFrom = React.useMemo(() => {
+    let earliest: string | undefined;
+    for (const i of invoices) {
+      const day = i.issueDate?.slice(0, 10);
+      if (day && (!earliest || day < earliest)) earliest = day;
+    }
+    return earliest;
+  }, [invoices]);
+  const ledger = useSalesLedger(
+    invoices.length > 0 ? currentEntity?.id : undefined,
+    ledgerFrom ? { from: ledgerFrom } : undefined,
+  );
 
   const filtered = React.useMemo(() => {
     const f = FILTERS.find((x) => x.key === filter)!;
@@ -94,6 +125,13 @@ export default function InvoicesPage() {
   const sendable = pg.pageItems.filter(
     (i) => selected.has(i.id) && (i.lifecycleStatus === "DRAFT" || i.lifecycleStatus === "READY"),
   );
+  /* Selected documents that belong in the sales ledger and are not already
+   * known to be there. An invoice whose state is unknown — the read did not
+   * reach that far back — is included: posting is keyed on the invoice, so the
+   * worst it can do is find the entry that already exists and say so. */
+  const postable = pg.pageItems.filter(
+    (i) => selected.has(i.id) && isPostable(i) && !ledger.index?.postings.has(i.id),
+  );
 
   const toggleAll = () => {
     setSelected((prev) => {
@@ -124,9 +162,87 @@ export default function InvoicesPage() {
     }
     setBusy(false);
     setSelected(new Set());
-    if (ok > 0) toast.success(`${ok} invoice${ok > 1 ? "s" : ""} sent`, { description: "Delivered and reported in sandbox." });
+    /* What a send actually establishes. On a simulated gateway it establishes
+     * nothing outside this deployment; on a live one the document has been
+     * handed over and delivery and reporting are confirmed later by the
+     * gateway's webhook, so "submitted" is as far as this moment goes. */
+    if (ok > 0) {
+      if (gateway.simulated) {
+        toast.warning(`${ok} invoice${ok > 1 ? "s" : ""} — simulated, nothing transmitted`, {
+          description: SIMULATED_SEND_NOTE,
+        });
+      } else {
+        toast.success(`${ok} invoice${ok > 1 ? "s" : ""} submitted`, {
+          description: "Delivery and reporting are confirmed by the gateway, not by this send.",
+        });
+      }
+    }
     if (ok < sendable.length)
       toast.warning(`${sendable.length - ok} couldn't be sent`, { description: "They have issues — see the fix-it queue." });
+  };
+
+  /**
+   * Put the selected invoices into the general ledger.
+   *
+   * One at a time rather than in one request, because there is no batch route
+   * and because a failure on the fourth invoice must not decide anything about
+   * the first three: each posting is its own entry and its own idempotency key.
+   * The summary afterwards separates what was posted from what was already
+   * there — the two are different facts, and reporting them as one would tell
+   * somebody the books changed when they did not.
+   */
+  const bulkPost = async () => {
+    if (postable.length === 0) return;
+    setBusy(true);
+    let posted = 0;
+    let already = 0;
+    let failed = 0;
+    let firstProblem: string | null = null;
+    for (const inv of postable) {
+      try {
+        const entry = await postInvoiceToLedger(inv.id);
+        if (entry.alreadyPosted) already++;
+        else posted++;
+      } catch (e) {
+        failed++;
+        firstProblem ??= ledgerProblem(e);
+      }
+    }
+    setBusy(false);
+    setSelected(new Set());
+    ledger.reload();
+    if (posted > 0) {
+      toast.success(`${posted} invoice${posted > 1 ? "s" : ""} posted to the ledger`, {
+        description:
+          already > 0
+            ? `${already} ${already > 1 ? "were" : "was"} already on the books and ${already > 1 ? "were" : "was"} left alone.`
+            : "Receivables, revenue and VAT output now carry them.",
+      });
+    } else if (already > 0) {
+      toast(`${already} already on the books`, { description: "Nothing was posted again." });
+    }
+    if (failed > 0) {
+      toast.error(`${failed} could not be posted`, { description: firstProblem ?? undefined });
+    }
+  };
+
+  /** The same posting for one row, so fifty invoices need no fifty screens. */
+  const postOne = async (inv: Invoice) => {
+    try {
+      const entry = await postInvoiceToLedger(inv.id);
+      ledger.reload();
+      if (entry.alreadyPosted) {
+        toast(`${inv.number} was already on the books`, {
+          description: `It is entry ${entry.reference}. Nothing was posted again.`,
+        });
+      } else {
+        toast.success(`${inv.number} posted as ${entry.reference}`, {
+          description: "Receivables, revenue and VAT output now carry it.",
+        });
+      }
+    } catch (e) {
+      toast.error(`${inv.number} could not be posted`, { description: ledgerProblem(e) });
+    }
   };
 
   if (loading) return <ListSkeleton />;
@@ -212,6 +328,23 @@ export default function InvoicesPage() {
             </div>
           </div>
 
+          {/* What the Ledger column can and cannot say. Both of these are the
+              difference between "not posted" and "not known", and a column
+              that quietly showed the first when it meant the second would send
+              somebody to post an invoice that is already on the books. */}
+          {ledger.error && (
+            <div className="mb-3 rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
+              The ledger column is empty because the books could not be read: {ledger.error}
+            </div>
+          )}
+          {ledger.index && !ledger.index.complete && (
+            <div className="mb-3 rounded-xl border border-border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
+              The last {ledger.index.read} of {ledger.index.movements} movements on account{" "}
+              {AR_CONTROL} were read, so anything older shows as unknown rather than as unposted.
+              Posting one of those is still safe — the ledger keeps a single entry per invoice.
+            </div>
+          )}
+
           {/* Bulk bar */}
           <motion.div
             initial={false}
@@ -232,6 +365,16 @@ export default function InvoicesPage() {
                 >
                   Send {sendable.length > 0 ? sendable.length : ""}
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={<BookOpen />}
+                  loading={busy}
+                  disabled={postable.length === 0}
+                  onClick={bulkPost}
+                >
+                  Post {postable.length > 0 ? postable.length : ""} to the ledger
+                </Button>
                 <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
                   Clear
                 </Button>
@@ -251,6 +394,7 @@ export default function InvoicesPage() {
                   <th className="py-3 text-start font-medium">Customer</th>
                   <th className="py-3 text-start font-medium">Issue date</th>
                   <th className="py-3 text-start font-medium">Status</th>
+                  <th className="py-3 text-start font-medium">Ledger</th>
                   <th className="py-3 text-end font-medium">Amount</th>
                   <th className="w-12 py-3 pe-4" />
                 </tr>
@@ -294,11 +438,19 @@ export default function InvoicesPage() {
                         <PaymentBadge invoice={inv} size="sm" />
                       </div>
                     </td>
+                    <td className="py-3" onClick={(e) => e.stopPropagation()}>
+                      <LedgerCell inv={inv} index={ledger.index} loading={ledger.loading} />
+                    </td>
                     <td className="py-3 text-end text-sm font-semibold tnum">
                       {formatMoney(inv.totals.taxInclusiveMinor, inv.currency)}
                     </td>
                     <td className="py-3 pe-4" onClick={(e) => e.stopPropagation()}>
-                      <RowMenu inv={inv} onDelete={() => setConfirmDelete(inv)} />
+                      <RowMenu
+                        inv={inv}
+                        posted={ledger.index?.postings.has(inv.id) ?? false}
+                        onPost={() => postOne(inv)}
+                        onDelete={() => setConfirmDelete(inv)}
+                      />
                     </td>
                   </motion.tr>
                 ))}
@@ -325,7 +477,13 @@ export default function InvoicesPage() {
                       <p className="truncate text-xs text-muted-foreground">
                         {inv.buyer.nameEn || "No customer"}
                       </p>
-                      <InvoiceStatus invoice={inv} size="sm" />
+                      <span className="flex items-center gap-1.5">
+                        {/* The reference is text rather than a link here: the
+                            whole card is already a link to the invoice, and a
+                            link inside a link is not a thing a browser can do. */}
+                        <LedgerCell inv={inv} index={ledger.index} loading={ledger.loading} plain />
+                        <InvoiceStatus invoice={inv} size="sm" />
+                      </span>
                     </div>
                   </div>
                 </Card>
@@ -379,7 +537,69 @@ export default function InvoicesPage() {
   );
 }
 
-function RowMenu({ inv, onDelete }: { inv: Invoice; onDelete: () => void }) {
+/**
+ * Whether this document is in the sales ledger, in one cell.
+ *
+ * Four different things, and they are deliberately four rather than two. A
+ * document that never posts — a draft, a proforma, a cancelled one — says
+ * nothing at all; a read that has not answered yet says nothing either; an
+ * invoice the read did not reach is unknown; and only an invoice the read
+ * covered and did not find is "not posted".
+ */
+function LedgerCell({
+  inv,
+  index,
+  loading,
+  plain,
+}: {
+  inv: Invoice;
+  index: SalesLedgerIndex | null;
+  loading: boolean;
+  /** Render the reference as text — for the mobile card, which is itself a link. */
+  plain?: boolean;
+}) {
+  if (!isPostable(inv)) return <span className="text-xs text-muted-foreground">—</span>;
+  if (loading || !index) return <span className="text-xs text-muted-foreground">…</span>;
+
+  const posted = index.postings.get(inv.id);
+  if (posted) {
+    const label = posted.reversed ? `${posted.reference} · reversed` : posted.reference;
+    return plain ? (
+      <span className="text-xs font-medium tnum">{label}</span>
+    ) : (
+      <Link
+        href={journalHref(posted.entryId)}
+        className="text-xs font-medium tnum underline-offset-4 hover:underline"
+      >
+        {label}
+      </Link>
+    );
+  }
+  if (!index.complete) {
+    return (
+      <Badge tone="neutral" size="sm" title={`Older than the movements read on account ${AR_CONTROL}.`}>
+        Unknown
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="warning" size="sm">
+      Not posted
+    </Badge>
+  );
+}
+
+function RowMenu({
+  inv,
+  posted,
+  onPost,
+  onDelete,
+}: {
+  inv: Invoice;
+  posted: boolean;
+  onPost: () => void;
+  onDelete: () => void;
+}) {
   const router = useRouter();
   return (
     <Dropdown align="end">
@@ -398,6 +618,11 @@ function RowMenu({ inv, onDelete }: { inv: Invoice; onDelete: () => void }) {
         {inv.lifecycleStatus === "DRAFT" && (
           <DropdownItem icon={<FileText />} onSelect={() => router.push(`/invoices/new?from=${inv.id}`)}>
             Edit
+          </DropdownItem>
+        )}
+        {isPostable(inv) && !posted && (
+          <DropdownItem icon={<BookOpen />} onSelect={onPost}>
+            Post to the ledger
           </DropdownItem>
         )}
         <DropdownItem icon={<Copy />} onSelect={() => router.push(`/invoices/new?duplicate=${inv.id}`)}>

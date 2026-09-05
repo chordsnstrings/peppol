@@ -22,8 +22,12 @@ interface PendingRow {
   subjectId: string;
   label: string;
   amountMinor: string;
+  currency: string;
+  /** "pending" is waiting for signatures; "rejected" is going nowhere until it is withdrawn. */
+  state: "pending" | "approved" | "rejected";
   approvalsOutstanding: number;
   blockers: string[];
+  caveats: string[];
   waitingSince: string;
 }
 interface ApprovalsResponse {
@@ -82,8 +86,8 @@ export default function ApprovalsPage() {
         title: `Why is ${item.label} being rejected?`,
         detail:
           `Whoever raised this ${SUBJECT_ONE[item.subjectType] ?? "document"} is shown the reason word for word. ` +
-          "The rejection then stands until they withdraw it and submit a fresh round — a later approval does not " +
-          "undo it. Nothing is posted either way.",
+          "The rejection then stands until the round is withdrawn — the button that takes this row's place does " +
+          "that — and a later approval does not undo it. Nothing is posted either way.",
         reason: {
           label: "Reason",
           placeholder: "The hotel folio is missing; only the booking confirmation is attached",
@@ -107,16 +111,58 @@ export default function ApprovalsPage() {
     const state = r.state as { approved?: boolean; approvalsOutstanding?: number } | undefined;
     setMsg(
       decision === "REJECTED"
-        ? `${item.label} rejected. It stays rejected until it is withdrawn and resubmitted.`
+        ? `${item.label} rejected. It stays rejected until the round is withdrawn — the button on its row does that.`
         : state?.approved
           ? `${item.label} now has every approval it needs.`
           : `${item.label} approved by you. It still needs ${state?.approvalsOutstanding ?? "another"} approval from somebody else.`,
     );
   };
 
+  /**
+   * The way past a rejection.
+   *
+   * A rejection stands: approving afterwards adds a name beneath the refusal
+   * rather than undoing it, which is what makes a refusal mean something. So
+   * the round has to be thrown away and started again, and until this button
+   * existed four separate messages — including the one every posting path
+   * returns — told people to do something no screen could do.
+   */
+  const unblock = async (item: PendingRow) => {
+    const one = SUBJECT_ONE[item.subjectType] ?? "document";
+    const answer = await ask({
+      title: `Withdraw the decisions on ${item.label}?`,
+      detail:
+        `This throws away every decision on this ${one} — the refusal, and any approvals given before it — so the ` +
+        "approvals start again from nobody. It is the only way past a rejection: an approval recorded now would " +
+        "not undo the refusal. Nothing is posted or unposted either way.",
+      reason: {
+        label: "Reason",
+        placeholder: "Folio attached and the coding corrected; going round again",
+        minLength: 12,
+        hint: "Signatures already given are being discarded, so the record has to say why.",
+      },
+      confirmLabel: "Withdraw the round",
+      destructive: true,
+    });
+    if (answer === null) return;
+    const r = await act(`${item.subjectId}:WITHDRAW`, {
+      action: "withdraw",
+      subjectType: item.subjectType,
+      subjectId: item.subjectId,
+      reason: answer,
+    });
+    if (!r) return;
+    const cleared = Array.isArray(r.cleared) ? r.cleared.length : 0;
+    setMsg(
+      `${item.label} — ${cleared === 1 ? "one decision" : `${cleared} decisions`} withdrawn. ` +
+        `The ${one} is back with whoever raised it and needs its approvals again from the beginning.`,
+    );
+  };
+
   if (!entityId) return <Loading label="Choosing an entity…" />;
   const pending = data?.pending ?? [];
   const rules = data?.rules ?? [];
+  const refused = pending.filter((p) => p.state === "rejected").length;
 
   return (
     <>
@@ -150,20 +196,25 @@ export default function ApprovalsPage() {
         <div className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2" style={{ borderBottom: "1px solid var(--sw-line)" }}>
           <span className="sw-label">Waiting on you</span>
           <span className="sw-sub" data-testid="queue-count">
-            {pending.length} document{pending.length === 1 ? "" : "s"} · oldest first
+            {pending.length} document{pending.length === 1 ? "" : "s"}
+            {refused > 0 && `, ${refused} refused`} · oldest first
           </span>
         </div>
         {data && pending.length === 0 ? (
           <div className="p-3">
-            <Empty>Nothing is waiting on you. A document appears here when a rule names you or your role and you have not decided on it.</Empty>
+            <Empty>
+              Nothing is waiting on you. A document appears here when a rule names you or your role and you have not
+              decided on it — a bill, a payment run or a month&rsquo;s payroll as soon as it exists, without anybody
+              having to send it for approval first.
+            </Empty>
           </div>
         ) : (
           <div className="sw-scroll">
             <table className="sw-table" data-testid="approval-queue">
-              <caption className="sr-only">Documents waiting for your approval</caption>
+              <caption className="sr-only">Documents waiting for your approval, and refused ones waiting to be withdrawn</caption>
               <thead>
                 <tr>
-                  <th style={{ width: "9rem" }}>Kind</th>
+                  <th style={{ width: "10rem" }}>Kind</th>
                   <th>Document</th>
                   <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Amount</th>
                   <th style={{ width: "7rem" }}>Waiting since</th>
@@ -174,31 +225,54 @@ export default function ApprovalsPage() {
               <tbody>
                 {pending.map((p) => (
                   <tr key={`${p.subjectType}:${p.subjectId}`} data-testid={`queue-${p.subjectId}`}>
-                    <td><span className="sw-chip">{SUBJECT_ONE[p.subjectType] ?? p.subjectType}</span></td>
+                    <td>
+                      <span className="flex flex-wrap items-center gap-1">
+                        <span className="sw-chip">{SUBJECT_ONE[p.subjectType] ?? p.subjectType}</span>
+                        {/* The word as well as the colour: refused is a state
+                            somebody has to act on, not a shade of the row. */}
+                        {p.state === "rejected" && <span className="sw-chip sw-chip-bad">refused</span>}
+                      </span>
+                    </td>
                     <td className="max-w-0 truncate">{p.label}</td>
-                    <td className="sw-num"><Figure minor={p.amountMinor} colour={false} /></td>
+                    <td className="sw-num"><Figure minor={p.amountMinor} currency={p.currency} colour={false} /></td>
                     <td>{p.waitingSince.slice(0, 10)}</td>
-                    <td className="sw-sub" style={{ whiteSpace: "normal" }}>{p.blockers.join(" ")}</td>
+                    <td className="sw-sub" style={{ whiteSpace: "normal" }}>
+                      {[...p.blockers, ...p.caveats].join(" ")}
+                    </td>
                     <td>
                       <span className="flex flex-wrap gap-1.5 py-1">
-                        <button
-                          type="button"
-                          className="sw-btn sw-btn-sm sw-btn-primary"
-                          disabled={busy === `${p.subjectId}:APPROVED`}
-                          data-testid="approve"
-                          onClick={() => judge(p, "APPROVED")}
-                        >
-                          {busy === `${p.subjectId}:APPROVED` ? "…" : "Approve"}
-                        </button>
-                        <button
-                          type="button"
-                          className="sw-btn sw-btn-sm"
-                          disabled={busy === `${p.subjectId}:REJECTED`}
-                          data-testid="reject"
-                          onClick={() => judge(p, "REJECTED")}
-                        >
-                          Reject
-                        </button>
+                        {p.state === "rejected" ? (
+                          <button
+                            type="button"
+                            className="sw-btn sw-btn-sm"
+                            disabled={busy === `${p.subjectId}:WITHDRAW`}
+                            data-testid="withdraw"
+                            onClick={() => unblock(p)}
+                          >
+                            {busy === `${p.subjectId}:WITHDRAW` ? "…" : "Withdraw the round"}
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="sw-btn sw-btn-sm sw-btn-primary"
+                              disabled={busy === `${p.subjectId}:APPROVED`}
+                              data-testid="approve"
+                              onClick={() => judge(p, "APPROVED")}
+                            >
+                              {busy === `${p.subjectId}:APPROVED` ? "…" : "Approve"}
+                            </button>
+                            <button
+                              type="button"
+                              className="sw-btn sw-btn-sm"
+                              disabled={busy === `${p.subjectId}:REJECTED`}
+                              data-testid="reject"
+                              onClick={() => judge(p, "REJECTED")}
+                            >
+                              Reject
+                            </button>
+                          </>
+                        )}
                       </span>
                     </td>
                   </tr>

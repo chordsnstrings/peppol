@@ -2,12 +2,16 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { CreditCard, Bell, Link2, CheckCircle2, TrendingUp, Clock, Wallet, Send } from "lucide-react";
+import { CreditCard, Bell, Link2, CheckCircle2, TrendingUp, Clock, Wallet, Send, Landmark } from "lucide-react";
 import { cn, formatDate } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
 import { arSummary, outstandingMinor, paymentState } from "@/lib/domain/ar";
 import { useInvoices } from "@/hooks/use-entity-data";
 import { createPaymentLink, markPaid, runReminders, sendReminder } from "@/lib/payments-client";
+import { useEntityId } from "@/components/ledger/use-ledger";
+import { BOOK_CURRENCY, isPostable, useSalesLedger } from "@/components/ledger/ar-posting";
+import { ReceiptModal } from "@/components/ledger/ar-receipt-modal";
+import type { Invoice } from "@/lib/domain/types";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,12 +22,34 @@ import { Pagination, usePagination } from "@/components/ui/pagination";
 import { toast } from "sonner";
 
 export default function PaymentsPage() {
+  const entityId = useEntityId();
   const { invoices } = useInvoices((i) => i.direction === "OUTBOUND");
   const ar = React.useMemo(() => arSummary(invoices), [invoices]);
   const [busy, setBusy] = React.useState<string | null>(null);
+  /** The invoice a receipt is being posted for, and what was banked against it. */
+  const [receipt, setReceipt] = React.useState<{ invoice: Invoice; suggestMinor: bigint | null } | null>(null);
   const pg = usePagination(ar.receivables, 10);
   const cur = invoices[0]?.currency ?? "AED";
   const maxBucket = Math.max(1, ...ar.buckets.map((b) => b.amountMinor));
+
+  /* Which of these invoices the books already carry. Recording a payment on the
+   * document and posting the receipt are two different acts, and the second one
+   * only makes sense against an invoice that was posted: a receipt against one
+   * that was not credits receivables with nothing to clear. The read opens at
+   * the oldest invoice on the screen, because a general-ledger read is capped
+   * and a window wider than the question buys nothing. */
+  const ledgerFrom = React.useMemo(() => {
+    let earliest: string | undefined;
+    for (const i of invoices) {
+      const day = i.issueDate?.slice(0, 10);
+      if (day && (!earliest || day < earliest)) earliest = day;
+    }
+    return earliest;
+  }, [invoices]);
+  const ledger = useSalesLedger(
+    invoices.length > 0 ? entityId : undefined,
+    ledgerFrom ? { from: ledgerFrom } : undefined,
+  );
 
   const payLink = async (id: string) => {
     setBusy(id);
@@ -40,11 +66,22 @@ export default function PaymentsPage() {
     await sendReminder(id);
     toast.success("Reminder sent");
   };
-  const paid = async (id: string) => {
-    setBusy(id);
+  const paid = async (inv: Invoice) => {
+    setBusy(inv.id);
+    /* What is outstanding now, before the document records the payment — it is
+     * what reached the bank, and a moment later the document will say nothing
+     * is due. Only in the book's own currency: a receipt posts in dirhams, and
+     * this figure is in whatever the invoice was raised in. */
+    const banked = inv.currency === BOOK_CURRENCY ? outstandingMinor(inv) : 0;
     try {
-      await markPaid(id, "Bank transfer");
-      toast.success("Marked as paid");
+      await markPaid(inv.id, "Bank transfer");
+      toast.success("Marked as paid", {
+        description: "Recorded on the document. The books do not know yet — post the receipt.",
+      });
+      setReceipt({
+        invoice: inv,
+        suggestMinor: Number.isInteger(banked) && banked > 0 ? BigInt(banked) : null,
+      });
     } catch {
       toast.error("Failed");
     }
@@ -122,11 +159,17 @@ export default function PaymentsPage() {
                           <p className="truncate text-sm font-medium">
                             {inv.number} · {inv.buyer.nameEn}
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            Due {formatDate(inv.dueDate)} ·{" "}
+                          <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                            <span>Due {formatDate(inv.dueDate)}</span>
                             <Badge tone={st === "OVERDUE" ? "error" : st === "PARTIAL" ? "warning" : "neutral"} size="sm">
                               {st === "OVERDUE" ? "Overdue" : st === "PARTIAL" ? "Part-paid" : "Awaiting"}
                             </Badge>
+                            {/* Said only where it can be shown: an invoice the
+                                control-account read did not reach is left
+                                unlabelled rather than called unposted. */}
+                            {ledger.index?.complete && isPostable(inv) && !ledger.index.postings.has(inv.id) && (
+                              <Badge tone="warning" size="sm">Not in the ledger</Badge>
+                            )}
                           </p>
                         </Link>
                         <span className="font-semibold tnum">{formatMoney(outstandingMinor(inv), inv.currency)}</span>
@@ -137,8 +180,20 @@ export default function PaymentsPage() {
                           <Button size="icon-sm" variant="outline" onClick={() => remind(inv.id)} aria-label="Remind">
                             <Bell />
                           </Button>
-                          <Button size="icon-sm" variant="outline" onClick={() => paid(inv.id)} aria-label="Mark paid">
+                          <Button size="icon-sm" variant="outline" onClick={() => paid(inv)} aria-label="Mark paid">
                             <CheckCircle2 />
+                          </Button>
+                          {/* The ledger half of the same act, offered on its
+                              own as well: money often arrives on an invoice
+                              somebody else already marked paid. */}
+                          <Button
+                            size="icon-sm"
+                            variant="outline"
+                            onClick={() => setReceipt({ invoice: inv, suggestMinor: null })}
+                            aria-label="Post receipt to the ledger"
+                            title="Post receipt to the ledger"
+                          >
+                            <Landmark />
                           </Button>
                         </div>
                       </div>
@@ -160,6 +215,33 @@ export default function PaymentsPage() {
             </Card>
           </div>
         </>
+      )}
+
+      {receipt && (
+        <ReceiptModal
+          invoice={receipt.invoice}
+          suggestMinor={receipt.suggestMinor}
+          warning={
+            ledger.index?.complete && !ledger.index.postings.has(receipt.invoice.id)
+              ? "This invoice is not on the books, so a receipt against it would credit receivables with no invoice to clear and stand in the ageing as an unapplied credit. Post the invoice first, from the invoice itself or from Receivables."
+              : undefined
+          }
+          onClose={() => setReceipt(null)}
+          onPosted={(entry) => {
+            const number = receipt.invoice.number;
+            setReceipt(null);
+            ledger.reload();
+            if (entry.alreadyPosted) {
+              toast("That receipt is already on the books", {
+                description: `A receipt for ${number} on that date and for that amount was posted as ${entry.reference}. Nothing was posted again.`,
+              });
+            } else {
+              toast.success(`Receipt posted as ${entry.reference}`, {
+                description: `The bank is debited and ${number} is cleared in the ageing.`,
+              });
+            }
+          }}
+        />
       )}
     </div>
   );

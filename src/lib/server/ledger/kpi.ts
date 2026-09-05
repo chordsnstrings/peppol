@@ -71,20 +71,25 @@ export interface FinancialKpis {
 }
 
 /**
- * Which accounts are current.
+ * Which accounts are current is not decided here.
  *
- * The seeded UAE chart puts current assets in 1000-1499 and non-current in
- * 1500-1999, current liabilities in 2000-2499 and non-current above. A chart
- * that has been extended by hand may not follow that, so anything unmatched is
- * left out of the ratio and named in a warning rather than silently counted as
- * current — a current ratio that quietly includes a long-term loan is worse
- * than one that says it could not classify an account.
+ * It used to be, with four regular expressions over the account code — 1000-1499
+ * current assets, 2000-2499 current liabilities and so on. The bands are the
+ * seeded chart's convention and reading them looked harmless, but a number is
+ * not a classification: 1320 deferred tax asset and 2320 deferred tax liability
+ * are both seeded under NON-CURRENT parents and both fall inside the current
+ * bands, so both were counted as current, in the current ratio, the quick ratio
+ * and working capital. Worse, the "could not be classified" warning below could
+ * never fire for them, because a code that matches a band is classified as far
+ * as a band knows.
+ *
+ * `balanceSheet` now splits its own sections using the chart's hierarchy, with
+ * the band only as a fallback for an account that has no parent — see
+ * `classifyChart` in statements.ts. Taking the figures from there means the
+ * ratios on this page and the statement on the accounts screen cannot disagree
+ * about what is current, which is the same reason nothing here re-reads the
+ * journal.
  */
-const CURRENT_ASSET = /^1[0-4]/;
-const NON_CURRENT_ASSET = /^1[5-9]/;
-const CURRENT_LIABILITY = /^2[0-4]/;
-const NON_CURRENT_LIABILITY = /^2[5-9]/;
-
 const INVENTORY = "1200";
 const PREPAYMENTS = "1300";
 
@@ -139,9 +144,6 @@ const bpsOf = (numerator: bigint, denominator: bigint, scale = 10_000n): bigint 
   return signed >= 0n ? (signed + half) / d : -((-signed + half) / d);
 };
 
-function sumWhere(lines: StatementLine[], re: RegExp): bigint {
-  return lines.filter((l) => re.test(l.code)).reduce((a, l) => a + BigInt(l.presentedMinor), 0n);
-}
 const lineFor = (lines: StatementLine[], code: string): bigint =>
   lines.filter((l) => l.code === code).reduce((a, l) => a + BigInt(l.presentedMinor), 0n);
 
@@ -185,8 +187,8 @@ export async function financialKpis(opts: {
   const grossProfit = BigInt(pl.grossProfitMinor);
   const netProfit = BigInt(pl.netProfitMinor);
 
-  const currentAssets = sumWhere(bs.assets.lines, CURRENT_ASSET);
-  const currentLiabilities = sumWhere(bs.liabilities.lines, CURRENT_LIABILITY);
+  const currentAssets = BigInt(bs.currentAssets.totalMinor);
+  const currentLiabilities = BigInt(bs.currentLiabilities.totalMinor);
   const inventory = lineFor(bs.assets.lines, INVENTORY);
   const prepayments = lineFor(bs.assets.lines, PREPAYMENTS);
   const openingInventory = lineFor(opening.assets.lines, INVENTORY);
@@ -194,18 +196,17 @@ export async function financialKpis(opts: {
   const equity = BigInt(bs.equity.totalMinor);
   const openingEquity = BigInt(opening.equity.totalMinor);
 
-  const unclassified = [
-    ...bs.assets.lines.filter((l) => !CURRENT_ASSET.test(l.code) && !NON_CURRENT_ASSET.test(l.code)),
-    ...bs.liabilities.lines.filter((l) => !CURRENT_LIABILITY.test(l.code) && !NON_CURRENT_LIABILITY.test(l.code)),
-  ];
+  const unclassified = [...bs.unclassifiedAssets.lines, ...bs.unclassifiedLiabilities.lines];
   if (unclassified.length) {
     warnings.push(
       `${unclassified.length} account${unclassified.length === 1 ? "" : "s"} could not be classified as current or ` +
-        `non-current from ${unclassified.length === 1 ? "its code" : "their codes"} ` +
+        `non-current from the chart ` +
         `(${unclassified.slice(0, 4).map((l) => `${l.code} ${l.name}`).join(", ")}` +
         `${unclassified.length > 4 ? ", …" : ""}), so ${unclassified.length === 1 ? "it is" : "they are"} outside the ` +
-        `current and quick ratios. Renumber ${unclassified.length === 1 ? "it" : "them"} into the standard ranges — ` +
-        `current assets 1000-1499, current liabilities 2000-2499 — or read those two ratios with this in mind.`,
+        `current and quick ratios. Give ${unclassified.length === 1 ? "it a parent" : "them parents"} under current ` +
+        `or non-current assets and liabilities — or number ${unclassified.length === 1 ? "it" : "them"} into the ` +
+        `standard ranges, current assets 1000-1499 and current liabilities 2000-2499 — or read those two ratios ` +
+        `with this in mind.`,
     );
   }
   if (!bs.balanced) {

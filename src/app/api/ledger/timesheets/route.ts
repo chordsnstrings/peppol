@@ -74,11 +74,12 @@ export async function POST(req: Request) {
     switch (b.action) {
       case "record":
         /* Recorded time becomes work in progress on account 1330, so keying it
-         * writes into the books. `ledger.post` is the closest key; a
-         * `timesheet.record` is what I would have wanted, because writing down
-         * your own week should not require the power to post a journal by
-         * hand. */
-        await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+         * writes into the books — but writing down your own week should not
+         * require the power to post a journal by hand, which is what
+         * `ledger.post` here was asking of every consultant with a timesheet.
+         * `timesheet.record` is the act. The journal it eventually contributes
+         * to is posted by `wip` below, which still asks for the posting key. */
+        await requirePermission({ orgId, userId, entityId: b.entityId, permission: "timesheet.record" });
         if (!b.entry) return json({ error: "There is no time to record." }, 400);
         return json(ledgerJson({ entry: await recordTime({ ...scope, entry: b.entry }) }));
 
@@ -86,16 +87,22 @@ export async function POST(req: Request) {
         /* `expense.approve` was considered and rejected: its effect names
          * approving "a colleague's claim for reimbursement", which is a claim
          * and not a timesheet, and the effect sentence is what the key means.
+         * `approval.decide` is the wrong one too — it names the documents
+         * approvals.ts actually carries, and a timesheet is not one of them.
          * Approved time is what the work-in-progress run will carry, so it
-         * takes the same key as recording it. */
-        await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+         * takes the same key as recording it, which is what the register's own
+         * effect sentence promises. */
+        await requirePermission({ orgId, userId, entityId: b.entityId, permission: "timesheet.record" });
         if (!b.ids?.length) return json({ error: "Which entries?" }, 400);
         return json(ledgerJson(await approveTime({ ...scope, ids: b.ids })));
 
       case "writeOff":
         /* A write-off is a decision that work already done will never be
          * billed, and it takes value straight off the balance sheet at the
-         * next run. Same key as the rest of the register's writes. */
+         * next run. It keeps `ledger.post` while keying and approving move to
+         * `timesheet.record`: destroying recorded value is not the same act as
+         * recording it, and a register somebody may keep is not a register they
+         * may empty. */
         await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
         if (!b.ids?.length) return json({ error: "Which entries?" }, 400);
         return json(ledgerJson(await writeOffTime({ ...scope, ids: b.ids, reason: b.reason ?? "" })));

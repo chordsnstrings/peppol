@@ -24,7 +24,11 @@ import { totalsOf } from "./expenses";
  *
  * 2. Self-approval is refused. Everything else in this file is bookkeeping
  *    about who signed what; this is the part that stands between a payment and
- *    a withdrawal, and it is the one thing here that is not negotiable.
+ *    a withdrawal, and it is the one thing here that is not negotiable. Who
+ *    raised a subject is therefore read from the register the subject lives in
+ *    rather than taken from whoever is calling — see `subjectFacts` — because a
+ *    bar that arms only when the caller remembers to name the raiser is not a
+ *    bar, and for four of the five subjects nobody ever remembered.
  *
  * 3. Decisions are append-only, the same principle as a posted journal entry.
  *    A person gets one decision per subject — the unique index on
@@ -547,6 +551,35 @@ function computeState(input: {
     );
   }
 
+  /*
+   * A decision recorded against another entity's copy of this subject id.
+   *
+   * The unique index is (orgId, subjectType, subjectId, decidedBy) — org-wide —
+   * so a subject id is a promise that it names one document in the whole
+   * organisation, and the decisions are read back on that promise. A cuid keeps
+   * it. A payroll period does not: "2026-03" is every entity's March, so a
+   * director signing one company's payroll signs them all, and the posting path
+   * cannot tell the difference.
+   *
+   * Reported rather than refused, and the choice is deliberate. Refusing would
+   * mean the second company's payroll needs signatures the index physically
+   * cannot accept from the same people, which is a month end that stops; saying
+   * it out loud is what this ledger can honestly do until the subject id names
+   * the entity. That belongs to whoever writes the id — see the note on the
+   * PAYROLL register in `subjectFacts`.
+   */
+  const elsewhere = decisions.filter((d) => d.entityId !== input.entityId);
+  if (elsewhere.length > 0) {
+    const others = [...new Set(elsewhere.map((d) => d.entityId))].join(", ");
+    caveats.push(
+      `${elsewhere.length === 1 ? "One decision" : `${WORDS[elsewhere.length] ?? elsewhere.length} decisions`} on file ` +
+        `${elsewhere.length === 1 ? "was" : "were"} recorded in ${others} rather than ${input.entityId}, against the same ` +
+        `reference "${input.subjectId}". A reference has to name one document in the whole organisation for the decisions ` +
+        `on it to be read back safely, and this one does not — so ${elsewhere.length === 1 ? "that signature is" : "those signatures are"} ` +
+        `counted here having been given for another company's ${what}.`,
+    );
+  }
+
   for (const r of rules) {
     if (r.satisfied) continue;
     const scope = r.thresholdMinor === 0n
@@ -754,6 +787,422 @@ export async function approvalState(opts: {
   });
 }
 
+/* ----------------------------------------------------------------- registers */
+
+/**
+ * Where each of the five subjects actually lives, and what it is worth.
+ *
+ * This module used to know about one of them. An expense claim has a table of
+ * its own, so a claim could be found, priced and attributed to whoever raised
+ * it; the other four were whatever the caller said they were. Two things went
+ * wrong because of that, and both are the same mistake.
+ *
+ * The queue seeded itself from submitted claims plus subjects somebody had
+ * already decided on, so a bill could enter the queue only if it was already in
+ * it. An organisation that wrote the rule the approvals screen invites — "every
+ * supplier bill needs one signature" — could then never post a bill again:
+ * nothing put the bill in front of an approver, and the guard refused it at the
+ * posting path for want of the signature nobody had been asked for. While the
+ * guard was called from nowhere that rule was decoration; the day it was wired
+ * into the posting paths it stopped the month end instead.
+ *
+ * And the self-approval bar was armed only when a caller handed this module the
+ * raiser, which only the claim table could do — so the person who prepared a
+ * payment run could approve it here, in the file written to stop exactly that.
+ *
+ * So: one place that answers, for any of the five, which entity the subject is
+ * in, what it is worth, what to call it and who raised it. Where the ledger
+ * genuinely does not record something the answer is null, and the caller says
+ * what it does about that rather than this file guessing.
+ */
+
+/** Inbound documents live in the same record store the invoice editor writes. */
+const BILL_STORE = "invoices";
+
+/**
+ * How many unfinished documents of one kind the queue will look at.
+ *
+ * A bound rather than a page, because this is a work queue and not a report: a
+ * business with more than five hundred unposted bills in one entity has a
+ * bigger problem than the order they are shown in. The bound is applied newest
+ * first for the reason given on `pendingFor` — work that has just arrived has
+ * to be able to get in.
+ */
+const REGISTER_LIMIT = 500;
+
+/** A subject the queue considers, before the rules are applied to it. */
+interface Candidate {
+  entityId: string;
+  subjectType: SubjectType;
+  subjectId: string;
+  label: string;
+  amountMinor: bigint;
+  /** The document's own currency, so the queue quotes euros as euros. */
+  currency: string;
+  waitingSince: Date;
+  submittedBy: string | null;
+}
+
+/** What the register knows about one subject, for a caller holding only its id. */
+export interface SubjectFacts {
+  /** The entity the SUBJECT is in — never the one the request asked about. */
+  entityId: string;
+  label: string;
+  /** Null where the register holds no figure for it, as for a manual journal. */
+  amountMinor: bigint | null;
+  currency: string | null;
+  /** Who raised it, where this ledger records that at all. */
+  submittedBy: string | null;
+  waitingSince: Date | null;
+}
+
+/** A bill as the invoice store holds it, read narrowly — the related-party scan reads it the same way. */
+type BillDoc = {
+  entityId?: string;
+  direction?: string;
+  docType?: string;
+  number?: string;
+  currency?: string;
+  lifecycleStatus?: string;
+  seller?: { nameEn?: string };
+  totals?: { payableMinor?: number | string };
+};
+
+/** A figure out of a stored JSON document, or null where it is not one. */
+function docMinor(v: number | string | undefined | null): bigint | null {
+  if (typeof v === "number") return Number.isInteger(v) ? BigInt(v) : null;
+  if (typeof v === "string" && /^-?\d+$/.test(v.trim())) return BigInt(v.trim());
+  return null;
+}
+
+function billCandidate(row: { id: string; entityId: string | null; createdAt: Date; data: string }): Candidate | null {
+  let doc: BillDoc | null = null;
+  try { doc = JSON.parse(row.data) as BillDoc; } catch { return null; }
+  // Only the buyer side. A sales invoice is not something a supplier-bill rule
+  // was written about, and cancelled documents are nobody's work.
+  if (!doc || doc.direction !== "INBOUND" || doc.lifecycleStatus === "CANCELLED") return null;
+  const entityId = row.entityId ?? doc.entityId ?? "";
+  const payable = docMinor(doc.totals?.payableMinor);
+  // A document whose total cannot be read cannot be measured against a
+  // threshold, so it is left out of the queue rather than shown at zero. It is
+  // still refused at the posting path, where postBill computes the figure from
+  // the lines rather than from this, so nothing escapes by being unreadable.
+  if (!entityId || payable === null) return null;
+  // Signed the way postBill signs it. A credit note is money the other way, and
+  // an approval recorded against the positive figure would be an approval of a
+  // document that does not exist.
+  const sign = doc.docType === "TAX_CREDIT_NOTE" ? -1n : 1n;
+  return {
+    entityId,
+    subjectType: "BILL",
+    subjectId: row.id,
+    label: `${doc.number ?? row.id} — ${doc.seller?.nameEn ?? "supplier"}`,
+    amountMinor: payable * sign,
+    currency: (doc.currency ?? "").trim().toUpperCase() || "AED",
+    waitingSince: row.createdAt,
+    // Nothing on an inbound document records who keyed or received it, so the
+    // self-approval bar cannot bind on a bill. Said out loud rather than left
+    // to be discovered: it needs a column on the record, not a guess here.
+    submittedBy: null,
+  };
+}
+
+/** The gross cost of employing people for a month — what a payroll rule is written against. */
+const payrollGross = (s: {
+  basicMinor: bigint | null; allowancesMinor: bigint | null; overtimeMinor: bigint | null;
+  gratuityMinor: bigint | null; pensionEmployerMinor: bigint | null;
+}) =>
+  (s.basicMinor ?? 0n) + (s.allowancesMinor ?? 0n) + (s.overtimeMinor ?? 0n) +
+  (s.gratuityMinor ?? 0n) + (s.pensionEmployerMinor ?? 0n);
+
+const PAYROLL_SUM = {
+  basicMinor: true, allowancesMinor: true, overtimeMinor: true,
+  gratuityMinor: true, pensionEmployerMinor: true,
+} as const;
+
+/**
+ * Everything a rule could apply to that has not finished yet.
+ *
+ * "Not finished" is read from each register in its own words: a claim that has
+ * been submitted, a bill with no journal entry behind it, a payment run that
+ * has not been released or cancelled, a month with draft payslips in it. That
+ * is the state a document is in while it is waiting for a signature, which is
+ * precisely the set the queue has to show.
+ *
+ * A manual journal has no register and cannot have one — it does not exist
+ * until it posts — so it is absent here and reaches the queue through the
+ * decisions recorded against the reference the poster chose. See `pendingFor`.
+ */
+async function openSubjects(opts: {
+  orgId: string;
+  entityId?: string;
+  subjectType?: SubjectType;
+}): Promise<Candidate[]> {
+  const wants = (t: SubjectType) => !opts.subjectType || opts.subjectType === t;
+  const entity = opts.entityId ? { entityId: opts.entityId } : {};
+
+  const [claims, billRows, runs, periods] = await Promise.all([
+    wants("EXPENSE_CLAIM")
+      ? prisma.expenseClaim.findMany({
+          where: { orgId: opts.orgId, status: "submitted", ...entity },
+          include: { lines: { select: { netMinor: true, vatMinor: true, vatRecoverable: true } } },
+          orderBy: [{ submittedAt: "desc" }],
+          take: REGISTER_LIMIT,
+        })
+      : Promise.resolve([]),
+    wants("BILL")
+      ? prisma.record.findMany({
+          where: {
+            orgId: opts.orgId,
+            store: BILL_STORE,
+            ...entity,
+            // The buyer side only. Direction lives inside the stored document
+            // rather than in a column, so this narrows the READ — every record
+            // is written by JSON.stringify, which spaces nothing — and
+            // `billCandidate` still parses the document and decides properly.
+            // Without it the newest five hundred records in a business that
+            // sends more than it receives would be all sales invoices, and the
+            // bills waiting for a signature would never be looked at.
+            data: { contains: '"direction":"INBOUND"' },
+          },
+          select: { id: true, entityId: true, createdAt: true, data: true },
+          orderBy: [{ createdAt: "desc" }],
+          take: REGISTER_LIMIT,
+        })
+      : Promise.resolve([]),
+    wants("PAYMENT")
+      ? prisma.paymentRun.findMany({
+          where: { orgId: opts.orgId, status: { in: ["draft", "approved"] }, ...entity },
+          include: { items: { where: { excluded: false }, select: { amountMinor: true } } },
+          orderBy: [{ createdAt: "desc" }],
+          take: REGISTER_LIMIT,
+        })
+      : Promise.resolve([]),
+    wants("PAYROLL")
+      ? prisma.payslip.groupBy({
+          by: ["entityId", "period"],
+          where: { orgId: opts.orgId, status: "draft", ...entity },
+          _sum: PAYROLL_SUM,
+          _min: { createdAt: true },
+          _count: { _all: true },
+          orderBy: [{ period: "desc" }],
+          take: 100,
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const out: Candidate[] = [];
+
+  for (const c of claims) {
+    out.push({
+      entityId: c.entityId,
+      subjectType: "EXPENSE_CLAIM",
+      subjectId: c.id,
+      label: `${c.reference} — ${c.employeeName}`,
+      amountMinor: totalsOf(c.lines).totalMinor,
+      currency: c.currency,
+      waitingSince: c.submittedAt ?? c.createdAt,
+      // The claimant, in the claim's own namespace. Same caveat as expenses.ts:
+      // it only bars self-approval where employee codes and user ids are the
+      // same thing in this deployment.
+      submittedBy: c.employeeCode,
+    });
+  }
+
+  // A bill that has already posted is nobody's work — and a rule written after
+  // it posted must not reach back and put it in somebody's queue. postBill
+  // writes one entry per bill under this key, so the entry is the evidence.
+  //
+  // Deliberately no status filter, and not an oversight: this is exactly the
+  // query postBill's own idempotency check makes. Where that would hand back
+  // the existing entry rather than posting again, there is nothing here for
+  // anybody to approve, whatever state the entry is in.
+  const bills = billRows.map(billCandidate).filter((b): b is Candidate => b !== null);
+  if (bills.length > 0) {
+    const posted = await prisma.journalEntry.findMany({
+      where: { orgId: opts.orgId, externalKey: { in: bills.map((b) => `bill:${b.subjectId}`) } },
+      select: { externalKey: true },
+    });
+    const done = new Set(posted.map((p) => p.externalKey));
+    for (const b of bills) if (!done.has(`bill:${b.subjectId}`)) out.push(b);
+  }
+
+  for (const r of runs) {
+    out.push({
+      entityId: r.entityId,
+      subjectType: "PAYMENT",
+      subjectId: r.id,
+      label: `${r.reference} — ${r.items.length} bill${r.items.length === 1 ? "" : "s"}`,
+      // What the run will actually pay: the bills still in it, excluding the
+      // ones somebody took out. It is the same total releaseRun() posts.
+      amountMinor: r.items.reduce((a, i) => a + i.amountMinor, 0n),
+      currency: r.currency,
+      waitingSince: r.createdAt,
+      // The row's own record of who proposed it, which is the fact the run's
+      // separate control is built on and the reason it is trustworthy here.
+      submittedBy: r.preparedBy,
+    });
+  }
+
+  if (periods.length > 0) {
+    // Payroll is posted in the book's own currency, and the register holds no
+    // currency of its own to read it off.
+    const books = await prisma.book.findMany({
+      where: { orgId: opts.orgId, code: "PRIMARY", entityId: { in: [...new Set(periods.map((p) => p.entityId))] } },
+      select: { entityId: true, functionalCurrency: true },
+    });
+    const currencyOf = new Map(books.map((b) => [b.entityId, b.functionalCurrency]));
+    for (const p of periods) {
+      out.push({
+        entityId: p.entityId,
+        subjectType: "PAYROLL",
+        subjectId: p.period,
+        label: `${p.period} — ${p._count._all} payslip${p._count._all === 1 ? "" : "s"}`,
+        amountMinor: payrollGross(p._sum),
+        currency: currencyOf.get(p.entityId) ?? "AED",
+        waitingSince: p._min.createdAt ?? new Date(),
+        // Nobody is recorded as having prepared a month's payroll. Same gap as
+        // a bill, and the same fix — a column, not a guess.
+        submittedBy: null,
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Which entity a subject is in, what it is worth, and who raised it.
+ *
+ * Read from the SUBJECT, never from the request. A caller who could name the
+ * entity could name one they hold a role on and then decide on a document
+ * belonging to another — which is the hole this closes, and the same reason the
+ * bill route reads the entity off the bill and the claim route off the claim.
+ *
+ * Where no register answers, the decisions already on file do: the first
+ * decision pins a subject to the entity its round was opened in, so a manual
+ * journal's reference cannot be adopted by a second entity halfway through.
+ * Null means neither could answer — a subject nobody has touched that no
+ * register holds — and there is then nothing to hijack.
+ *
+ * PAYROLL is the one subject whose id does not name a document. `postPayroll`
+ * uses the period, so "2026-03" is every entity's March; where several entities
+ * ran that month this can only narrow it with the entity the caller asked
+ * about, and `computeState` reports the residue as a caveat.
+ */
+export async function subjectFacts(opts: {
+  orgId: string;
+  subjectType: SubjectType | string;
+  subjectId: string;
+  /** Only used where the subject's own id cannot name one entity — see PAYROLL. */
+  entityId?: string;
+}): Promise<SubjectFacts | null> {
+  const subjectType = assertSubjectType(opts.subjectType);
+  const subjectId = (opts.subjectId ?? "").trim();
+  if (!subjectId) return null;
+
+  if (subjectType === "EXPENSE_CLAIM") {
+    const claim = await prisma.expenseClaim.findFirst({
+      where: { id: subjectId, orgId: opts.orgId },
+      include: { lines: { select: { netMinor: true, vatMinor: true, vatRecoverable: true } } },
+    });
+    if (claim) {
+      return {
+        entityId: claim.entityId,
+        label: `${claim.reference} — ${claim.employeeName}`,
+        amountMinor: totalsOf(claim.lines).totalMinor,
+        currency: claim.currency,
+        submittedBy: claim.employeeCode,
+        waitingSince: claim.submittedAt ?? claim.createdAt,
+      };
+    }
+  }
+
+  if (subjectType === "BILL") {
+    const row = await prisma.record.findUnique({
+      where: { store_id: { store: BILL_STORE, id: subjectId } },
+      select: { id: true, orgId: true, entityId: true, createdAt: true, data: true },
+    });
+    const c = row && row.orgId === opts.orgId ? billCandidate(row) : null;
+    if (c) {
+      return {
+        entityId: c.entityId,
+        label: c.label,
+        amountMinor: c.amountMinor,
+        currency: c.currency,
+        submittedBy: c.submittedBy,
+        waitingSince: c.waitingSince,
+      };
+    }
+  }
+
+  if (subjectType === "PAYMENT") {
+    // A payment run. A single supplier payment is identified by whatever
+    // reference the payment carried and has no row of its own, so it falls
+    // through to the decisions below.
+    const run = await prisma.paymentRun.findFirst({
+      where: { id: subjectId, orgId: opts.orgId },
+      include: { items: { where: { excluded: false }, select: { amountMinor: true } } },
+    });
+    if (run) {
+      return {
+        entityId: run.entityId,
+        label: `${run.reference} — ${run.items.length} bill${run.items.length === 1 ? "" : "s"}`,
+        amountMinor: run.items.reduce((a, i) => a + i.amountMinor, 0n),
+        currency: run.currency,
+        submittedBy: run.preparedBy,
+        waitingSince: run.createdAt,
+      };
+    }
+  }
+
+  if (subjectType === "PAYROLL") {
+    const groups = await prisma.payslip.groupBy({
+      by: ["entityId"],
+      where: { orgId: opts.orgId, period: subjectId, status: "draft" },
+      _sum: PAYROLL_SUM,
+      _min: { createdAt: true },
+      _count: { _all: true },
+    });
+    // One entity ran that month: the id names it after all. Several did, and
+    // the best this can do is the entity the caller was asking about — which is
+    // no worse than before and is reported where it matters.
+    const g = groups.length === 1 ? groups[0] : groups.find((r) => r.entityId === opts.entityId);
+    if (g) {
+      const book = await prisma.book.findFirst({
+        where: { orgId: opts.orgId, entityId: g.entityId, code: "PRIMARY" },
+        select: { functionalCurrency: true },
+      });
+      return {
+        entityId: g.entityId,
+        label: `${subjectId} — ${g._count._all} payslip${g._count._all === 1 ? "" : "s"}`,
+        amountMinor: payrollGross(g._sum),
+        currency: book?.functionalCurrency ?? "AED",
+        submittedBy: null,
+        waitingSince: g._min.createdAt,
+      };
+    }
+  }
+
+  // No register — a manual journal's reference, a single supplier payment, or a
+  // document that has since been posted or thrown away. The round that was
+  // opened against it says where it belongs.
+  const rows = await prisma.approvalDecision.findMany({
+    where: { orgId: opts.orgId, subjectType, subjectId },
+    orderBy: [{ decidedAt: "asc" }],
+  });
+  if (rows.length === 0) return null;
+  const priced = [...rows].reverse().find((r) => r.amountMinor !== null);
+  return {
+    entityId: rows[0].entityId,
+    label: subjectId,
+    amountMinor: priced?.amountMinor ?? null,
+    currency: null,
+    submittedBy: null,
+    waitingSince: rows[0].decidedAt,
+  };
+}
+
 /* ------------------------------------------------------------------ deciding */
 
 export interface DecideResult {
@@ -830,7 +1279,11 @@ export async function decide(opts: {
   decidedBy: string;
   amountMinor: number | bigint | string;
   reason?: string | null;
-  /** Who raised the thing. Given, it is what makes self-approval detectable. */
+  /**
+   * Who raised the thing. Optional because it is no longer trusted to arrive:
+   * where it is absent the register is asked. Pass it where the caller has
+   * already read the document and would only be paying for the lookup twice.
+   */
   submittedBy?: string | null;
   currency?: string;
 }): Promise<DecideResult> {
@@ -853,7 +1306,20 @@ export async function decide(opts: {
 
   const amountMinor = minor(opts.amountMinor, `The amount on ${what} ${subjectId}`);
   const reason = (opts.reason ?? "").trim() || null;
-  const submittedBy = (opts.submittedBy ?? "").trim() || null;
+
+  // Who raised it, asked for rather than waited for.
+  //
+  // The bar below only ever armed when a caller passed `submittedBy`, and the
+  // only caller that could was the approvals route deciding on an expense
+  // claim — the one subject this module could look up. So on the other four it
+  // protected nothing: whoever proposed a payment run could approve it here,
+  // in the file whose header calls that the one thing that is not negotiable.
+  // Reading the register ourselves means the bar binds wherever the ledger
+  // records a raiser at all, whatever the caller remembered to pass.
+  const submittedBy =
+    (opts.submittedBy ?? "").trim() ||
+    (await subjectFacts({ orgId: opts.orgId, subjectType, subjectId, entityId: opts.entityId }))?.submittedBy?.trim() ||
+    null;
 
   if (decision === "REJECTED" && !reason) {
     throw new LedgerError(
@@ -1037,39 +1503,54 @@ export interface PendingItem {
   /** What to call it on screen — a document reference where the ledger has one. */
   label: string;
   amountMinor: bigint;
+  /** The document's own currency, which is not always the book's. */
+  currency: string;
+  /** Waiting for signatures, or refused and going nowhere until it is withdrawn. */
+  state: SubjectState;
   approvalsOutstanding: number;
   blockers: string[];
+  /** True of it and not a reason it cannot proceed — see `ApprovalState`. */
+  caveats: string[];
   /** Since when it has been sitting there, so the queue can be worked oldest first. */
   waitingSince: Date;
 }
 
-/** A candidate the queue considers, before the rules are applied to it. */
-interface Candidate {
-  entityId: string;
-  subjectType: SubjectType;
-  subjectId: string;
-  label: string;
-  amountMinor: bigint;
-  waitingSince: Date;
-  submittedBy: string | null;
-}
+/**
+ * How far back the queue looks for a subject that has no register.
+ *
+ * Newest first, and that direction is the whole point. This read used to be
+ * `take: 5000` ordered oldest-first with no filter on whether the subject was
+ * finished, and for every subject but an expense claim the candidate set was
+ * derived entirely from it — so at five thousand LIFETIME decisions the oldest
+ * five thousand were kept and nothing recorded afterwards could enter the queue
+ * again. Two approvers at a hundred documents a month reach that in about two
+ * years, and the control then stops working without saying anything. Ordering
+ * the other way means what is falling off the end is the oldest history rather
+ * than today's work.
+ */
+const RECENT_DECISIONS = 2000;
 
 /**
  * What is waiting on this person.
  *
  * A queue, not a search box: an approver should open the screen and see the
- * work, not have to know the reference of a bill somebody else keyed. Two
- * things can put a subject in it —
+ * work, not have to know the reference of a bill somebody else keyed. So the
+ * candidates are the OPEN SUBJECTS — every claim, bill, payment run and payroll
+ * month a rule could apply to, read from the registers in `openSubjects` — plus
+ * anything somebody has already decided on that those registers do not hold.
  *
- *   - a submitted expense claim, which is the one document type this ledger
- *     holds in a table of its own with an amount on it; and
- *   - any subject somebody has already decided on and which is not finished,
- *     which is how a part-approved bill or payment finds its second signature.
+ * That second half is not a fallback, it is the manual journal: an entry does
+ * not exist until it posts, so the only trace of one waiting for signatures is
+ * the decisions recorded against the reference its poster chose. It also
+ * catches a single supplier payment, which is identified by its own reference
+ * and has no row anywhere.
  *
- * A subject nobody has touched, in a subledger with no table here (a payment
- * run, say), cannot appear until its first decision is recorded — that is a
- * real gap, and the fix is for those modules to record the request, not for
- * this one to guess.
+ * It used to be the whole of it, and that was the defect. A subject could enter
+ * the queue only once somebody had decided on it, and the only screen that
+ * records a decision is this queue — so a bill entered the queue only if it was
+ * already in it. Writing the rule the screen invites ("every supplier bill
+ * needs one signature") made bills permanently unpostable, because the guard on
+ * the posting path asked for a signature the queue never asked anybody to give.
  *
  * `role` is the caller's, from the session. Where it is not given, the org
  * membership is read; where there is none, role-based rules simply do not
@@ -1095,69 +1576,90 @@ export async function pendingFor(opts: {
         }))?.role ?? null
       : (opts.role ?? "").trim() || null;
 
-  const [ruleRows, decisionRows, claims] = await Promise.all([
+  const [ruleRows, open] = await Promise.all([
     prisma.approvalRule.findMany({
       where: { orgId: opts.orgId, active: true, ...(opts.entityId ? { entityId: opts.entityId } : {}), ...(subjectType ? { subjectType } : {}) },
     }),
-    // Bounded: what is in flight, not the history. A subject with every
-    // approval on it is filtered out below rather than fetched separately.
-    prisma.approvalDecision.findMany({
-      where: { orgId: opts.orgId, ...(opts.entityId ? { entityId: opts.entityId } : {}), ...(subjectType ? { subjectType } : {}) },
-      orderBy: [{ decidedAt: "asc" }],
-      take: 5000,
-    }),
-    subjectType && subjectType !== "EXPENSE_CLAIM"
-      ? Promise.resolve([])
-      : prisma.expenseClaim.findMany({
-          where: { orgId: opts.orgId, status: "submitted", ...(opts.entityId ? { entityId: opts.entityId } : {}) },
-          include: { lines: { select: { netMinor: true, vatMinor: true, vatRecoverable: true } } },
-          orderBy: [{ submittedAt: "asc" }],
-          take: 500,
-        }),
+    openSubjects({ orgId: opts.orgId, entityId: opts.entityId, subjectType }),
   ]);
 
   const rules = ruleRows.map(asRule);
-  const decisions = decisionRows.map(asDecision);
+
+  const candidates = new Map<string, Candidate>();
+  for (const c of open) candidates.set(`${c.subjectType}:${c.subjectId}`, c);
+
+  const [onOpen, recentRows] = await Promise.all([
+    // Every decision on the subjects the registers just found — read by id
+    // rather than by taking a slice of the table, so no amount of history can
+    // push a document that is open today out of its own queue.
+    //
+    // Deliberately not narrowed to the entity: the unique index is org-wide, so
+    // that is how `approvalState` reads them at posting time, and a queue that
+    // counted a subset of the decisions the guard counts would tell people
+    // something different from what the ledger will do.
+    candidates.size === 0
+      ? Promise.resolve([])
+      : prisma.approvalDecision.findMany({
+          where: { orgId: opts.orgId, subjectId: { in: [...candidates.values()].map((c) => c.subjectId) } },
+        }),
+    prisma.approvalDecision.findMany({
+      where: { orgId: opts.orgId, ...(opts.entityId ? { entityId: opts.entityId } : {}), ...(subjectType ? { subjectType } : {}) },
+      orderBy: [{ decidedAt: "desc" }],
+      take: RECENT_DECISIONS,
+    }),
+  ]);
+
+  // Both reads overlap wherever an open subject has been decided on recently,
+  // so they are merged by row id rather than concatenated — a decision counted
+  // twice would satisfy a rule asking for two approvers on its own.
+  const decisions = new Map<string, DecisionRow>();
+  for (const d of [...onOpen, ...recentRows]) decisions.set(d.id, asDecision(d));
 
   const bySubject = new Map<string, DecisionRow[]>();
-  for (const d of decisions) {
+  for (const d of decisions.values()) {
     const k = `${d.subjectType}:${d.subjectId}`;
     const list = bySubject.get(k);
     if (list) list.push(d);
     else bySubject.set(k, [d]);
   }
 
-  const candidates = new Map<string, Candidate>();
-  for (const c of claims) {
-    candidates.set(`EXPENSE_CLAIM:${c.id}`, {
-      entityId: c.entityId,
-      subjectType: "EXPENSE_CLAIM",
-      subjectId: c.id,
-      label: `${c.reference} — ${c.employeeName}`,
-      amountMinor: totalsOf(c.lines).totalMinor,
-      waitingSince: c.submittedAt ?? c.createdAt,
-      // The claimant, in the claim's own namespace. Same caveat as expenses.ts:
-      // it only bars self-approval if employee codes and user ids are the same
-      // thing in this deployment.
-      submittedBy: c.employeeCode,
-    });
-  }
-  for (const [k, rows] of bySubject) {
+  // The subjects no register holds — a manual journal's reference, a single
+  // supplier payment. Only from the filtered read: a row picked up by subject
+  // id alone could belong to another entity or another kind of document.
+  const fromDecisions: Candidate[] = [];
+  for (const row of recentRows) {
+    const d = decisions.get(row.id) as DecisionRow;
+    const k = `${d.subjectType}:${d.subjectId}`;
     if (candidates.has(k)) continue;
-    const first = rows[0];
+    const rows = bySubject.get(k) ?? [d];
     // The amount as last decided on. A decision carries the figure it was shown,
     // which is the only amount this module knows for a subject with no table here.
     const withAmount = [...rows].reverse().find((r) => r.amountMinor !== null);
     if (!withAmount) continue;
-    candidates.set(k, {
+    const first = rows.reduce((a, b) => (a.decidedAt <= b.decidedAt ? a : b));
+    const c: Candidate = {
       entityId: first.entityId,
       subjectType: first.subjectType,
       subjectId: first.subjectId,
       label: first.subjectId,
       amountMinor: withAmount.amountMinor as bigint,
+      // Both kinds of subject that get here — a manual journal and a single
+      // supplier payment — are measured by their posting paths in the book's
+      // own currency, so that is what the figure is in. Filled in below.
+      currency: "",
       waitingSince: first.decidedAt,
       submittedBy: null,
+    };
+    candidates.set(k, c);
+    fromDecisions.push(c);
+  }
+  if (fromDecisions.length > 0) {
+    const books = await prisma.book.findMany({
+      where: { orgId: opts.orgId, code: "PRIMARY", entityId: { in: [...new Set(fromDecisions.map((c) => c.entityId))] } },
+      select: { entityId: true, functionalCurrency: true },
     });
+    const currencyOf = new Map(books.map((b) => [b.entityId, b.functionalCurrency]));
+    for (const c of fromDecisions) c.currency = currencyOf.get(c.entityId) ?? "AED";
   }
 
   const out: PendingItem[] = [];
@@ -1165,9 +1667,9 @@ export async function pendingFor(opts: {
     if (subjectType && c.subjectType !== subjectType) continue;
     if (opts.entityId && c.entityId !== opts.entityId) continue;
 
-    // No currency conversion here, deliberately. The queue settles a hundred
-    // subjects from two queries and converting each would mean a rate lookup
-    // per row; more to the point, this list decides what to SHOW somebody,
+    // No currency conversion here, deliberately. The queue settles every open
+    // subject from a handful of queries and converting each would mean a rate
+    // lookup per row; more to the point, this list decides what to SHOW,
     // while `approvalState` decides what may post — and that one converts. A
     // foreign document can therefore appear in the queue against the wrong
     // band, and it still cannot post until the rate is on file and the rules
@@ -1177,22 +1679,46 @@ export async function pendingFor(opts: {
       subjectType: c.subjectType,
       subjectId: c.subjectId,
       amountMinor: c.amountMinor,
+      currency: c.currency,
       rules: applicable(rules.filter((r) => r.entityId === c.entityId && r.subjectType === c.subjectType), c.amountMinor),
       decisions: bySubject.get(`${c.subjectType}:${c.subjectId}`) ?? [],
     });
 
-    if (state.approved || state.rejected) continue;
-    // Already had their say — the unique index would refuse a second one anyway.
-    if (state.decisions.some((d) => samePerson(d.decidedBy, userId))) continue;
-    // Their own document is not waiting on them; nobody approves their own work.
-    if (c.submittedBy && samePerson(c.submittedBy, userId)) continue;
+    // Nothing to do: it has every signature its rules ask for, or it meets no
+    // rule at all and never needed one.
+    if (state.approved) continue;
 
-    const waitingOnThem = state.rules.some(
-      (r) =>
-        !r.satisfied &&
-        (r.approverUserId ? samePerson(r.approverUserId, userId) : role !== null && samePerson(r.approverRole ?? "", role)),
-    );
-    if (!waitingOnThem) continue;
+    const decided = state.decisions.some((d) => samePerson(d.decidedBy, userId));
+    // A rule names them, whether or not that rule is still outstanding. Used
+    // for a refusal, where the question is who may deal with it rather than who
+    // still owes a signature.
+    const names = (r: AppliedRule) =>
+      r.approverUserId ? samePerson(r.approverUserId, userId) : role !== null && samePerson(r.approverRole ?? "", role);
+
+    if (state.rejected) {
+      /*
+       * A refused document, shown so that somebody can withdraw it.
+       *
+       * `withdraw` was routed, four separate messages told people to use it —
+       * the blocker every posting path returns among them — and no screen sent
+       * it, because the queue hid the one kind of subject it applies to. A
+       * rejection stands until the round is withdrawn, so hiding them meant a
+       * refused bill was refused for ever and the only way past it was a
+       * database.
+       *
+       * Shown to whoever the rules name AND to whoever has already decided:
+       * the person who refused it is the likeliest to withdraw it once it has
+       * been fixed, and they are the one person the pending branch below
+       * deliberately filters out.
+       */
+      if (!state.rules.some(names) && !decided) continue;
+    } else {
+      // Already had their say — the unique index would refuse a second one anyway.
+      if (decided) continue;
+      // Their own document is not waiting on them; nobody approves their own work.
+      if (c.submittedBy && samePerson(c.submittedBy, userId)) continue;
+      if (!state.rules.some((r) => !r.satisfied && names(r))) continue;
+    }
 
     out.push({
       entityId: c.entityId,
@@ -1200,8 +1726,11 @@ export async function pendingFor(opts: {
       subjectId: c.subjectId,
       label: c.label,
       amountMinor: c.amountMinor,
+      currency: c.currency,
+      state: state.state,
       approvalsOutstanding: state.approvalsOutstanding,
       blockers: state.blockers,
+      caveats: state.caveats,
       waitingSince: c.waitingSince,
     });
   }

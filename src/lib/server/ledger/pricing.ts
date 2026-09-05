@@ -653,8 +653,15 @@ export async function priceListRegister(opts: {
   });
   const listIds = lists.map((l) => l.id);
 
-  const wanted = opts.listCode ? opts.listCode.trim().toUpperCase() : null;
+  /* A list code that names nothing is a mistake, not a request for everything.
+   * Falling back to every list's prices answers a question nobody asked: the
+   * caller gets rows from lists they did not name, and nothing in the reply
+   * says the filter was dropped, so a typo in an integration reads as "that
+   * list holds all of these prices". The screen only ever sends a code it read
+   * from this same reply; an API caller is the one who hits it. */
+  const wanted = opts.listCode?.trim().toUpperCase() || null;
   const chosen = wanted ? lists.find((l) => l.code === wanted) ?? null : null;
+  if (wanted && !chosen) throw new LedgerError(`There is no price list ${wanted}.`);
 
   // In force on the day, expressed as a where clause so the count is the
   // database's rather than a filter over whatever was read.

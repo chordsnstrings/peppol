@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/server/prisma";
 import { post, LedgerError } from "./post";
+import { addAccount } from "./chart";
 
 /**
  * Leases under IFRS 16.
@@ -31,6 +32,14 @@ import { post, LedgerError } from "./post";
  * single year does it equal the straight-line rent it replaced — more in the
  * early years, less in the late ones — and only over the whole term do the two
  * sum to the same figure.
+ *
+ * IAS 1.69 then asks for the part of the liability falling due within twelve
+ * months of the reporting date to be presented as a current liability, which
+ * 2600 alone cannot say — it sits under non-current liabilities in the chart and
+ * a five-year lease is mostly not current. `reclassifyCurrentPortion` posts
+ * that split onto 2460, for the same reason `borrowings.ts` posts its own:
+ * these statements read the chart, so a split that is only noted is a split no
+ * statement can present.
  *
  * As with fixed assets, the register and the ledger are two records on purpose.
  * The lease's term, payment and borrowing rate are a contract and a judgement;
@@ -64,6 +73,22 @@ export const FINANCE_COST_ACCOUNT = "6360";
 /** IFRS 16.47(a): the right-of-use asset is presented separately. */
 export const ROU_ASSET_ACCOUNT = "1700";
 export const LEASE_LIABILITY_ACCOUNT = "2600";
+/**
+ * The part of the lease liability falling due within twelve months.
+ *
+ * 2600 sits under "Non-current liabilities" in the chart, which is right for
+ * what is left of a five-year lease and wrong for the next twelve payments of
+ * it. IAS 1.69(a) makes the amount due to be settled within twelve months of
+ * the reporting date a current liability, and a lease liability is not exempt
+ * from that merely because IFRS 16.47(b) also wants it shown on a line of its
+ * own. So there is a current sibling, and `reclassifyCurrentPortion` posts into
+ * it — see there for why it is posted rather than noted.
+ *
+ * It is 2460 and not, say, 2620 for the same reason borrowings' is 2450: the
+ * statements read the chart's hierarchy first and the code band second, and the
+ * two have to agree.
+ */
+export const LEASE_LIABILITY_CURRENT_ACCOUNT = "2460";
 export const ROU_DEPRECIATION_ACCOUNT = "6600";
 /** Where an exempt lease's payments go instead — IFRS 16.6. */
 export const RENT_ACCOUNT = "6100";
@@ -248,6 +273,48 @@ export function buildSchedule(opts: {
   }
 
   return rows;
+}
+
+/**
+ * The part of a lease liability falling due within twelve months of a
+ * reporting date, and the part falling due after it.
+ *
+ * IAS 1.69(c)–(d): a liability is current where it is due to be settled within
+ * twelve months of the reporting date, or where the entity has no unconditional
+ * right to defer settlement beyond then. On a lease that is the PRINCIPAL the
+ * next twelve payments repay — which is the liability today less the liability
+ * in twelve months' time, both read off the amortisation table.
+ *
+ * Taking the difference rather than adding up twelve payments is what keeps the
+ * interest out, and the interest is the whole trap. A payment is principal and
+ * interest together; future interest has not accrued at the reporting date and
+ * is not a liability yet (IFRS 16.36(b) unwinds it as time passes), so counting
+ * twelve payments overstates current liabilities by a year of finance cost
+ * every time. On a five-year lease at 6% that is the difference between a
+ * current portion of about 90k and one of 100k.
+ *
+ * `elapsed` is how many periods of the schedule have closed by the reporting
+ * date: 0 on the commencement date itself, 12 a year later. Past the end of the
+ * term everything is nil, because the schedule closes at exactly nothing.
+ */
+export function currentPortionOf(opts: {
+  rows: ScheduleRow[];
+  elapsed: number;
+}): { currentMinor: bigint; nonCurrentMinor: bigint } {
+  const rows = opts.rows;
+  if (rows.length === 0) return { currentMinor: 0n, nonCurrentMinor: 0n };
+  if (!Number.isInteger(opts.elapsed) || opts.elapsed < 0) {
+    throw new LedgerError("A current-portion split needs a whole number of periods elapsed, not fewer than none.");
+  }
+
+  const at = (period: number) =>
+    period <= 0
+      ? rows[0].openingLiabilityMinor
+      : rows[Math.min(period, rows.length) - 1].closingLiabilityMinor;
+
+  const outstanding = at(opts.elapsed);
+  const afterTwelve = at(opts.elapsed + 12);
+  return { currentMinor: outstanding - afterTwelve, nonCurrentMinor: afterTwelve };
 }
 
 /* -------------------------------------------------------------- the register */
@@ -1013,15 +1080,24 @@ export async function payLease(opts: {
  * liability is not linear: interest is charged on what is left, so the split
  * between interest and principal moves every period.
  */
+/**
+ * How many periods of a lease's schedule have closed by `asOf`, capped at the
+ * term. The month the lease commences in counts as the first: the schedule
+ * charges interest and takes a payment within it.
+ */
+function periodsElapsed(lease: { startsOn: Date; endsOn: Date }, asOf: Date): number {
+  return Math.min(
+    termMonths(lease.startsOn, lease.endsOn),
+    (asOf.getUTCFullYear() - lease.startsOn.getUTCFullYear()) * 12 +
+      (asOf.getUTCMonth() - lease.startsOn.getUTCMonth()) + 1,
+  );
+}
+
 export function positionAt(lease: LeaseRow, asOf: Date): { liabilityMinor: bigint; rouCarryingMinor: bigint } {
   if (asOf < lease.startsOn) return { liabilityMinor: 0n, rouCarryingMinor: 0n };
 
   const periods = termMonths(lease.startsOn, lease.endsOn);
-  const elapsed = Math.min(
-    periods,
-    (asOf.getUTCFullYear() - lease.startsOn.getUTCFullYear()) * 12 +
-      (asOf.getUTCMonth() - lease.startsOn.getUTCMonth()) + 1,
-  );
+  const elapsed = periodsElapsed(lease, asOf);
   if (elapsed <= 0) {
     return { liabilityMinor: lease.initialLiabilityMinor, rouCarryingMinor: lease.initialRouMinor };
   }
@@ -1035,6 +1111,258 @@ export function positionAt(lease: LeaseRow, asOf: Date): { liabilityMinor: bigin
   });
   const row = schedule[elapsed - 1];
   return { liabilityMinor: row.closingLiabilityMinor, rouCarryingMinor: row.closingRouMinor };
+}
+
+/* -------------------------------------------------- current and non-current */
+
+/** One lease's split at a date, taken from its own amortisation table. */
+function splitAt(lease: LeaseRow, asOf: Date): { currentMinor: bigint; nonCurrentMinor: bigint } {
+  // A draft has not been recognised and an exempt lease never will be, so
+  // neither has a liability to split. A lease that has not commenced by the
+  // reporting date is not on that date's balance sheet at all.
+  if (lease.status === "draft" || exemptionOf(lease).exempt || asOf < lease.startsOn) {
+    return { currentMinor: 0n, nonCurrentMinor: 0n };
+  }
+  const periods = termMonths(lease.startsOn, lease.endsOn);
+  const rows = buildSchedule({
+    liabilityMinor: lease.initialLiabilityMinor,
+    rouMinor: lease.initialRouMinor,
+    paymentMinor: lease.paymentMinor,
+    ratePerPeriodBps: periodRateBps(lease.discountRateBps, 12),
+    periods,
+  });
+  return currentPortionOf({ rows, elapsed: periodsElapsed(lease, asOf) });
+}
+
+/**
+ * Create the current-portion account if this entity's chart has not got it.
+ *
+ * 2460 is in the seeded chart in `setup.ts`, but a book opened before it was
+ * added there does not have it, and the reclassification would fail with
+ * "Account 2460 does not exist" — true, and useless to the person reading it.
+ */
+async function ensureCurrentPortionAccount(orgId: string, entityId: string) {
+  const existing = await prisma.account.findFirst({
+    where: { orgId, entityId, code: LEASE_LIABILITY_CURRENT_ACCOUNT },
+    select: { id: true },
+  });
+  if (existing) return;
+  await addAccount({
+    orgId, entityId,
+    account: {
+      code: LEASE_LIABILITY_CURRENT_ACCOUNT,
+      name: "Lease liabilities — current portion",
+      nameAr: "الجزء المتداول من التزامات عقود الإيجار",
+      type: "LIABILITY",
+      parentCode: "20",
+    },
+  });
+}
+
+/** What 2600 and 2460 hold at a date, stated as amounts owed rather than as credits. */
+async function ledgerSplit(orgId: string, entityId: string, asOf: Date | null) {
+  const accounts = await prisma.account.findMany({
+    where: {
+      orgId, entityId,
+      code: { in: [LEASE_LIABILITY_ACCOUNT, LEASE_LIABILITY_CURRENT_ACCOUNT] },
+    },
+    select: { id: true, code: true },
+  });
+  const lines = accounts.length
+    ? await prisma.journalLine.findMany({
+        where: {
+          orgId,
+          accountId: { in: accounts.map((a) => a.id) },
+          // A reversed entry and its reversal net to nothing; reading only
+          // "posted" lines counts the reversal alone and moves the balance by
+          // the full amount, which shows up here as a false difference.
+          entry: { status: { in: ["posted", "reversed"] }, ...(asOf ? { entryDate: { lte: asOf } } : {}) },
+        },
+        select: { accountId: true, functionalAmountMinor: true },
+      })
+    : [];
+  const byId = new Map(accounts.map((a) => [a.id, a.code]));
+  let nonCurrent = 0n;
+  let current = 0n;
+  for (const l of lines) {
+    // Both are credit balances, so the sign is flipped to compare against a
+    // register that states what is owed as a positive number.
+    if (byId.get(l.accountId) === LEASE_LIABILITY_ACCOUNT) nonCurrent += -l.functionalAmountMinor;
+    if (byId.get(l.accountId) === LEASE_LIABILITY_CURRENT_ACCOUNT) current += -l.functionalAmountMinor;
+  }
+  return { currentMinor: current, nonCurrentMinor: nonCurrent };
+}
+
+export interface LeaseReclassResult {
+  asOf: string;
+  posted: boolean;
+  /** How much moved between 2600 and 2460, unsigned. */
+  movedMinor: string;
+  /** What the split should be at this date, across every capitalised lease. */
+  currentMinor: string;
+  nonCurrentMinor: string;
+  /** What 2460 held before this ran. */
+  wasMinor: string;
+  leases: { code: string; currentMinor: string; nonCurrentMinor: string }[];
+  entryId: string | null;
+  reference: string | null;
+  alreadyPosted: boolean;
+  note: string;
+}
+
+/**
+ * Move the twelve-month portion of every lease liability onto a current one.
+ *
+ * **Posted rather than only reported, for the reason `borrowings.ts` gives at
+ * `reclassifyCurrentPortion` and it is worth repeating here.** IAS 1.69 is a
+ * presentation requirement, so a note would satisfy the standard. It would not
+ * reach the reader of this product: the statements are built from account
+ * balances, and what makes a liability current is where the account sits in the
+ * chart. A split that is not in the ledger is a split no statement can present.
+ * So it is posted:
+ *
+ *   Dr  2600 Lease liabilities                  what falls due within a year
+ *     Cr  2460 Lease liabilities, current portion
+ *
+ * It corrects to a TARGET rather than posting an increment, exactly as
+ * borrowings does: the entry is the difference between what the split should be
+ * at this reporting date and what is already on 2460, so running it twice on
+ * one date posts nothing the second time, and running it at successive year
+ * ends keeps the split right without anyone reversing last year's.
+ *
+ * WHAT HAS ALREADY BEEN RECLASSIFIED IS READ FROM THE LEDGER, not from the
+ * register. Borrowings keeps a `currentPortionMinor` on each facility; the
+ * lease register has no such column and this module may not add one. The ledger
+ * is the better record anyway — it is where the reclassification actually
+ * happened — but it only knows the total, so the entry is one pair of lines for
+ * the whole book rather than a line per lease. The per-lease composition is
+ * returned instead, and `leaseRegister` shows it beside what the ledger holds.
+ *
+ * The same consequence borrowings has: `cashflow.ts` classifies movements from
+ * a fixed map that does not name 2460, so a period containing a reclassification
+ * will report it as unclassified. That is the statement being honest about a map
+ * that has not been extended — 2460 belongs in financing beside 2600 — and it is
+ * said here rather than worked around.
+ */
+export async function reclassifyCurrentPortion(opts: {
+  orgId: string;
+  entityId: string;
+  /** The reporting date the twelve months are counted from. */
+  asOf: string;
+  actorId?: string;
+}): Promise<LeaseReclassResult> {
+  const asOf = new Date(opts.asOf ?? "");
+  if (Number.isNaN(asOf.getTime())) {
+    throw new LedgerError("A lease reclassification needs a reporting date, written like 2026-12-31.");
+  }
+  const iso = asOf.toISOString().slice(0, 10);
+
+  const leases = (await prisma.lease.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId },
+    orderBy: { code: "asc" },
+  })) as unknown as LeaseRow[];
+
+  const splits = leases.map((l) => ({ lease: l, ...splitAt(l, asOf) }));
+  const target = splits.reduce((a, s) => a + s.currentMinor, 0n);
+  const nonCurrentTarget = splits.reduce((a, s) => a + s.nonCurrentMinor, 0n);
+  const composition = splits
+    .filter((s) => s.currentMinor !== 0n || s.nonCurrentMinor !== 0n)
+    .map((s) => ({
+      code: s.lease.code,
+      currentMinor: s.currentMinor.toString(),
+      nonCurrentMinor: s.nonCurrentMinor.toString(),
+    }));
+
+  const externalKey = `lease-reclass:${opts.entityId}:${iso}`;
+  const already = await prisma.journalEntry.findFirst({ where: { orgId: opts.orgId, externalKey } });
+  if (already) {
+    return {
+      asOf: iso, posted: false, movedMinor: "0",
+      currentMinor: target.toString(), nonCurrentMinor: nonCurrentTarget.toString(),
+      wasMinor: target.toString(), leases: composition,
+      entryId: already.id, reference: `${already.series}-${already.number}`,
+      alreadyPosted: true,
+      note: `The split at ${iso} has already been posted; nothing moved.`,
+    };
+  }
+
+  const ledger = await ledgerSplit(opts.orgId, opts.entityId, asOf);
+  const movement = target - ledger.currentMinor;
+
+  if (movement === 0n) {
+    return {
+      asOf: iso, posted: false, movedMinor: "0",
+      currentMinor: target.toString(), nonCurrentMinor: nonCurrentTarget.toString(),
+      wasMinor: ledger.currentMinor.toString(), leases: composition,
+      entryId: null, reference: null, alreadyPosted: false,
+      note: composition.length === 0
+        ? "No lease is capitalised, so there is nothing to split."
+        : `The current portion at ${iso} is already what the ledger says it is; nothing to post.`,
+    };
+  }
+
+  // Moving more onto 2460 than the two accounts hold between them would leave
+  // 2600 with a debit balance — a negative liability on the face of the sheet.
+  // It means the register and the ledger disagree, which `leaseRegister` exists
+  // to surface, and posting through it would bury the disagreement inside a
+  // presentation entry.
+  const held = ledger.currentMinor + ledger.nonCurrentMinor;
+  if (movement > 0n && target > held) {
+    throw new LedgerError(
+      `The schedules say ${target} of lease liability falls due within twelve months of ${iso}, but 2600 and 2460 ` +
+        `hold ${held} between them. Splitting that would leave 2600 with a debit balance. The register and the ` +
+        `ledger have gone out of step — charge the months that have not been run, or find the journal that moved ` +
+        `2600 by hand, and reclassify afterwards.`,
+    );
+  }
+
+  await ensureCurrentPortionAccount(opts.orgId, opts.entityId);
+
+  const amount = movement > 0n ? movement : -movement;
+  const toCurrent = movement > 0n;
+  const codes = composition.map((c) => c.code).join(", ");
+
+  const entry = await post({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    entryDate: iso,
+    memo: `Lease liabilities falling due within twelve months of ${iso} (IAS 1.69)`,
+    source: "lease",
+    sourceType: "LEASE_RECLASS",
+    sourceId: iso,
+    externalKey,
+    actorType: "HUMAN",
+    actorId: opts.actorId,
+    series: "LC",
+    lines: [
+      {
+        account: toCurrent ? LEASE_LIABILITY_ACCOUNT : LEASE_LIABILITY_CURRENT_ACCOUNT,
+        debit: amount,
+        memo: toCurrent ? `Out of non-current — ${codes}` : `Back out of current — ${codes}`,
+      },
+      {
+        account: toCurrent ? LEASE_LIABILITY_CURRENT_ACCOUNT : LEASE_LIABILITY_ACCOUNT,
+        credit: amount,
+        memo: toCurrent ? `Due within twelve months — ${codes}` : `Due after twelve months — ${codes}`,
+      },
+    ],
+  });
+
+  return {
+    asOf: iso,
+    posted: true,
+    movedMinor: amount.toString(),
+    currentMinor: target.toString(),
+    nonCurrentMinor: nonCurrentTarget.toString(),
+    wasMinor: ledger.currentMinor.toString(),
+    leases: composition,
+    entryId: entry.id,
+    reference: `${entry.series}-${entry.number}`,
+    alreadyPosted: false,
+    note:
+      `Moved ${amount} between 2600 and 2460 so the balance sheet presents the ${target} of lease liability ` +
+      `falling due within twelve months of ${iso} as a current liability, per IAS 1.69.`,
+  };
 }
 
 export async function leaseRegister(opts: {
@@ -1059,16 +1387,22 @@ export async function leaseRegister(opts: {
   // At a past date a lease commenced since is not in the register at all.
   const leases = asOf ? all.filter((l) => l.startsOn <= asOf) : all;
 
+  // The twelve months IAS 1.69 counts have to run from a date. Left to stand,
+  // the register is drawn at today, so that is where they run from.
+  const splitDate = asOf ?? new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
+
   const rows = leases.map((l) => {
     const exemption = exemptionOf(l);
+    const split = splitAt(l, splitDate);
     if (!asOf) {
-      return { lease: l, exemption, rouCarrying: l.initialRouMinor - l.accumRouDepMinor };
+      return { lease: l, exemption, rouCarrying: l.initialRouMinor - l.accumRouDepMinor, split };
     }
     const at = positionAt(l, asOf);
     return {
       lease: { ...l, liabilityMinor: at.liabilityMinor } as LeaseRow,
       exemption,
       rouCarrying: at.rouCarryingMinor,
+      split,
     };
   });
 
@@ -1079,9 +1413,15 @@ export async function leaseRegister(opts: {
   const registerLiability = onBalanceSheet.reduce((a, r) => a + r.lease.liabilityMinor, 0n);
   const registerRou = onBalanceSheet.reduce((a, r) => a + r.rouCarrying, 0n);
 
-  // What the ledger says the same accounts hold.
+  // What the ledger says the same accounts hold. 2460 is read alongside 2600:
+  // once the current portion has been reclassified, part of the liability is
+  // there, and comparing the register against 2600 alone would report the
+  // reclassification itself as a difference.
   const accounts = await prisma.account.findMany({
-    where: { orgId: opts.orgId, entityId: opts.entityId, code: { in: [LEASE_LIABILITY_ACCOUNT, ROU_ASSET_ACCOUNT] } },
+    where: {
+      orgId: opts.orgId, entityId: opts.entityId,
+      code: { in: [LEASE_LIABILITY_ACCOUNT, LEASE_LIABILITY_CURRENT_ACCOUNT, ROU_ASSET_ACCOUNT] },
+    },
     select: { id: true, code: true },
   });
   const lines = accounts.length
@@ -1095,18 +1435,25 @@ export async function leaseRegister(opts: {
       })
     : [];
   const byId = new Map(accounts.map((a) => [a.id, a.code]));
-  let ledgerLiability = 0n;
+  let ledgerNonCurrent = 0n;
+  let ledgerCurrent = 0n;
   let ledgerRou = 0n;
   for (const l of lines) {
     const code = byId.get(l.accountId);
-    // 2600 is a credit balance, so its sign is flipped to compare against a
-    // register that states what is owed as a positive number.
-    if (code === LEASE_LIABILITY_ACCOUNT) ledgerLiability += -l.functionalAmountMinor;
+    // 2600 and 2460 are credit balances, so their signs are flipped to compare
+    // against a register that states what is owed as a positive number.
+    if (code === LEASE_LIABILITY_ACCOUNT) ledgerNonCurrent += -l.functionalAmountMinor;
+    if (code === LEASE_LIABILITY_CURRENT_ACCOUNT) ledgerCurrent += -l.functionalAmountMinor;
     if (code === ROU_ASSET_ACCOUNT) ledgerRou += l.functionalAmountMinor;
   }
+  const ledgerLiability = ledgerNonCurrent + ledgerCurrent;
+  const registerCurrent = onBalanceSheet.reduce((a, r) => a + r.split.currentMinor, 0n);
+  const registerNonCurrent = onBalanceSheet.reduce((a, r) => a + r.split.nonCurrentMinor, 0n);
 
   return {
-    leases: rows.map(({ lease: l, exemption, rouCarrying }) => ({
+    /** The date the twelve-month split below is counted from. */
+    asOf: splitDate.toISOString().slice(0, 10),
+    leases: rows.map(({ lease: l, exemption, rouCarrying, split }) => ({
       code: l.code,
       name: l.name,
       lessor: l.lessor,
@@ -1122,6 +1469,11 @@ export async function leaseRegister(opts: {
       initialRouMinor: l.initialRouMinor.toString(),
       accumRouDepMinor: l.accumRouDepMinor.toString(),
       rouCarryingMinor: rouCarrying.toString(),
+      // DERIVED from this lease's own schedule at the register date, whatever
+      // has been posted. What the ledger has actually been told is only known
+      // in total, on 2460 — see `reclassifyCurrentPortion`.
+      currentMinor: split.currentMinor.toString(),
+      nonCurrentMinor: split.nonCurrentMinor.toString(),
       chargedTo: l.chargedTo,
       status: l.status,
       exempt: exemption.exempt,
@@ -1133,14 +1485,23 @@ export async function leaseRegister(opts: {
       rouCarryingMinor: registerRou.toString(),
       initialRouMinor: onBalanceSheet.reduce((a, r) => a + r.lease.initialRouMinor, 0n).toString(),
       accumRouDepMinor: onBalanceSheet.reduce((a, r) => a + r.lease.accumRouDepMinor, 0n).toString(),
+      currentMinor: registerCurrent.toString(),
+      nonCurrentMinor: registerNonCurrent.toString(),
     },
     ledger: {
       liabilityMinor: ledgerLiability.toString(),
+      currentMinor: ledgerCurrent.toString(),
+      nonCurrentMinor: ledgerNonCurrent.toString(),
       rouMinor: ledgerRou.toString(),
       // A register that does not tie to the ledger is the finding, so it is
       // reported rather than reconciled away.
       liabilityAgrees: ledgerLiability === registerLiability,
       rouAgrees: ledgerRou === registerRou,
+      // The two columns split the same total differently until the split has
+      // been posted at this date. That is not a fault in either — it is the
+      // reclassification not having been run — and it is the one thing the
+      // balance sheet's current/non-current presentation depends on.
+      splitPosted: ledgerCurrent === registerCurrent,
     },
     /** Off balance sheet, and why. The only place these leases are visible. */
     exemptions: rows

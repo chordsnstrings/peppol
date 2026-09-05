@@ -79,17 +79,18 @@ export async function POST(req: Request) {
     /* Declaring a related party, assessing one as unrelated, ending a
      * relationship, recording key management compensation and attesting the
      * note all write the IAS 24 disclosure that goes out with the statutory
-     * accounts. No journal is posted, so no key fits exactly; `ledger.post` is
-     * the closest the catalogue has — the power to write something the
-     * accounts will assert. A `disclosure.manage` is the key I would have
-     * wanted.
+     * accounts. No journal is posted, which is why `ledger.post` never fitted:
+     * it is the power to write something the accounts will assert, not the
+     * power to put an entry in the ledger, and the two are held by different
+     * people in any business large enough to have a related party worth
+     * disclosing. `disclosure.manage` is that act, and it is the key here.
      *
      * `compensation` was considered for a payroll key and left with the rest.
      * The figure is a published aggregate compiled by whoever prepares the
      * note, and requiring `payroll.run` would move the accounts' own
      * disclosure into the hands of the payroll operator instead of the
      * accountant who writes it. */
-    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+    await requirePermission({ orgId, userId, entityId: b.entityId, permission: "disclosure.manage" });
     const scope = { orgId, entityId: b.entityId };
 
     switch (b.action) {

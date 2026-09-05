@@ -354,7 +354,64 @@ export interface OpenItem {
   daysOld: number;
   /** Days past its own due date; nil where none is known or it is not yet due. */
   daysOverdue: number;
+  /**
+   * Days until it falls due — what the maturity bands are measured on. Negative
+   * where it is already past due, and nil where the document carried no terms,
+   * which is a different fact from "due today" and is kept apart from it.
+   */
+  daysToMaturity: number | null;
 }
+
+/**
+ * The remaining contractual maturity of what is owed — IFRS 7.39(a).
+ *
+ * A SEPARATE REPORT FROM THE AGEING ABOVE, AND THE DISTINCTION IS THE POINT.
+ * The ageing buckets a bill by how long ago it was raised, which is the right
+ * question for credit control: a supplier whose invoices sit unpaid for four
+ * months is a relationship in trouble whatever the terms said. It is the wrong
+ * question for liquidity, and IFRS 7.39 asks the liquidity one. A bill raised
+ * sixty days ago on ninety-day terms is not overdue; it is not yet due, and a
+ * maturity table cut on the document date reports the entity's short-term
+ * obligations exactly backwards — the reader sees money that must be found now
+ * when in fact it need not be found for another month.
+ *
+ * The due date has been captured on every entry since the ageing learned to
+ * tell "old" from "overdue"; until now nothing read it for this.
+ */
+export interface MaturityBand {
+  key: string;
+  label: string;
+  amountMinor: string;
+}
+
+export interface PayablesMaturity {
+  asOf: string;
+  bands: MaturityBand[];
+  totalMinor: string;
+  /** Of the total, what is already past its due date — the first band, restated. */
+  pastDueMinor: string;
+  /**
+   * What no maturity can be stated for, because the document carried no terms.
+   *
+   * It is a band of its own rather than folded into the earliest one. IFRS
+   * 7.B11C would put an amount repayable on demand in the earliest band, but a
+   * bill with no terms recorded is not evidence that it is repayable on demand
+   * — it is evidence that nobody keyed the terms. Putting it in the first band
+   * would be this report inventing a fact about the supplier's contract.
+   */
+  undatedMinor: string;
+  undatedItems: number;
+}
+
+/** The bands, in the order a maturity table reads. */
+const MATURITY_BANDS: { key: string; label: string }[] = [
+  { key: "past_due", label: "Already past due" },
+  { key: "within_30", label: "Due within 30 days" },
+  { key: "d31_60", label: "Due in 31 to 60 days" },
+  { key: "d61_90", label: "Due in 61 to 90 days" },
+  { key: "over_90", label: "Due in more than 90 days" },
+  { key: "undated", label: "No payment terms recorded" },
+];
 
 /** Whole days, so a report run at teatime says the same as one run at dawn. */
 function daysBetween(from: Date, to: Date): number {
@@ -399,6 +456,13 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
   // 120 band — a name that quietly understates the oldest debt to anybody
   // reading the figures rather than the code that cut them.
   const buckets = { current: 0n, d31_60: 0n, d61_90: 0n, d91_120: 0n, over120: 0n };
+  // The maturity ladder, keyed as MATURITY_BANDS names it. It is built in the
+  // same pass as the ageing and from the same netted documents, so the two
+  // tables can never be cut from different sets of open items.
+  const maturity: Record<string, bigint> = {
+    past_due: 0n, within_30: 0n, d31_60: 0n, d61_90: 0n, over_90: 0n, undated: 0n,
+  };
+  let undatedItems = 0;
   const open: OpenItem[] = [];
   let overdue = 0n;
   for (const [sourceId, row] of byDoc) {
@@ -407,19 +471,35 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
     const bucket = days <= 30 ? "current" : days <= 60 ? "d31_60" : days <= 90 ? "d61_90" : days <= 120 ? "d91_120" : "over120";
     // Payables sit on the credit side, so the ledger holds them negative.
     // The report shows what is owed as a positive figure.
-    buckets[bucket] += -row.outstanding;
+    const owed = -row.outstanding;
+    buckets[bucket] += owed;
     // Overdue is a different question from old, and only the due date answers
     // it. The bands stay measured from the document date, so a report that has
     // always meant "age" keeps meaning it; what is added is the fact that used
     // to be missing.
     const daysOverdue = row.due ? Math.max(0, daysBetween(row.due, asOf)) : 0;
-    if (daysOverdue > 0) overdue += -row.outstanding;
+    if (daysOverdue > 0) overdue += owed;
+
+    // The maturity ladder is measured forwards from the reporting date to the
+    // day the supplier may demand the money, which is the only measure that
+    // answers "what must this business find, and by when".
+    const daysToMaturity = row.due ? daysBetween(asOf, row.due) : null;
+    const rung =
+      daysToMaturity === null ? "undated"
+      : daysToMaturity < 0 ? "past_due"
+      : daysToMaturity <= 30 ? "within_30"
+      : daysToMaturity <= 60 ? "d31_60"
+      : daysToMaturity <= 90 ? "d61_90"
+      : "over_90";
+    maturity[rung] += owed;
+    if (daysToMaturity === null) undatedItems += 1;
+
     open.push({
       sourceId, memo: row.memo,
       date: row.date.toISOString().slice(0, 10),
       dueDate: row.due ? row.due.toISOString().slice(0, 10) : null,
-      outstandingMinor: (-row.outstanding).toString(),
-      daysOld: days, daysOverdue,
+      outstandingMinor: owed.toString(),
+      daysOld: days, daysOverdue, daysToMaturity,
     });
   }
 
@@ -430,6 +510,15 @@ export async function payablesAgeing(opts: { orgId: string; entityId: string; as
     totalMinor: Object.values(buckets).reduce((a, b) => a + b, 0n).toString(),
     /** Of the total, what is past its own due date. Nil where none is known. */
     overdueMinor: overdue.toString(),
+    /** IFRS 7.39(a) — the same money, laid out by when it has to be found. */
+    maturity: {
+      asOf: asOf.toISOString().slice(0, 10),
+      bands: MATURITY_BANDS.map((b) => ({ key: b.key, label: b.label, amountMinor: maturity[b.key].toString() })),
+      totalMinor: Object.values(maturity).reduce((a, b) => a + b, 0n).toString(),
+      pastDueMinor: maturity.past_due.toString(),
+      undatedMinor: maturity.undated.toString(),
+      undatedItems,
+    } satisfies PayablesMaturity,
     open,
   };
 }

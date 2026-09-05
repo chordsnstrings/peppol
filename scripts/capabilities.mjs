@@ -267,8 +267,8 @@ if (process.argv.includes("--check")) {
    * would be a gate nobody could run. What must not happen is the number going
    * UP. Lower these as they are closed; never raise them.
    */
-  const UNREACHED_ENDPOINTS_CEILING = 4;
-  const UNREACHED_OPERATIONS_CEILING = 11;
+  const UNREACHED_ENDPOINTS_CEILING = 0;
+  const UNREACHED_OPERATIONS_CEILING = 10;
 
   let failed = 0;
   const ratchet = (n, ceiling, what) => {
