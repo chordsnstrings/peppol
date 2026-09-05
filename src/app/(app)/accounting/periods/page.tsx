@@ -7,7 +7,7 @@ import { useAsk } from "@/components/ledger/ask";
 
 interface Period {
   id: string; label: string; seq: number; startsOn: string; endsOn: string;
-  status: string; isAdjustment: boolean; closedAt: string | null;
+  status: string; isAdjustment: boolean; closedAt: string | null; closedBy: string | null;
 }
 
 /** Mirrors the server's transition map — the server is still the authority. */
@@ -85,6 +85,7 @@ export default function PeriodsPage() {
                   <th style={{ width: "7rem" }}>From</th>
                   <th style={{ width: "7rem" }}>To</th>
                   <th style={{ width: "8rem" }}>Status</th>
+                  <th style={{ width: "12rem" }}>Last moved by</th>
                   <th className="hidden md:table-cell">What that means</th>
                   <th style={{ width: "14rem" }}><span className="sr-only">Actions</span></th>
                 </tr>
@@ -99,6 +100,21 @@ export default function PeriodsPage() {
                     <td>{p.startsOn.slice(0, 10)}</td>
                     <td>{p.endsOn.slice(0, 10)}</td>
                     <td><StatusChip status={p.status} /></td>
+                    {/*
+                      * Who, as well as when. Locking is the one irreversible act
+                      * in this product and it recorded only a timestamp — every
+                      * posted entry names an actor, and the act that freezes a
+                      * whole month of them named nobody. A period whose status
+                      * was last moved before this was recorded says so, rather
+                      * than being left blank as though nothing had happened.
+                      */}
+                    <td className="sw-sub">
+                      {p.status === "open" && p.closedAt === null
+                        ? "—"
+                        : p.closedBy
+                          ? <>{p.closedBy}<div>{p.closedAt?.slice(0, 10)}</div></>
+                          : <>not recorded{p.closedAt && <div>{p.closedAt.slice(0, 10)}</div>}</>}
+                    </td>
                     <td className="hidden md:table-cell" style={{ color: "var(--sw-fg-muted)" }}>{EXPLAIN[p.status]}</td>
                     <td>
                       <span className="flex flex-wrap gap-1.5 py-1">

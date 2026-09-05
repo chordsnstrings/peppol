@@ -19,6 +19,49 @@ this codebase. And the last section, "What is not left", is load-bearing: the
 deliberate non-goals in the capability register are decisions, and closing them
 would make the product worse, not better.
 
+## Status
+
+This survey is a snapshot of what was true when it ran. Most of it has since
+been built, and the paragraphs below are kept exactly as written rather than
+edited, because a description of a defect is the clearest statement of why the
+fix is shaped the way it is — and because a survey rewritten to agree with the
+code is a survey nobody can check.
+
+**Closed since.** Every item under "Wrong numbers" — the PPE note's fictitious
+additions, account 3300 missing from the SOCIE, the four-code cash list, money
+hand-formatted at two decimals in fifteen modules, the two disagreeing hold
+stores (including the create verb, which was found afterwards), the two
+registers totalling a truncated page, and the missing 1060 in the monetary map.
+Under "Regulatory exposure": the receivable write-off and Article 64(1) relief,
+the FTA-assigned tax period and its stagger, GPSSA pension and the gratuity it
+displaces, the margin-scheme purchase price, box 1's seven emirate rows, and
+the Article 10 voluntary-disclosure population. Every item under "Unreachable"
+— attachments, payroll amendment and settlement, the approvals engine on all
+six posting paths, the seven unenforced permissions and forty-nine unguarded
+routes, dimensions, delivery notes, contract modification, price closing and
+list ending, marking time invoiced, unmatching a bank line, ending a
+subscription, the credit checks at order acceptance, the notes pack's two
+missing notes, the notification centre's four missing sources, multi-invoice
+receipts, assessed-and-not-related, and trade finance's status filter and
+cancellation. Under "Polish": workspace deletion, `clientIp`, the unbounded
+export, the NUL byte, all twenty native dialogs, `closedBy` on a locked period,
+the two `serialize` and `verify-ledger` items. And the separate, larger piece
+the first section named — other comprehensive income, and a total that includes
+it.
+
+**Still open, deliberately.** IAS 38 intangibles as a class of their own: the
+chart carries account 1560 and the cash flow statement classifies it, so the
+balance sheet is right, but there is no IAS 38.118 reconciliation, no
+indefinite-life path, and a capitalised licence still draws the IAS 16 policy
+note. The arithmetic is right and the caption is wrong, at a year end only.
+
+**Found while fixing, and fixed.** A drawing under a trade facility dated after
+the facility expired. A related-party note reading only the first five thousand
+documents. `outstandingOnOrder` scoped to the organisation and not the entity.
+An approval threshold compared against a figure in another currency. A payment
+run bypassing the approval rules entirely. A rule naming a ROLE satisfied by
+any two people, because nothing checked what the signatories were.
+
 What's left, ranked by whether it makes a number wrong, exposes you to a regulator, is simply unreachable from the product, or is polish. Everything below survived two rounds of refutation against the code; twenty other candidates did not, and I've listed those at the end so nobody re-opens them.
 
 ## Wrong numbers

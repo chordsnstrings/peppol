@@ -22,7 +22,10 @@ export async function GET(req: Request) {
     const periods = await prisma.accountingPeriod.findMany({
       where: { orgId, entityId },
       orderBy: [{ startsOn: "asc" }],
-      select: { id: true, label: true, seq: true, startsOn: true, endsOn: true, status: true, isAdjustment: true, closedAt: true },
+      select: {
+        id: true, label: true, seq: true, startsOn: true, endsOn: true,
+        status: true, isAdjustment: true, closedAt: true, closedBy: true,
+      },
     });
     return json({ periods });
   } catch (e) {
@@ -62,7 +65,16 @@ export async function PATCH(req: Request) {
 
     const updated = await prisma.accountingPeriod.update({
       where: { id: period.id },
-      data: { status: b.status, closedAt: b.status === "open" ? null : new Date() },
+      data: {
+        status: b.status,
+        closedAt: b.status === "open" ? null : new Date(),
+        // Who, as well as when. Locking a period is the one irreversible act in
+        // this product and it recorded only the time — every posted entry
+        // carries an actor and the act that freezes a whole month of them
+        // carried none. Reopening records the person who reopened it, so the
+        // pair always names whoever last moved this period.
+        closedBy: userId,
+      },
     });
     return json({ period: { id: updated.id, label: updated.label, status: updated.status } });
   } catch (e) {

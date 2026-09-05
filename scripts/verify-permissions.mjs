@@ -114,6 +114,44 @@ invented.length === 0
   ? ok("every guard names a permission the catalogue defines")
   : bad("a guard asks for a permission no role can grant", invented.join(", "));
 
+/* ------------------------------------ a guard is scoped to one entity ------- */
+
+/*
+ * `permissionsOf` narrows a person's grants to one entity only when it is given
+ * one — and most guards were not giving it one. A role granted on entity A
+ * therefore satisfied a guard for a document in entity B, which is the same
+ * cross-entity hole `gl_line_guard` closes inside the ledger and the reason
+ * `outstandingOnOrder` was rescoped.
+ *
+ * So a route that knows which entity it is acting on has to say so. A route
+ * that genuinely acts across the whole organisation — roles, a consolidation
+ * group, an intercompany report — legitimately does not, and says why on the
+ * line above, in the source, where somebody changing it will read it.
+ */
+const ORG_WIDE_MARKER = "org-wide:";
+
+const unscoped = [];
+for (const p of LEDGER) {
+  const body = bodies.get(p);
+  // A route that never sees an entity has none to pass.
+  if (!/entityId/.test(body)) continue;
+  const lines = body.split("\n");
+  lines.forEach((line, i) => {
+    if (!line.includes("requirePermission({")) return;
+    if (line.includes("entityId")) return;
+    // The reason may sit on the line above or in the comment block before it.
+    const before = lines.slice(Math.max(0, i - 6), i).join("\n");
+    if (before.includes(ORG_WIDE_MARKER)) return;
+    unscoped.push(`${p.replace("src/app/api/ledger/", "").replace("/route.ts", "")}:${i + 1}`);
+  });
+}
+unscoped.length === 0
+  ? ok("every guard is scoped to the entity it is acting on, or says why not")
+  : bad(
+      `${unscoped.length} guard(s) ask org-wide in a route that knows its entity`,
+      unscoped.slice(0, 12).join(", ") + (unscoped.length > 12 ? `, and ${unscoped.length - 12} more` : ""),
+    );
+
 /* ------------------------------------------- the no-roles escape hatch ------ */
 
 /*

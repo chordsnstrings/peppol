@@ -161,6 +161,44 @@ d("year-end close", () => {
     expect(count).toBe(1);
   });
 
+  it("records who locked the months, not only when", async () => {
+    // Locking is the one irreversible act in this product — a locked period
+    // never reopens, whoever asks — and it recorded a timestamp and no name.
+    // Every posted journal entry carries an actor; the act that freezes a
+    // whole year of them carried none.
+    await openFiscalYear({ orgId: ORG, entityId: ENT, label: "2028", startsOn: "2028-01-01" });
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2028-03-15", source: "manual", memo: "A year to close",
+      lines: [{ account: "1010", debit: 400_000 }, { account: "4000", credit: 400_000 }],
+    });
+
+    // The year has to be hard-closed month by month before it can be closed —
+    // a year closed over periods that can still receive postings is wrong by
+    // tomorrow — so this walks them through the same states a person would.
+    const months = await db.accountingPeriod.findMany({
+      where: { orgId: ORG, entityId: ENT, fiscalYear: { label: "2028" } },
+      select: { id: true },
+    });
+    for (const status of ["soft_closed", "hard_closed"]) {
+      await db.accountingPeriod.updateMany({ where: { id: { in: months.map((m) => m.id) } }, data: { status } });
+    }
+
+    const r = await closeYear({
+      orgId: ORG, entityId: ENT, fiscalYear: "2028", lockPeriods: true, actorId: "u-controller",
+    });
+    expect(r.periodsLocked).toBeGreaterThan(0);
+
+    const locked = await db.accountingPeriod.findMany({
+      where: { orgId: ORG, entityId: ENT, status: "locked", fiscalYear: { label: "2028" } },
+      select: { label: true, closedAt: true, closedBy: true },
+    });
+    expect(locked.length).toBe(r.periodsLocked);
+    for (const p of locked) {
+      expect(p.closedBy, p.label).toBe("u-controller");
+      expect(p.closedAt, p.label).toBeInstanceOf(Date);
+    }
+  });
+
   it("refuses a year that does not exist", async () => {
     await expect(previewClose({ orgId: ORG, entityId: ENT, fiscalYear: "1999" }))
       .rejects.toThrow(/no fiscal year/i);

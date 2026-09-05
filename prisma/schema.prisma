@@ -374,6 +374,10 @@ model AccountingPeriod {
   status       String           @default("open")
   isAdjustment Boolean          @default(false)
   closedAt     DateTime?
+  /// Who last moved this period's status. Locking is the one irreversible act
+  /// in the product and it recorded when but never who. NULL means the move
+  /// predates the column, or the period was never closed.
+  closedBy     String?
   entries      JournalEntry[]
   balances     AccountBalance[]
 

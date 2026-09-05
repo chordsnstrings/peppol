@@ -15,12 +15,12 @@ do, or one guarantee it makes and holds:
 
 | Kind | What it counts | Now |
 | --- | --- | --- |
-| operation | an exported function in a ledger module — the unit of work | 470 |
-| endpoint | an HTTP verb, or a named action within one | 351 |
-| rule | a constraint or trigger PostgreSQL enforces itself | 277 |
-| screen | a page somebody navigates to | 87 |
-| | **capabilities** | **1,185** |
-| check | an assertion in the verification suites | 1,806 |
+| operation | an exported function in a ledger module — the unit of work | 493 |
+| endpoint | an HTTP verb, or a named action within one | 360 |
+| rule | a constraint or trigger PostgreSQL enforces itself | 294 |
+| screen | a page somebody navigates to | 88 |
+| | **capabilities** | **1,235** |
+| check | an assertion in the verification suites | 2,025 |
 
 An operation reached over HTTP is counted once as each, because they are
 different things: one is what the code can do, the other is what is reachable
@@ -271,13 +271,21 @@ real database:
    what a data surface may look like, whether a screen invented a class, and
    whether any screen formats money itself. It found four real defects the
    first time it ran.
-5. **capability count** — the register derived in `scripts/capabilities.mjs`,
+5. **permissions** — the two promises the product makes on screen, held to the
+   source: the roles screen says "Grant one role and enforcement begins" and the
+   catalogue says "a permission nobody can check is a permission nobody holds".
+   It fails when a permission is granted and checked nowhere, when a ledger
+   route changes something and asks nothing, when a guard names a key no role
+   can grant, when a guard asks org-wide in a route that knows its entity, and
+   when the escape hatch that keeps an unconfigured workspace working goes
+   missing. It found forty-nine unguarded routes the first time it ran.
+6. **capability count** — the register derived in `scripts/capabilities.mjs`,
    asserted against the target rather than reported. A change that removes
    capabilities fails the build instead of passing quietly.
-6. **ledger HTTP** — every route swept: none may answer 5xx, every refusal
+7. **ledger HTTP** — every route swept: none may answer 5xx, every refusal
    carries a sentence, and not one is readable without a session.
-7. **subledgers HTTP** — receivables, payables and the close, end to end.
-8. **browser** — a real browser through the real onboarding, keying entries,
+8. **subledgers HTTP** — receivables, payables and the close, end to end.
+9. **browser** — a real browser through the real onboarding, keying entries,
    pasting a block, reaching every screen in the navigation, and checking that
    nothing overflows on a phone. It also holds the typography to its own rules:
    every form control on every screen has an accessible name, every figure is

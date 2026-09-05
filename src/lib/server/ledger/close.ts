@@ -333,7 +333,11 @@ export async function closeYear(opts: {
     if (opts.lockPeriods) {
       const res = await prisma.accountingPeriod.updateMany({
         where: { orgId: opts.orgId, entityId: opts.entityId, fiscalYearId: year.id, status: { not: "locked" } },
-        data: { status: "locked", closedAt: new Date() },
+        // Locking a whole year's months at once is the most irreversible thing
+        // this product does — a locked period never reopens, whoever asks — and
+        // it recorded when but never who. It records the person who closed the
+        // year, because that is the decision these locks came from.
+        data: { status: "locked", closedAt: new Date(), closedBy: opts.actorId ?? null },
       });
       periodsLocked = res.count;
     } else if (reopened) {
