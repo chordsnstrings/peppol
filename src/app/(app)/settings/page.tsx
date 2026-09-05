@@ -4,11 +4,14 @@ import * as React from "react";
 import { Building2, BadgeCheck, Hash, AlertTriangle, Save, Trash2, Download } from "lucide-react";
 import { useAppState } from "@/lib/app-state";
 import { saveEntity } from "@/lib/db/repo";
-import { resetWorkspace } from "@/lib/db/database";
 import { downloadText } from "@/lib/domain/ubl";
 import { derivePeppolId, EMIRATES, validateTRN } from "@/lib/domain/peppol";
+import { useGatewayMode } from "@/lib/gateway/mode";
+import { LIVE_ENTITY_ON_SIMULATOR, SIMULATED_ACTIVATION_BLOCK } from "@/lib/gateway/disclosure";
+import { RECORD_RETENTION } from "@/lib/gateway/retention";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/controls";
 import { Field, Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
@@ -17,10 +20,36 @@ import { toast } from "sonner";
 
 export default function EntitySettingsPage() {
   const { currentEntity, refresh } = useAppState();
+  const gateway = useGatewayMode();
   const [form, setForm] = React.useState(currentEntity);
   const [saving, setSaving] = React.useState(false);
   const [exporting, setExporting] = React.useState(false);
   const [confirmReset, setConfirmReset] = React.useState(false);
+  const [destroyArchive, setDestroyArchive] = React.useState(false);
+  const [resetting, setResetting] = React.useState(false);
+
+  /*
+   * Posted here rather than through `resetWorkspace()` because the reset route
+   * now needs a body: without the acknowledgement it keeps every transmitted
+   * document still inside its retention window, and the tick box below is the
+   * only place a person can say they mean to destroy those too.
+   */
+  const resetEverything = async () => {
+    setResetting(true);
+    try {
+      const res = await fetch("/api/account/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ acknowledgeRecordDestruction: destroyArchive }),
+      });
+      if (!res.ok) throw new Error();
+      window.location.href = "/onboarding";
+    } catch {
+      setResetting(false);
+      toast.error("Reset failed", { description: "Reload the page to see what the workspace holds now." });
+    }
+  };
 
   const exportData = async () => {
     setExporting(true);
@@ -111,12 +140,34 @@ export default function EntitySettingsPage() {
               {derivePeppolId(form.vatRegistered ? form.trn : form.tin) ?? "—"}
             </div>
           </Field>
-          <div className="flex items-center gap-2 sm:col-span-2">
+          {/*
+            * Two separate facts, shown separately because they can disagree and
+            * the disagreement is the dangerous state: the first is what this
+            * entity is activated for, the second is what the deployment's
+            * gateway can actually do. A single "Live" badge over a simulated
+            * gateway is the badge that made this product dishonest.
+            */}
+          <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
             <span className="text-sm text-muted-foreground">Status:</span>
             <Badge tone={form.einvoicingStatus === "LIVE" ? "success" : "gold"} dot>
               {form.einvoicingStatus === "LIVE" ? "Live" : "Sandbox"}
             </Badge>
+            <span className="ms-2 text-sm text-muted-foreground">Transmission:</span>
+            <Badge tone={!gateway.known ? "neutral" : gateway.simulated ? "warning" : "success"} dot>
+              {!gateway.known ? "Checking…" : gateway.simulated ? "Simulated" : `Live via ${gateway.driver}`}
+            </Badge>
           </div>
+          {gateway.known && gateway.simulated && (
+            <div className="flex items-start gap-2.5 rounded-lg border border-warning/25 bg-warning/[0.06] p-3 text-sm sm:col-span-2">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
+              <span className="text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  {form.einvoicingStatus === "LIVE" ? "Sends are refused." : "Sandbox only."}
+                </span>{" "}
+                {form.einvoicingStatus === "LIVE" ? LIVE_ENTITY_ON_SIMULATOR : SIMULATED_ACTIVATION_BLOCK}
+              </span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -176,7 +227,9 @@ export default function EntitySettingsPage() {
           <div>
             <p className="text-sm font-medium">Reset this workspace</p>
             <p className="text-sm text-muted-foreground">
-              Permanently deletes all local data on this device and restarts onboarding.
+              Deletes every entity, customer, product and invoice in this workspace — on the server,
+              for everyone who uses it — and restarts onboarding. The documents already transmitted
+              are kept for their {RECORD_RETENTION.years}-year retention unless you say otherwise.
             </p>
           </div>
           <Button variant="destructive" icon={<Trash2 />} onClick={() => setConfirmReset(true)}>
@@ -188,12 +241,29 @@ export default function EntitySettingsPage() {
       <ConfirmDialog
         open={confirmReset}
         onClose={() => setConfirmReset(false)}
-        onConfirm={async () => {
-          await resetWorkspace();
-          window.location.href = "/onboarding";
-        }}
+        onConfirm={resetEverything}
+        loading={resetting}
         title="Reset the entire workspace?"
-        description="Every entity, customer, product and invoice on this device will be deleted. This cannot be undone."
+        description={
+          <div className="space-y-3">
+            <p>
+              Every entity, customer, product and invoice in this workspace will be deleted. This
+              cannot be undone.
+            </p>
+            <p>
+              The documents behind sent invoices — the PINT AE UBL and the Tax Data Document — are
+              kept, because {RECORD_RETENTION.basis} requires them for {RECORD_RETENTION.years} years
+              and nothing here can rebuild them. Export your data first if you want your own copy.
+            </p>
+            <div className="flex items-start gap-2.5 rounded-lg border border-destructive/25 bg-destructive/[0.06] p-3">
+              <Checkbox id="destroy-archive" checked={destroyArchive} onCheckedChange={setDestroyArchive} />
+              <label htmlFor="destroy-archive" className="text-sm text-muted-foreground">
+                Delete those too. I am destroying statutory records inside the{" "}
+                {RECORD_RETENTION.years}-year retention window.
+              </label>
+            </div>
+          </div>
+        }
         confirmLabel="Delete everything"
         tone="destructive"
       />
