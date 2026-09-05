@@ -9,6 +9,10 @@ import { dueSoon } from "./cheques";
 import { deliveredNotInvoiced } from "./deliveries";
 import { dueSubscriptions } from "./subscriptions";
 import { ledgerAnalytics } from "./analytics";
+import { testCovenants } from "./borrowings";
+import { adjustmentDue } from "./vat-schemes";
+import { contingentLiabilities } from "./trade-finance";
+import { dunningPlan } from "./credit-control";
 
 /**
  * The notification centre — one place for everything the books are trying to
@@ -817,6 +821,258 @@ const analyticsSource: Source = {
   },
 };
 
+
+/* --- banking covenants ----------------------------------------------------- */
+
+/**
+ * A breached covenant is the one finding on this list that can cost the
+ * business its funding, and it was the one finding not on it.
+ *
+ * `testCovenants` is measured at a reporting date and reports three outcomes,
+ * never two: pass, breach, and not_tested. The third is why this source cannot
+ * simply count breaches. A covenant that could not be measured — because the
+ * metric needs a figure this chart does not carry — is not a covenant that
+ * passed, and a screen whose own docblock says "one false green makes the whole
+ * thing worthless" must not be summarised here as silence. So an untested
+ * covenant gets its own advisory row.
+ *
+ * Measured at today against the year to date, which is what the borrowings
+ * screen defaults to. A covenant is usually tested at a quarter or year end on
+ * terms this ledger does not record, so the figure here is an early warning
+ * rather than the bank's own test, and the wording says so.
+ */
+const covenantSource: Source = {
+  key: "covenants",
+  label: "Banking covenants",
+  async run(ctx) {
+    const asOf = ctx.asOf.toISOString().slice(0, 10);
+    const c = await testCovenants({ orgId: ctx.orgId, entityId: ctx.entityId, asOf });
+    const out: Raw[] = [];
+
+    const breached = c.tests.filter((t) => t.result === "breach");
+    if (breached.length > 0) {
+      const first = breached[0];
+      out.push({
+        source: "covenants",
+        topic: "breach",
+        // Not statutory — nothing is filed — but a blocker all the same: a
+        // breach is a fact about today that a lender is entitled to act on.
+        severity: "blocker",
+        title:
+          breached.length === 1
+            ? `${first.borrowingCode} is in breach of its ${first.label.toLowerCase()} covenant`
+            : `${plural(breached.length, "covenant is", "covenants are")} in breach`,
+        detail:
+          `${breached.map((t) => `${t.borrowingCode}/${t.code}`).join(", ")} ` +
+          `${breached.length === 1 ? "fails" : "fail"} on the figures at ${c.asOf}. ${first.why} ` +
+          `The facility agreement is what says what happens next, and this measures the ratio on the books ` +
+          `rather than on the bank's own definition — so the number to act on is this one and the consequence ` +
+          `is in the agreement.`,
+        href: "/accounting/borrowings",
+        itemCount: breached.length,
+      });
+    }
+
+    if (c.untested > 0) {
+      out.push({
+        source: "covenants",
+        topic: "not_tested",
+        severity: "warning",
+        title: `${plural(c.untested, "covenant could", "covenants could")} not be measured`,
+        detail:
+          `${c.untested} of ${plural(c.tests.length, "covenant", "covenants")} could not be tested against the ` +
+          `books at ${c.asOf}. That is not a pass. Until each is measurable the business does not know whether ` +
+          `it is in compliance, and the first it would hear otherwise is from the lender.`,
+        href: "/accounting/borrowings",
+        itemCount: c.untested,
+      });
+    }
+
+    return out;
+  },
+};
+
+/* --- capital assets scheme -------------------------------------------------- */
+
+/**
+ * The single most-missed obligation in UAE VAT, and structurally so: it falls
+ * due years after a purchase everybody has forgotten, on an asset nobody is
+ * looking at, and nothing in the books changes to announce it.
+ *
+ * `vat-schemes.ts` already ships the finding in the vocabulary `attention.ts`
+ * uses — its own comment says the shape exists "so this can be dropped into
+ * that list without either module learning about the other" — and then nothing
+ * consumed it. This does. The severity is the module's own: it decides that a
+ * year late stops being an oversight and starts being a penalty, and that
+ * judgement belongs to the module that knows the law, not to this one.
+ */
+const capitalAssetSource: Source = {
+  key: "vat-schemes",
+  label: "The capital assets scheme",
+  async run(ctx) {
+    const r = await adjustmentDue({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    if (!r.finding) return [];
+
+    // The module ranks in attention.ts's vocabulary, so it translates through
+    // the same table the attention source uses. It cannot become louder here.
+    return [{
+      source: "vat-schemes",
+      topic: r.finding.key,
+      severity: ATTENTION_SEVERITY[r.finding.severity],
+      title: r.finding.title,
+      detail: r.finding.detail,
+      href: r.finding.href,
+      itemCount: r.finding.count,
+      // Deliberately no amountMinor: `boundMinor` is a bound in either
+      // direction, not an amount owed, and putting it in the amount column
+      // would read as tax payable. It is stated in the detail as what it is.
+      statutory: true,
+    }];
+  },
+};
+
+/* --- guarantees and letters of credit --------------------------------------- */
+
+/**
+ * Two facts, and the second is the one that costs money.
+ *
+ * A guarantee about to expire is a diary note: the customer or supplier who
+ * asked for it will ask again, and renewing late means a gap in cover.
+ *
+ * A facility whose expiry has already gone by and which nobody closed is worse.
+ * `contingentLiabilities` drops it from the disclosure the moment it expires —
+ * correctly, since nobody can call a credit that has run out — so the exposure
+ * disappears from the note and nothing else says a word. Meanwhile 1255 still
+ * carries the margin the bank held against it, restricted cash the business
+ * could have back for the asking. That is real money sitting behind a register
+ * row nobody is looking at.
+ *
+ * Severity is derived here rather than passed through, because trade-finance
+ * ranks nothing — it reports a disclosure, not a queue.
+ */
+const EXPIRING_SOON_DAYS = 30;
+
+const tradeFinanceSource: Source = {
+  key: "trade-finance",
+  label: "Guarantees and letters of credit",
+  async run(ctx) {
+    const c = await contingentLiabilities({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    const out: Raw[] = [];
+
+    const soon = c.expiringWithin90Days;
+    if (soon.length > 0) {
+      const first = soon[0];
+      const days = Math.floor(
+        (new Date(`${first.expiresOn}T00:00:00.000Z`).getTime() - ctx.asOf.getTime()) / DAY,
+      );
+      out.push({
+        source: "trade-finance",
+        topic: "expiring",
+        scope: first.reference,
+        severity: days <= EXPIRING_SOON_DAYS ? "warning" : "advisory",
+        title: `${plural(soon.length, "facility expires", "facilities expire")} within ninety days`,
+        detail:
+          `${first.reference} expires on ${first.expiresOn}, in ${plural(Math.max(days, 0), "day", "days")}, ` +
+          `with ${money(first.contingentMinor, ctx.currency)} still uncalled` +
+          (soon.length > 1 ? `, and ${plural(soon.length - 1, "other does", "others do")} within ninety days` : "") +
+          `. Whoever asked for the guarantee will ask again on renewal, and a renewal arranged late is a gap in ` +
+          `cover rather than a late piece of paperwork.`,
+        href: "/accounting/trade-finance",
+        itemCount: soon.length,
+        amountMinor: soon.reduce((a, f) => a + f.contingentMinor, 0n),
+        dueOn: first.expiresOn,
+      });
+    }
+
+    if (!c.restrictedCash.agrees) {
+      out.push({
+        source: "trade-finance",
+        topic: "margin_disagrees",
+        severity: "warning",
+        title: "The margin on the register does not match the margin in the ledger",
+        detail:
+          `The register says ${money(c.restrictedCash.marginMinor, ctx.currency)} of margin is held; account 1255 ` +
+          `carries ${money(c.restrictedCash.ledgerMinor, ctx.currency)}. The difference of ` +
+          `${money(c.restrictedCash.differenceMinor, ctx.currency)} is either a margin released without the ` +
+          `facility being closed — in which case restricted cash is overstated and there is money to ask the bank ` +
+          `for — or a posting made by hand. Both are findings; neither resolves itself.`,
+        href: "/accounting/trade-finance",
+        amountMinor:
+          c.restrictedCash.differenceMinor < 0n
+            ? -c.restrictedCash.differenceMinor
+            : c.restrictedCash.differenceMinor,
+      });
+    }
+
+    return out;
+  },
+};
+
+/* --- customers who are late ------------------------------------------------- */
+
+/**
+ * The collections ladder, as one row rather than as a customer each.
+ *
+ * `dunningPlan` is a list somebody works through, and it belongs on its own
+ * screen. What belongs here is the fact that the list is not empty and that a
+ * particular rung is now due — because the ladder's own rule is that it never
+ * restarts, so a rung skipped is a rung that cannot be gone back for.
+ *
+ * Rows already inside the cooling-off period are excluded. A letter sent four
+ * days ago is not an outstanding action, and a queue that says otherwise
+ * teaches people to send the same letter twice.
+ */
+const dunningSource: Source = {
+  key: "dunning",
+  label: "Customers who are late",
+  async run(ctx) {
+    const plan = await dunningPlan({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    const actionable = plan.rows.filter((r) => !r.suppressed);
+    if (actionable.length === 0) return [];
+
+    // Sorted worst-first by the module, so the head is the oldest debt.
+    const worst = actionable[0];
+    const finals = actionable.filter((r) => r.stageDue === "final");
+    const total = actionable.reduce((a, r) => a + BigInt(r.pastDueMinor), 0n);
+
+    const out: Raw[] = [{
+      source: "dunning",
+      topic: "letters_due",
+      severity: "advisory",
+      title: `${plural(actionable.length, "customer is", "customers are")} due a chase`,
+      detail:
+        `${money(total, plan.currency)} is past due across ` +
+        `${plural(actionable.length, "customer", "customers")}. The worst is ${worst.name} at ` +
+        `${money(BigInt(worst.pastDueMinor), worst.currency)}, ` +
+        `${plural(worst.oldestPastDueDays, "day", "days")} old, and the rung due is the ${worst.stageDue}. ` +
+        `Nothing is sent from this product — a letter reaches a customer only when a person sends it.`,
+      href: "/accounting/credit-control",
+      itemCount: actionable.length,
+      amountMinor: total,
+    }];
+
+    if (finals.length > 0) {
+      out.push({
+        source: "dunning",
+        topic: "final_demand_due",
+        severity: "warning",
+        title: `${plural(finals.length, "customer has", "customers have")} reached the final demand`,
+        detail:
+          `${finals.map((r) => r.name).slice(0, 3).join(", ")}${finals.length > 3 ? ", …" : ""} ` +
+          `${finals.length === 1 ? "is" : "are"} at the last rung of the ladder, worth ` +
+          `${money(finals.reduce((a, r) => a + BigInt(r.pastDueMinor), 0n), plan.currency)}. After this the ` +
+          `decision is not which letter to send but whether to stop supplying, take it further, or write it off — ` +
+          `and each of those is somebody's decision to make rather than a step in a process.`,
+        href: "/accounting/credit-control",
+        itemCount: finals.length,
+        amountMinor: finals.reduce((a, r) => a + BigInt(r.pastDueMinor), 0n),
+      });
+    }
+
+    return out;
+  },
+};
+
 /**
  * Declaration order is the tie-break for display, so a row does not jump about
  * between refreshes. It runs roughly from "the books are wrong" through "a
@@ -825,10 +1081,14 @@ const analyticsSource: Source = {
 const SOURCES: Source[] = [
   attentionSource,
   monthEndSource,
+  covenantSource,
   vatSource,
+  capitalAssetSource,
   chequeSource,
+  tradeFinanceSource,
   inventorySource,
   deliverySource,
+  dunningSource,
   subscriptionSource,
   analyticsSource,
 ];

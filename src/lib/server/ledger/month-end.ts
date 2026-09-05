@@ -14,6 +14,7 @@ import { provisionRegister } from "./provisions";
 import { fundList } from "./petty-cash";
 import { revaluationRegister } from "./asset-revaluation";
 import { payrollSummary } from "./payroll";
+import { borrowingRegister } from "./borrowings";
 
 /**
  * The month-end checklist.
@@ -193,13 +194,24 @@ const registersAgree: Check = {
     const asOf = ctx.endsOn;
     const disagreeing: string[] = [];
 
-    const [assets, leases, revenue, provisions, surplus, petty] = await Promise.allSettled([
+    const [assets, leases, revenue, provisions, surplus, petty, loans] = await Promise.allSettled([
       assetRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
       leaseRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
       contractRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
       provisionRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
       revaluationRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
       fundList({ orgId: ctx.orgId, entityId: ctx.entityId }),
+      // Borrowings was the register this check did not read, while the line it
+      // prints when everything passes says "EVERY subledger register agrees
+      // with the account it feeds". A loan register out of step with 2500 and
+      // 2450 is the difference between a current liability disclosed correctly
+      // and one that is not, and the reclassification of the current portion is
+      // exactly the entry somebody forgets at a year end.
+      borrowingRegister({
+        orgId: ctx.orgId, entityId: ctx.entityId,
+        // This register takes the date as a string where the others take a Date.
+        asOf: asOf instanceof Date ? asOf.toISOString().slice(0, 10) : String(asOf).slice(0, 10),
+      }),
     ]);
 
     const say = (name: string, ok: boolean | undefined) => {
@@ -226,6 +238,7 @@ const registersAgree: Check = {
       say("provisions", p.reconciliation?.agrees);
     }
     if (surplus.status === "fulfilled") say("revaluation surplus", surplus.value.reconciliation.agrees);
+    if (loans.status === "fulfilled") say("borrowings", loans.value.ledger.agrees);
     if (petty.status === "fulfilled" && petty.value.summary.outOfBalanceCount > 0) {
       disagreeing.push("petty cash floats");
     }

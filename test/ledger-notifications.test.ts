@@ -7,6 +7,8 @@ import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { post } from "@/lib/server/ledger/post";
 import { importStatement } from "@/lib/server/ledger/bank";
 import { addItem, setReorderLevel } from "@/lib/server/ledger/inventory";
+import { addBorrowing, addCovenant } from "@/lib/server/ledger/borrowings";
+import { issueFacility } from "@/lib/server/ledger/trade-finance";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -29,6 +31,10 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "NotificationEvent" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "NotificationAck" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "BankStatementLine" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "BorrowingCovenant" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Borrowing" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TradeFacilityEvent" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TradeFacility" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "InventoryMovement" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "StockBatch" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "InventoryItem" WHERE "orgId" = '${ORG}'`),
@@ -89,6 +95,43 @@ async function seed() {
   await addItem({ ...S, item: { sku: "WIDGET", name: "Widget", uom: "ea" } });
   await setReorderLevel({ ...S, sku: "WIDGET", reorderLevelMilli: 10_000n });
   await addItem({ ...S, item: { sku: "GADGET", name: "Gadget", uom: "ea" } });
+
+  // A loan with two covenants: one this ledger can measure and which fails on
+  // these figures, and one it cannot measure at all. The second is the point —
+  // an untested covenant must never be summarised as compliance.
+  await addBorrowing({
+    ...S,
+    borrowing: {
+      code: "LOAN-1", lender: "Emirates NBD", principalMinor: 1_000_000_00n,
+      drawdownOn: "2026-01-05", statedRateBps: 550, termMonths: 60,
+    },
+  });
+  await addCovenant({
+    ...S,
+    covenant: {
+      borrowingCode: "LOAN-1", code: "NW", metric: "MIN_NET_WORTH",
+      direction: "MIN", thresholdMinor: 500_000_000_00n,
+      wording: "Net worth shall at no time be less than AED 500,000,000.",
+    },
+  });
+  await addCovenant({
+    ...S,
+    covenant: {
+      borrowingCode: "LOAN-1", code: "NEG-PLEDGE", metric: "OTHER",
+      wording: "The borrower shall grant no security over its assets.",
+    },
+  });
+
+  // A guarantee expiring inside the ninety-day window, with margin the bank is
+  // holding against it.
+  await issueFacility({
+    ...S,
+    facility: {
+      reference: "LG-9001", kind: "BANK_GUARANTEE", bank: "Emirates NBD",
+      beneficiary: "Dubai Municipality", amountMinor: 250_000_00n, marginMinor: 25_000_00n,
+      issuedOn: "2026-01-10", expiresOn: "2026-04-05",
+    },
+  });
 }
 
 const BANK = "attention:bank_unmatched";
@@ -123,7 +166,7 @@ d("the notification centre", () => {
 
     // Every source is named, whether it had anything to say or not, so
     // "nothing found" can be told apart from "nothing asked".
-    expect(centre.sources.length).toBeGreaterThanOrEqual(8);
+    expect(centre.sources.length).toBeGreaterThanOrEqual(12);
     expect(centre.sources.every((s) => s.ok)).toBe(true);
     expect(centre.sources.map((s) => s.key)).toContain("month-end");
     expect(centre.digest.outstanding).toBe(centre.notices.filter((n) => n.outstanding).length);
@@ -403,4 +446,61 @@ d("the notification centre", () => {
     const centre = await notificationCentre({ ...S, asOf: A });
     expect(centre.notices.find((n) => n.key === BANK)!.state).toBe("open");
   });
+
+  /* ── the four sources that existed and were never gathered ─────────────── */
+
+  it("reports a breached covenant, and never calls an untested one a pass", async () => {
+    const centre = await notificationCentre({ ...S, asOf: A });
+
+    // Net worth of half a billion against a company with one sale on its
+    // books. The covenant fails, and a failed covenant is the one finding here
+    // that can cost the business its funding.
+    const breach = centre.notices.find((n) => n.key === "covenants:breach");
+    expect(breach).toBeDefined();
+    expect(breach!.severity).toBe("blocker");
+    expect(breach!.detail).toMatch(/LOAN-1\/NW/);
+    // It is a fact about the books, not a filing, so it must not be dressed as
+    // a statutory deadline — those cannot be snoozed at all.
+    expect(breach!.statutory).toBeFalsy();
+
+    // And the negative pledge, which nothing in a ledger can measure. Reported
+    // as its own row rather than folded into silence: the borrowings screen's
+    // own rule is that it never reports a pass for something not measured, and
+    // a queue that swallows that would undo it.
+    const untested = centre.notices.find((n) => n.key === "covenants:not_tested");
+    expect(untested).toBeDefined();
+    expect(untested!.severity).toBe("warning");
+    expect(untested!.itemCount).toBe(1);
+    expect(untested!.detail).toMatch(/not a pass/i);
+  });
+
+  it("reports a guarantee about to expire, with the date it actually expires", async () => {
+    const centre = await notificationCentre({ ...S, asOf: A });
+
+    const expiring = centre.notices.find((n) => n.key === "trade-finance:expiring@LG-9001");
+    expect(expiring).toBeDefined();
+    expect(expiring!.detail).toMatch(/LG-9001/);
+    // 5 April against an as-at of 15 March: twenty-one days, inside the thirty
+    // that make this a warning rather than a note.
+    expect(expiring!.dueOn).toBe("2026-04-05");
+    expect(expiring!.severity).toBe("warning");
+    // The uncalled exposure, which is the face less anything drawn.
+    expect(expiring!.amountMinor).toBe("25000000");
+  });
+
+  it("names every source it read, so nothing found can be told from nothing asked", async () => {
+    const centre = await notificationCentre({ ...S, asOf: A });
+    const keys = centre.sources.map((s) => s.key);
+
+    // The four that were built, tested, and gathered by nothing. Each is on the
+    // list whether it had anything to say or not — that is the whole point of
+    // reporting sources separately from findings.
+    for (const k of ["covenants", "vat-schemes", "trade-finance", "dunning"]) {
+      expect(keys, `${k} is not being read`).toContain(k);
+    }
+    // And every one of them ran. A source that throws costs one row and says
+    // so; none of these should, against a seeded entity.
+    expect(centre.sources.filter((s) => !s.ok).map((s) => s.key)).toEqual([]);
+  });
+
 });

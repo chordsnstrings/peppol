@@ -126,6 +126,29 @@ d("the month-end checklist", () => {
     }
   });
 
+  it("reads the borrowings register too, and does not claim every register agrees", async () => {
+    // A loan credited straight to 2500 by hand and never put on the register.
+    // The books balance, the balance sheet looks right, and the register that
+    // supports the disclosure — maturity analysis, current portion, covenant
+    // tests — knows nothing about it.
+    //
+    // This check used to read six registers and print "Every subledger register
+    // agrees with the account it feeds" over the top of the seventh.
+    await post({
+      ...S, entryDate: "2026-02-14", source: "manual", memo: "Loan from the bank",
+      lines: [{ account: "1010", debit: 500_000 }, { account: "2500", credit: 500_000 }],
+    });
+
+    const m = await monthEnd({ ...S, period: "2026-02" });
+    const registers = check(m, "registers");
+    expect(registers).toBeDefined();
+    expect(registers!.severity).toBe("blocker");
+    expect(registers!.detail).toMatch(/borrowings/);
+
+    // And the sentence that would otherwise have been printed instead.
+    expect(registers!.detail).not.toMatch(/Every subledger register agrees/);
+  });
+
   it("does not read another organisation's month", async () => {
     await expect(monthEnd({ orgId: "someone-else", entityId: ENT, period: "2026-01" }))
       .rejects.toThrow(/no accounting period 2026-01/i);
