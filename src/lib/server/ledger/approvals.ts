@@ -325,6 +325,14 @@ export interface DecisionRow {
   decidedAt: Date;
   amountMinor: bigint | null;
   reason: string | null;
+  /**
+   * The roles this person held at the moment they decided.
+   *
+   * Null for a decision recorded before the column existed. That is treated as
+   * unverified rather than as failing — see the note on `computeState` — and
+   * the state says which it is rather than passing one off as the other.
+   */
+  decidedByRoles: string[] | null;
 }
 
 export interface AppliedRule extends RuleRow {
@@ -354,6 +362,12 @@ export interface ApprovalState {
   /** What is still outstanding, in sentences somebody can act on. */
   blockers: string[];
   /**
+   * True of the approval and not a reason it cannot proceed — a check that was
+   * waived rather than passed. Kept apart from `blockers` so a document nothing
+   * is waiting on does not report something outstanding.
+   */
+  caveats: string[];
+  /**
    * The figure the THRESHOLDS were tested against, in the book's own currency.
    *
    * Equal to `amountMinor` for a document in the functional currency, which is
@@ -369,10 +383,19 @@ export interface ApprovalState {
 const asDecision = (d: {
   id: string; entityId: string; subjectType: string; subjectId: string; decision: string;
   decidedBy: string; decidedAt: Date; amountMinor: bigint | null; reason: string | null;
+  decidedByRoles?: string | null;
 }): DecisionRow => ({
   ...d,
   subjectType: d.subjectType as SubjectType,
   decision: d.decision as DecisionKind,
+  // Stored comma-separated because a person can hold more than one role and a
+  // rule asks about one of them. An empty string is a decision taken by
+  // somebody who held no role, which is a different fact from a decision that
+  // predates the column.
+  decidedByRoles:
+    d.decidedByRoles === undefined || d.decidedByRoles === null
+      ? null
+      : d.decidedByRoles.split(",").map((r) => r.trim()).filter(Boolean),
 });
 
 /**
@@ -422,17 +445,46 @@ function computeState(input: {
   const counting = approvedRows.filter((d) => !stale.includes(d));
   const pool = new Set(counting.map((d) => key(d.decidedBy)));
 
+  /*
+   * A rule naming a ROLE has to be answered by people who held it.
+   *
+   * This counted signatures and compared the count with `approversRequired`,
+   * without ever asking what the signatories were. "Bills over 50,000 need two
+   * directors" was therefore satisfied by any two people who could reach the
+   * endpoint — a rule naming a PERSON was enforced and a rule naming a role was
+   * a tally. That is the half of the policy a business actually writes, because
+   * naming individuals in a rule means rewriting the rules whenever somebody
+   * leaves.
+   *
+   * The role is read off the decision, where it was recorded at the moment it
+   * was made, and never from the assignments as they stand now. Somebody who
+   * was a director in March and is not one today still signed that bill as a
+   * director, and re-reading the assignments would silently un-approve posted
+   * documents whenever a person changes job.
+   *
+   * A decision from before the roles were recorded counts, and is reported as
+   * unverified rather than as a pass. Failing them instead would block every
+   * part-approved document in flight the day this shipped, and a control that
+   * breaks on installation is a control that gets taken out again.
+   */
+  const holdsRole = (d: DecisionRow, role: string) =>
+    d.decidedByRoles === null || d.decidedByRoles.some((r) => samePerson(r, role));
+
+  const unverified = counting.filter((d) => d.decidedByRoles === null);
+
   const rules: AppliedRule[] = input.rules.map((r) => {
     if (r.approverUserId) {
       const has = pool.has(key(r.approverUserId));
       return { ...r, satisfied: has, missing: has ? 0 : 1, satisfiedBy: has ? [r.approverUserId] : [] };
     }
-    const missing = Math.max(0, r.approversRequired - pool.size);
+    const eligible = r.approverRole ? counting.filter((d) => holdsRole(d, r.approverRole as string)) : counting;
+    const distinct = new Set(eligible.map((d) => key(d.decidedBy)));
+    const missing = Math.max(0, r.approversRequired - distinct.size);
     return {
       ...r,
       satisfied: missing === 0,
       missing,
-      satisfiedBy: counting.slice(0, r.approversRequired).map((d) => d.decidedBy),
+      satisfiedBy: eligible.slice(0, r.approversRequired).map((d) => d.decidedBy),
     };
   });
 
@@ -448,6 +500,8 @@ function computeState(input: {
   const approved = !rejected && rateMissing === null && rules.every((r) => r.satisfied);
 
   const blockers: string[] = [];
+  /** True of the approval, but not a reason it cannot proceed. */
+  const caveats: string[] = [];
   if (rateMissing) {
     blockers.push(
       `This ${what} is in ${rateMissing.currency} and the approval limits are written in ${thresholdCurrency}, ` +
@@ -472,6 +526,27 @@ function computeState(input: {
         `${aed(amountMinor, currency)}. An approval covers the amount it was shown, so it has to be approved again at the new figure.`,
     );
   }
+  /*
+   * A caveat, not a blocker.
+   *
+   * A signature recorded before this ledger kept the approver's role counts
+   * towards a role rule without the role having been checked, and the reader
+   * has to know that a check was waived rather than passed. But it does not
+   * stop anything — the subject can be perfectly approved and still carry it —
+   * and putting it in `blockers` would mean a document that nothing is waiting
+   * on reported something outstanding.
+   */
+  if (unverified.length > 0 && rules.some((r) => r.approverRole && !r.approverUserId)) {
+    caveats.push(
+      `${unverified.length === 1 ? "One approval" : `${WORDS[unverified.length] ?? unverified.length} approvals`} ` +
+        `on file ${unverified.length === 1 ? "was" : "were"} recorded before this ledger kept what role the ` +
+        `approver held, so ${unverified.length === 1 ? "it counts" : "they count"} towards the rules below ` +
+        `without the role having been checked. A rule naming a role is not proven against ` +
+        `${unverified.length === 1 ? "that signature" : "those signatures"} — it is waived for ` +
+        `${unverified.length === 1 ? "it" : "them"}. Collecting the approval again would prove it.`,
+    );
+  }
+
   for (const r of rules) {
     if (r.satisfied) continue;
     const scope = r.thresholdMinor === 0n
@@ -483,10 +558,21 @@ function computeState(input: {
           `who the rule for ${scope} names; they have not approved it yet.`,
       );
     } else {
+      const wrongRole = r.approverRole
+        ? counting.filter((d) => d.decidedByRoles !== null && !holdsRole(d, r.approverRole as string))
+        : [];
       blockers.push(
         `This ${what} of ${aed(amountMinor, currency)} needs ${approvals(r.missing)} from ` +
           `${roleAs(r.approverRole ?? "approver")} — the rule for ${scope} requires ` +
-          `${WORDS[r.approversRequired] ?? r.approversRequired}.`,
+          `${WORDS[r.approversRequired] ?? r.approversRequired}.` +
+          // Naming who signed but does not answer this rule is the difference
+          // between "chase somebody" and "chase the right somebody".
+          (wrongRole.length
+            ? ` ${wrongRole.map((d) => d.decidedBy).join(", ")} ` +
+              `${wrongRole.length === 1 ? "has" : "have"} approved it and ` +
+              `${wrongRole.length === 1 ? "is" : "are"} not ${roleAs(r.approverRole as string)}, so ` +
+              `${wrongRole.length === 1 ? "that signature does" : "those signatures do"} not answer this rule.`
+            : ""),
       );
     }
   }
@@ -507,6 +593,7 @@ function computeState(input: {
       ? { by: rejectionRow.decidedBy, at: rejectionRow.decidedAt, reason: rejectionRow.reason }
       : null,
     blockers,
+    caveats,
     matchedOnMinor: matchMinor,
     thresholdCurrency,
   };
@@ -692,6 +779,48 @@ export interface DecideResult {
  * another person's row, or a withdrawal and a fresh round — the same rule that
  * governs a posted journal entry, for the same reason.
  */
+/**
+ * The role codes a person holds right now, for recording on a decision.
+ *
+ * Distinct from `permissionsOf`, which answers "may they" — this answers "what
+ * are they", which is what a rule naming a role asks. An unconfigured workspace
+ * returns nothing, and that is correct: nobody is a director until somebody
+ * says so, and a role rule written in a workspace with no roles is a rule about
+ * a thing that does not exist yet.
+ */
+async function rolesHeldBy(opts: {
+  orgId: string;
+  entityId: string;
+  userId: string;
+}): Promise<string[] | null> {
+  // Null, not empty, in a workspace that has configured no roles at all.
+  //
+  // The difference is the whole escape hatch this product rests on: with no
+  // roles configured every member may do everything, and "what role did they
+  // hold" has no answer rather than the answer "none". Recording an empty list
+  // would make a rule naming a director unsatisfiable in exactly the workspaces
+  // that have not set up roles — so writing a rule would lock the document, and
+  // the only way out would be to install the role system the business had
+  // decided not to use.
+  const anyAssignment = await prisma.roleAssignment.findFirst({
+    where: { orgId: opts.orgId },
+    select: { id: true },
+  });
+  if (!anyAssignment) return null;
+
+  const rows = await prisma.roleAssignment.findMany({
+    where: {
+      orgId: opts.orgId,
+      userId: opts.userId,
+      entityId: { in: [opts.entityId, "*"] },
+    },
+    include: { role: { select: { code: true, status: true } } },
+  });
+  const out = new Set<string>();
+  for (const r of rows) if (r.role.status === "active") out.add(r.role.code);
+  return [...out].sort();
+}
+
 export async function decide(opts: {
   orgId: string;
   entityId: string;
@@ -778,6 +907,14 @@ export async function decide(opts: {
         decidedBy,
         amountMinor,
         reason,
+        // What this person was when they decided, so a rule naming a role has
+        // something to check against — and so it still checks against the same
+        // thing in a year, when they may hold a different role or none. Empty
+        // where they held none, which is an answer; null where the workspace
+        // has no roles at all, where the question has none.
+        decidedByRoles: (
+          await rolesHeldBy({ orgId: opts.orgId, entityId: opts.entityId, userId: decidedBy })
+        )?.join(",") ?? null,
       },
     });
   } catch (e) {

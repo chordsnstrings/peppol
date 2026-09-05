@@ -4,6 +4,7 @@ import {
   setRule, listRules, deactivateRule, rulesFor,
   approvalState, decide, withdraw, assertApproved, pendingFor,
 } from "@/lib/server/ledger/approvals";
+import { seedBuiltInRoles } from "@/lib/server/ledger/permissions";
 import { createClaim, submitClaim } from "@/lib/server/ledger/expenses";
 import { LedgerError } from "@/lib/server/ledger/post";
 
@@ -434,6 +435,145 @@ d("approval workflows", () => {
     // being relaxed.
     expect(immaterial.approved).toBe(false);
     expect(immaterial.rules.map((r) => r.thresholdMinor)).toEqual([1_000_000n]);
+  });
+
+  /* ------------------------------------ a rule naming a role names a role */
+
+  describe("rules that name a role", () => {
+    // Its own organisation, because the escape hatch turns on whether the
+    // WORKSPACE has configured any roles at all: everything above runs in one
+    // with none, and this needs one with some.
+    const RORG = "t-org-apr-roles";
+    const RS = { orgId: RORG, entityId: ENT };
+
+    beforeAll(async () => {
+      await db.$transaction([
+        db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "RoleAssignment" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "AccountingRole" WHERE "orgId" = '${RORG}'`),
+      ]);
+      await seedBuiltInRoles({ orgId: RORG });
+      const director = await db.accountingRole.findFirstOrThrow({ where: { orgId: RORG, code: "APPROVER" } });
+      const bookkeeper = await db.accountingRole.findFirstOrThrow({ where: { orgId: RORG, code: "BOOKKEEPER" } });
+      await db.roleAssignment.createMany({
+        data: [
+          { orgId: RORG, userId: "u-appr-1", roleId: director.id, entityId: "*" },
+          { orgId: RORG, userId: "u-appr-2", roleId: director.id, entityId: "*" },
+          { orgId: RORG, userId: "u-book", roleId: bookkeeper.id, entityId: "*" },
+        ],
+      });
+      await setRule({
+        ...RS, subjectType: "PAYMENT", thresholdMinor: 0,
+        approverRole: "APPROVER", approversRequired: 2,
+      });
+    });
+
+    afterAll(async () => {
+      await db.$transaction([
+        db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "RoleAssignment" WHERE "orgId" = '${RORG}'`),
+        db.$executeRawUnsafe(`DELETE FROM "AccountingRole" WHERE "orgId" = '${RORG}'`),
+      ]);
+    });
+
+    it("is not answered by two people who do not hold it", async () => {
+      // The defect this replaces: the rule counted signatures and never asked
+      // what the signatories were, so "two approvers" was satisfied by any two
+      // people who could reach the endpoint. A rule naming a PERSON was
+      // enforced and a rule naming a ROLE was a tally — and naming a role is
+      // the half a business actually writes, because naming individuals means
+      // rewriting the rules whenever somebody leaves.
+      await decide({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE", amountMinor: 500_000,
+        decision: "APPROVED", decidedBy: "u-book",
+      });
+      await decide({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE", amountMinor: 500_000,
+        decision: "APPROVED", decidedBy: "u-nobody",
+      });
+
+      const state = await approvalState({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE", amountMinor: 500_000,
+      });
+      expect(state.approved).toBe(false);
+      expect(state.approvalsOutstanding).toBe(2);
+      // And it names who signed and does not answer, so somebody chases the
+      // right person rather than merely somebody.
+      expect(state.blockers.join(" ")).toMatch(/u-book/);
+      expect(state.blockers.join(" ")).toMatch(/do not answer this rule/);
+    });
+
+    it("is answered by two people who do hold it", async () => {
+      for (const who of ["u-appr-1", "u-appr-2"]) {
+        await decide({
+          ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-OK", amountMinor: 500_000,
+          decision: "APPROVED", decidedBy: who,
+        });
+      }
+      const state = await approvalState({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-OK", amountMinor: 500_000,
+      });
+      expect(state.approved).toBe(true);
+      expect(state.caveats).toEqual([]);
+    });
+
+    it("keeps the role the approver held, not the role they hold now", async () => {
+      await decide({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-MOVED", amountMinor: 500_000,
+        decision: "APPROVED", decidedBy: "u-appr-1",
+      });
+      await decide({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-MOVED", amountMinor: 500_000,
+        decision: "APPROVED", decidedBy: "u-appr-2",
+      });
+      expect((await approvalState({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-MOVED", amountMinor: 500_000,
+      })).approved).toBe(true);
+
+      // u-appr-2 changes job. The document they signed as an approver stays
+      // signed: an approval is a statement about a moment, and re-reading the
+      // assignments would silently un-approve documents that have posted.
+      await db.roleAssignment.deleteMany({ where: { orgId: RORG, userId: "u-appr-2" } });
+      const after = await approvalState({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-MOVED", amountMinor: 500_000,
+      });
+      expect(after.approved).toBe(true);
+    });
+
+    it("waives the check for a signature taken before roles were recorded, and says so", async () => {
+      // A decision written straight to the table, as every decision on file
+      // before this column existed was.
+      await db.approvalDecision.create({
+        data: {
+          orgId: RORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-ROLE-OLD",
+          decision: "APPROVED", decidedBy: "u-legacy-1", amountMinor: 500_000n, decidedByRoles: null,
+        },
+      });
+      await db.approvalDecision.create({
+        data: {
+          orgId: RORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-ROLE-OLD",
+          decision: "APPROVED", decidedBy: "u-legacy-2", amountMinor: 500_000n, decidedByRoles: null,
+        },
+      });
+
+      const state = await approvalState({
+        ...RS, subjectType: "PAYMENT", subjectId: "PAY-ROLE-OLD", amountMinor: 500_000,
+      });
+      // They count — failing them would block every part-approved document in
+      // flight the day this shipped, and a control that breaks on installation
+      // is a control that gets taken out again.
+      expect(state.approved).toBe(true);
+      // And the waiver is reported as a caveat, never as a blocker: nothing is
+      // outstanding on this document, and something about it is still worth
+      // knowing.
+      expect(state.blockers).toEqual([]);
+      expect(state.caveats.join(" ")).toMatch(/waived/);
+      expect(state.caveats.join(" ")).toMatch(/Collecting the approval again would prove it/);
+    });
   });
 
   it("records who decided, when, and against what amount — and never edits it", async () => {

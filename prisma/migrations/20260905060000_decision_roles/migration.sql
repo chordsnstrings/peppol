@@ -1,0 +1,23 @@
+-- The roles the decider held when they decided.
+--
+-- An approval rule can name a ROLE — "bills over 50,000 need two directors" —
+-- and nothing checked it. `computeState` counted the number of people who had
+-- approved and compared that with `approversRequired`, so the rule was
+-- satisfied by any two people who could reach the endpoint. A rule naming a
+-- person was enforced; a rule naming a role was a count.
+--
+-- The role is recorded ON THE DECISION rather than read back from the role
+-- assignments when the state is computed, for the same reason the amount is
+-- recorded on it: an approval is a statement about a moment. Somebody who was
+-- a director in March and is not one now still signed that bill as a director,
+-- and reading the assignments today would silently un-approve documents when
+-- a person changes job — including documents that have already posted.
+--
+-- NULL means the decision predates this column. Those are treated as
+-- unverified rather than as failing, because retroactively invalidating every
+-- signature on file would block every part-approved document in flight, and a
+-- control that breaks the day it is installed is a control that gets removed.
+-- `approvalState` says so on the row rather than passing it off as a check
+-- that ran.
+ALTER TABLE "ApprovalDecision"
+  ADD COLUMN "decidedByRoles" TEXT;

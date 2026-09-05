@@ -764,6 +764,36 @@ d("credit control", () => {
     expect(reg.summary.limitMinor).toBe("950000");
   });
 
+  it("puts an account opened on hold on hold, not just a flag on it", async () => {
+    // A customer arriving with a history is opened on hold. `placeOnHold` was
+    // fixed to write a CreditHold row for exactly this reason — credit control
+    // derives holds only from those rows and never reads the flag — and the
+    // create verb was left behind, so the same defect stayed reachable through
+    // the door such a customer actually comes through: the chip on the customer
+    // screen said stopped, and creditCheck said allow.
+    await createCounterparty({
+      ...S,
+      actorId: "u-controller",
+      counterparty: {
+        code: "C-ARRIVES-HELD", name: "Arrives Held LLC", kind: "CUSTOMER",
+        onHold: true, holdReason: "Two defaults with their previous supplier.",
+      },
+    });
+
+    const check = await creditCheck({ ...S, partyKey: "C-ARRIVES-HELD", asOf: ASOF });
+    expect(check.decision).toBe("refuse");
+    expect(check.reasons.map((r) => r.code)).toContain("on_hold");
+
+    const history = await creditHoldHistory({ ...S, partyKey: "C-ARRIVES-HELD" });
+    expect(history.holds).toHaveLength(1);
+    expect(history.holds[0].reason).toMatch(/previous supplier/);
+    expect(history.holds[0].releasedOn).toBeNull();
+
+    const reg = await creditControlRegister({ ...S, asOf: ASOF });
+    expect(reg.customers.find((c) => c.code === "C-ARRIVES-HELD")!.onHold).toBe(true);
+    expect(reg.summary.onHold).toBeGreaterThan(0);
+  });
+
   it("does not read another organisation's credit control", async () => {
     const reg = await creditControlRegister({ orgId: "someone-else", entityId: ENT, asOf: ASOF });
     expect(reg.customers).toEqual([]);

@@ -246,6 +246,8 @@ export async function createCounterparty(opts: {
   orgId: string;
   entityId: string;
   counterparty: NewCounterparty;
+  /** Who opened it, recorded on the hold where the account is opened on one. */
+  actorId?: string;
 }): Promise<Counterparty> {
   const c = opts.counterparty;
   const code = (c.code ?? "").trim();
@@ -276,7 +278,7 @@ export async function createCounterparty(opts: {
 
   await assertUnique(opts.orgId, opts.entityId, { code, name, trn });
 
-  return prisma.counterparty.create({
+  const created = await prisma.counterparty.create({
     data: {
       orgId: opts.orgId,
       entityId: opts.entityId,
@@ -295,6 +297,32 @@ export async function createCounterparty(opts: {
       notes: c.notes?.trim() || null,
     },
   });
+
+  /*
+   * There is one hold, and it lives in CreditHold — including a hold the
+   * account is opened with.
+   *
+   * `placeOnHold` was made to write the row for exactly this reason: credit
+   * control derives holds only from CreditHold and never reads the flag, so a
+   * flag with no row behind it reads as `decision: "allow"` from creditCheck,
+   * counts as nought in the on-hold summary, shows an empty hold history, and
+   * passes the sales-order credit gate — while the customer chip on screen says
+   * the account is stopped. Fixing the hold verb and leaving the create verb
+   * alone left the same defect reachable through a different door, and the door
+   * a customer who arrives with a history comes through.
+   *
+   * Deferred import for the same reason `placeOnHold` gives: credit-control.ts
+   * imports this module, so a static import here would be a cycle.
+   */
+  if (onHold && holdReason) {
+    const { placeCreditHold } = await import("./credit-control");
+    await placeCreditHold({
+      orgId: opts.orgId, entityId: opts.entityId, partyKey: code,
+      reason: holdReason, actorId: opts.actorId,
+    });
+  }
+
+  return created;
 }
 
 export interface CounterpartyChange {

@@ -1023,6 +1023,12 @@ model ApprovalDecision {
   decidedAt   DateTime @default(now())
   amountMinor BigInt?
   reason      String?
+  /// The role codes this person held at the moment they decided, comma-separated.
+  /// Recorded here rather than read back later for the same reason the amount is:
+  /// an approval is a statement about a moment, and reading the assignments today
+  /// would un-approve a posted document when somebody changes job. NULL means the
+  /// decision predates the column — unverified, not failed.
+  decidedByRoles String?
 
   @@unique([orgId, subjectType, subjectId, decidedBy])
   @@index([orgId, entityId, subjectType, subjectId])
