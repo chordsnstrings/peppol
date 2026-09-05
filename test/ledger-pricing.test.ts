@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
-  createPriceList, setPrices, closePrice, assignPriceList, unassignPriceList,
+  createPriceList, setPrices, closePrice, closePriceList, assignPriceList, unassignPriceList,
   resolvePrice, quoteLines, priceVariance, priceListRegister, partyKeyOf,
 } from "@/lib/server/ledger/pricing";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -472,6 +472,53 @@ d("one default succeeding another", () => {
     const after = await resolvePrice({ ...S, itemCode: "BOLT", quantityMilli: 1_000n, on: "2027-01-01" });
     expect(before.unitPriceMinor).toBe(250n);
     expect(after.unitPriceMinor).toBe(275n);
+  });
+
+  it("ends a list outright, without needing a successor to put in its place", async () => {
+    // A promotional list withdrawn at the end of a month has nothing to
+    // supersede it. Before this the only ways out were to leave it in force or
+    // to delete it — and deleting takes the prices with it, so a quote raised
+    // last week stops being explicable.
+    await createPriceList({
+      ...S, list: { code: "PROMO", name: "Spring promotion", validFrom: "2027-03-01" },
+    });
+    await setPrices({ ...S, listCode: "PROMO", prices: [{ itemCode: "BOLT", unitPriceMinor: 200n }] });
+    await assignPriceList({ ...S, partyKey: "PROMOCO", listCode: "PROMO" });
+
+    // In force on the last day, and pricing.
+    const during = await resolvePrice({
+      ...S, partyKey: "PROMOCO", itemCode: "BOLT", quantityMilli: 1_000n, on: "2027-03-31",
+    });
+    expect(during.unitPriceMinor).toBe(200n);
+
+    await closePriceList({ ...S, listCode: "PROMO", validTo: "2027-03-31" });
+
+    // From the next day it prices nothing, and the party falls back to the
+    // default list rather than to no price at all.
+    const after = await resolvePrice({
+      ...S, partyKey: "PROMOCO", itemCode: "BOLT", quantityMilli: 1_000n, on: "2027-04-01",
+    });
+    expect(after.unitPriceMinor).toBe(275n);
+
+    // The prices are still there. This is the whole difference between closing
+    // a list and deleting one: the document raised on 31 March can still be
+    // explained.
+    const rows = await db.priceListEntry.findMany({ where: { orgId: ORG } });
+    expect(rows.some((r) => r.unitPriceMinor === 200n)).toBe(true);
+    const reg = await priceListRegister({ ...S, on: "2027-04-01" });
+    expect(reg.lists.find((l) => l.code === "PROMO")!.validTo).toBe("2027-03-31");
+    expect(reg.lists.find((l) => l.code === "PROMO")!.inForce).toBe(false);
+  });
+
+  it("refuses to end a list before it began, or to reopen one that has closed", async () => {
+    await expect(closePriceList({ ...S, listCode: "PROMO", validTo: "2027-02-01" }))
+      .rejects.toThrow(/never priced anything/);
+    // Extending a closed list would put prices back in force for days already
+    // quoted and invoiced under whatever replaced it.
+    await expect(closePriceList({ ...S, listCode: "PROMO", validTo: "2027-06-30" }))
+      .rejects.toThrow(/already ended on 2027-03-31/);
+    const reg = await priceListRegister({ ...S, on: "2027-04-01" });
+    expect(reg.lists.find((l) => l.code === "PROMO")!.validTo).toBe("2027-03-31");
   });
 
   it("refuses to supersede a list that would then end before it started", async () => {

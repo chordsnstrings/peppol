@@ -176,7 +176,7 @@ export default function PricingPage() {
                     <th style={{ width: "13rem" }}>In force</th>
                     <th className="sw-num" style={{ width: "6rem" }}>Prices</th>
                     <th className="sw-num" style={{ width: "6rem" }}>Parties</th>
-                    <th style={{ width: "6rem" }} />
+                    <th style={{ width: "16rem" }} />
                   </tr>
                 </thead>
                 <tbody data-testid="price-list-rows">
@@ -204,11 +204,34 @@ export default function PricingPage() {
                       </td>
                       <td className="sw-num">{l.partyCount}</td>
                       <td>
-                        <button type="button" className="sw-link-btn"
-                          onClick={() => setListCode(listCode === l.code ? "" : l.code)}
-                          aria-pressed={listCode === l.code}>
-                          {listCode === l.code ? "all" : "prices"}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button type="button" className="sw-link-btn"
+                            onClick={() => setListCode(listCode === l.code ? "" : l.code)}
+                            aria-pressed={listCode === l.code}>
+                            {listCode === l.code ? "all" : "prices"}
+                          </button>
+                          {l.validTo === null ? (
+                            <CloseList
+                              list={l}
+                              suggested={dayBefore(on) < l.validFrom ? l.validFrom : dayBefore(on)}
+                              busy={busy === `closeList:${l.code}`}
+                              onClose={async (validTo) => {
+                                const r = await act(`closeList:${l.code}`, {
+                                  action: "closeList", listCode: l.code, validTo,
+                                });
+                                if (r) {
+                                  setMsg(
+                                    `${l.code} now runs to ${validTo}. Its prices are still on file and still ` +
+                                    `explain the documents raised under them; they simply stop pricing anything ` +
+                                    `from the day after.`,
+                                  );
+                                }
+                              }}
+                            />
+                          ) : (
+                            <span className="sw-sub">ended {l.validTo}</span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -682,6 +705,53 @@ function ClosePrice({ price, suggested, busy, onClose }: {
         {busy ? "Closing…" : "close"}
       </button>
     </div>
+  );
+}
+
+/**
+ * Ending a list outright.
+ *
+ * A list could be superseded — put a successor in and the old one closes to the
+ * day before — and there was no way to simply stop one. A promotional list
+ * withdrawn at the end of a month with nothing to replace it left two choices:
+ * leave it in force, or delete it and lose the prices that explain last week's
+ * quotes. Neither is what the person wanted.
+ *
+ * The date offered is the day before the date the screen is priced at, which is
+ * the ordinary case, and it cannot be moved before the day the list began — a
+ * list that ended before it started never priced anything, and what is wanted
+ * there is to withdraw it rather than to close it.
+ */
+function CloseList({ list, suggested, busy, onClose }: {
+  list: ListRow;
+  suggested: string;
+  busy: boolean;
+  onClose: (validTo: string) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [validTo, setValidTo] = React.useState(suggested);
+  const tooEarly = validTo !== "" && validTo < list.validFrom;
+
+  if (!open) {
+    return (
+      <button type="button" className="sw-link-btn" onClick={() => setOpen(true)}
+        aria-label={`End the price list ${list.code}`}>
+        end
+      </button>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1.5">
+      <input type="date" className={`sw-input sw-input-sm ${tooEarly ? "sw-cell-invalid" : ""}`}
+        style={{ width: "9rem" }} value={validTo}
+        aria-label={`Last day ${list.code} applies`}
+        onChange={(e) => setValidTo(e.target.value)} />
+      <button type="button" className="sw-btn sw-btn-sm" disabled={busy || !validTo || tooEarly}
+        onClick={() => onClose(validTo)}>
+        {busy ? "Ending…" : "end it"}
+      </button>
+      <button type="button" className="sw-link-btn" onClick={() => setOpen(false)}>cancel</button>
+    </span>
   );
 }
 

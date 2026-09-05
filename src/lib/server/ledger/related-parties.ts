@@ -411,14 +411,42 @@ async function activityFor(opts: {
   const idx = partyIndex(parties);
   const byId = new Map(parties.map((p) => [p.id, p]));
 
-  const documents = await prisma.record.findMany({
-    where: { orgId: opts.orgId, store: "invoices", entityId: opts.entityId },
-    select: { id: true, data: true },
-    take: 5000,
-  });
-
   const totals = new Map<string, { salesMinor: bigint; purchasesMinor: bigint; documents: number }>();
 
+  /*
+   * Read every document, a page at a time, rather than the first five thousand.
+   *
+   * The issue date lives inside a JSON string, so it cannot be filtered in
+   * SQL — and `createdAt` is not a substitute, because a backdated invoice was
+   * created after the period it belongs to. What the cap did, then, was drop
+   * whichever documents happened to sort last and under-report related-party
+   * activity by exactly those, in a note published under IAS 24 and signed by
+   * somebody. An under-reported related-party disclosure is the failure mode
+   * this whole module exists to prevent.
+   *
+   * Paging costs nothing here: each page is reduced into `totals` and thrown
+   * away, so the memory is the same whether the entity has five hundred
+   * documents or five hundred thousand.
+   */
+  const PAGE = 2_000;
+  let cursor: { store_id: { store: string; id: string } } | undefined;
+  for (;;) {
+    const documents: { id: string; data: string }[] = await prisma.record.findMany({
+      where: { orgId: opts.orgId, store: "invoices", entityId: opts.entityId },
+      select: { id: true, data: true },
+      orderBy: { id: "asc" },
+      take: PAGE,
+      ...(cursor ? { cursor, skip: 1 } : {}),
+    });
+    if (documents.length === 0) break;
+    read(documents);
+    if (documents.length < PAGE) break;
+    cursor = { store_id: { store: "invoices", id: documents[documents.length - 1].id } };
+  }
+
+  return totals;
+
+  function read(documents: { id: string; data: string }[]) {
   for (const rec of documents) {
     let inv: {
       entityId?: string; issueDate?: string; direction?: string; docType?: string;
@@ -450,8 +478,7 @@ async function activityFor(opts: {
     g.documents += 1;
     totals.set(matched, g);
   }
-
-  return totals;
+  }
 }
 
 export interface RelatedPartyNoteData {

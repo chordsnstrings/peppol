@@ -4,7 +4,7 @@ import { json, handleError } from "@/lib/server/http";
 import { LedgerError } from "@/lib/server/ledger/post";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import {
-  createPriceList, setPrices, closePrice, assignPriceList, unassignPriceList,
+  createPriceList, setPrices, closePrice, closePriceList, assignPriceList, unassignPriceList,
   quoteLines, priceVariance, priceListRegister,
   type NewPriceList, type NewPrice, type ListKind,
 } from "@/lib/server/ledger/pricing";
@@ -35,7 +35,7 @@ export async function POST(req: Request) {
     await assertSameOrigin(req);
     const { orgId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
-      action?: "createList" | "setPrices" | "closePrice" | "assign" | "unassign" | "quote" | "variance";
+      action?: "createList" | "setPrices" | "closePrice" | "closeList" | "assign" | "unassign" | "quote" | "variance";
       entityId?: string;
       list?: NewPriceList;
       listCode?: string;
@@ -63,6 +63,10 @@ export async function POST(req: Request) {
       case "closePrice":
         if (!b.entryId || !b.validTo) return json({ error: "Which price, and to what date?" }, 400);
         return json(ledgerJson({ price: await closePrice({ ...scope, entryId: b.entryId, validTo: b.validTo }) }));
+
+      case "closeList":
+        if (!b.listCode || !b.validTo) return json({ error: "Which list, and to what date?" }, 400);
+        return json(ledgerJson({ list: await closePriceList({ ...scope, listCode: b.listCode, validTo: b.validTo }) }));
 
       case "assign":
         if (!b.partyKey || !b.listCode) return json({ error: "Which party, and which list?" }, 400);

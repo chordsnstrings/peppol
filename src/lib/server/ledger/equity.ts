@@ -421,22 +421,23 @@ export interface RelatedPartyNote extends NoteBase {
  * derivation of the same figures, which is the one thing this module exists to
  * prevent, so the results are spread in as they come.
  */
+/*
+ * Neither of these carries a `requires` list, because everything in both is
+ * derived and there is nothing to ask a preparer.
+ *
+ * They used to carry an always-empty one as a compatibility field: the equity
+ * screen mirrors these wire shapes by hand rather than importing them, so a
+ * note key it had not been taught fell through to its "requires input" body,
+ * which called `.map` on a field that was not there and took the whole notes
+ * pack down. That renderer now degrades to the note's own statement instead,
+ * so the empty list is no longer load-bearing and is gone.
+ */
 export interface ProvisionsNote extends NoteBase, Omit<ProvisionNoteResult, "entityId"> {
   key: "provisions";
-  /**
-   * Always empty, and present all the same. Everything in this note is
-   * derived, so there is nothing to ask a preparer — but a reader of the pack
-   * that does not recognise a note key falls back to showing its questions,
-   * and a note that answered that with nothing at all would break the page
-   * rather than degrade on it.
-   */
-  requires: NoteQuestion[];
 }
 
 export interface DeferredTaxNote extends NoteBase, Omit<DeferredTaxNoteResult, "entityId"> {
   key: "deferred_tax";
-  /** Always empty, for the reason given on `ProvisionsNote`. */
-  requires: NoteQuestion[];
 }
 
 export interface TaxNote extends NoteBase {
@@ -1856,7 +1857,6 @@ function provisionsNote(n: number, result: ProvisionNoteResult): ProvisionsNote 
       : `No provision is carried at ${body.asOf} and no contingency is disclosed. The register is empty, which ` +
         `is a fact about the accounts rather than a representation that nothing could arise.`,
     ...body,
-    requires: [],
   };
 }
 
@@ -1887,7 +1887,6 @@ function deferredTaxPackNote(n: number, result: DeferredTaxNoteResult): Deferred
       : `No temporary difference is recorded at ${body.asOf}, so no deferred tax is recognised. The register is ` +
         `empty rather than nil by measurement.`,
     ...body,
-    requires: [],
   };
 }
 

@@ -282,6 +282,40 @@ export async function closePrice(opts: {
   return prisma.priceListEntry.update({ where: { id: row.id }, data: { validTo } });
 }
 
+/**
+ * End a price list.
+ *
+ * A list could be superseded — put a successor in and the old one closes to
+ * the day before — and there was no way to simply stop one. A business that
+ * withdraws a promotional list at the end of a month and has nothing to put in
+ * its place had two options: leave it in force, or delete it. Deleting it takes
+ * the prices with it, and then a quote raised last week cannot be explained.
+ *
+ * So a list is closed, never deleted, the same as a price. Its entries stay
+ * exactly where they are: `resolvePrice` reads the LIST's validity as well as
+ * the entry's, so closing the list is enough to stop it pricing anything, and
+ * the rows are still there to explain a document raised while it was in force.
+ */
+export async function closePriceList(opts: {
+  orgId: string; entityId: string; listCode: string; validTo: Date | string;
+}) {
+  const list = await listByCode(opts.orgId, opts.entityId, opts.listCode);
+  const validTo = asDate(opts.validTo, "The date the list ends");
+  if (validTo < list.validFrom) {
+    throw new LedgerError(
+      `${list.code} starts on ${iso(list.validFrom)} and cannot end on ${iso(validTo)}. A list that ended before ` +
+      `it began never priced anything, so what is wanted is to withdraw it, not to close it.`,
+    );
+  }
+  if (list.validTo && list.validTo <= validTo) {
+    throw new LedgerError(
+      `${list.code} already ended on ${iso(list.validTo)}. Extending a list that has closed would put prices back ` +
+      `in force for days that have already been quoted and invoiced under whatever replaced it.`,
+    );
+  }
+  return prisma.priceList.update({ where: { id: list.id }, data: { validTo } });
+}
+
 export async function assignPriceList(opts: {
   orgId: string; entityId: string; partyKey: string; listCode: string;
 }) {

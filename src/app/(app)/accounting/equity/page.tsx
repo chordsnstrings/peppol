@@ -140,9 +140,51 @@ interface RequiresInputNote extends NoteBase {
   requires: { key: string; question: string; basis: string }[];
 }
 
+interface ProvisionsNote extends NoteBase {
+  key: "provisions";
+  asOf: string;
+  from: string;
+  periodLabel: string;
+  rows: {
+    category: string; label: string;
+    openingMinor: string; additionsMinor: string; usedMinor: string;
+    releasedMinor: string; unwoundMinor: string; closingMinor: string;
+  }[];
+  totals: {
+    openingMinor: string; additionsMinor: string; usedMinor: string;
+    releasedMinor: string; unwoundMinor: string; closingMinor: string;
+  };
+  carryingPerRegisterMinor: string;
+  agreesWithRegister: boolean;
+  movementsAfterAsOf: number;
+  contingentLiabilities: { code: string; name: string; label: string; estimateMinor: string; expectedOn: string | null; note: string | null }[];
+  contingentAssets: { code: string; name: string; label: string; estimateMinor: string; expectedOn: string | null; note: string | null }[];
+  narrative: string[];
+}
+
+interface DeferredTaxNote extends NoteBase {
+  key: "deferred_tax";
+  asOf: string;
+  previousAsOf: string | null;
+  rows: {
+    category: string; label: string;
+    openingNetMinor: string; closingAssetMinor: string; closingLiabilityMinor: string;
+    closingNetMinor: string; movementMinor: string;
+    unrecognisedDifferenceMinor: string; unrecognisedTaxMinor: string;
+  }[];
+  totals: {
+    openingNetMinor: string; closingAssetMinor: string; closingLiabilityMinor: string;
+    closingNetMinor: string; movementMinor: string;
+    unrecognisedDifferenceMinor: string; unrecognisedTaxMinor: string;
+  };
+  offsetBasis: string;
+  narrative: string[];
+}
+
 type Note =
   | PolicyNote | PpeNote | LeaseNote | ReceivablesPayablesNote
-  | RevenueNote | RelatedPartyNote | TaxNote | RequiresInputNote;
+  | RevenueNote | RelatedPartyNote | ProvisionsNote | DeferredTaxNote
+  | TaxNote | RequiresInputNote;
 
 interface Payload {
   fiscalYear: string;
@@ -430,6 +472,8 @@ function NoteBody({ note, currency }: { note: Note; currency: string }) {
     case "trade_receivables_and_payables": return <TradeBody note={note} currency={currency} />;
     case "revenue": return <RevenueBody note={note} currency={currency} />;
     case "related_parties": return <RelatedBody note={note} currency={currency} />;
+    case "provisions": return <ProvisionsBody note={note} currency={currency} />;
+    case "deferred_tax": return <DeferredTaxBody note={note} currency={currency} />;
     case "corporate_tax": return <TaxBody note={note} currency={currency} />;
     default: return <RequiresInputBody note={note} />;
   }
@@ -978,14 +1022,248 @@ function TaxBody({ note, currency }: { note: TaxNote; currency: string }) {
  * asked" is the whole point of showing this note at all.
  */
 function RequiresInputBody({ note }: { note: RequiresInputNote }) {
+  // A note key this page has not been taught lands here, and it will not carry
+  // `requires` at all. That used to be a thrown `undefined.map` taking the
+  // whole notes pack down — a note added on the server crashing the screen that
+  // reads it, because this file mirrors the wire shapes by hand and the
+  // compiler therefore has nothing to check the two against. The note's own
+  // statement is always present, so an untaught note degrades to it.
+  const questions = note.requires ?? [];
+  if (questions.length === 0) return null;
   return (
     <ol className="grid gap-2 px-3 pb-3" data-testid={`requires-${note.key}`}>
-      {note.requires.map((r) => (
+      {questions.map((r) => (
         <li key={r.key} style={{ fontSize: "0.8125rem", lineHeight: 1.5, maxWidth: "80ch" }}>
           {r.question}
           <div className="sw-sub">{r.basis}</div>
         </li>
       ))}
     </ol>
+  );
+}
+
+/**
+ * IAS 37.84: the movement on each class of provision, and the contingencies
+ * beside it.
+ *
+ * The five movement columns are the standard's own (a)-(e) and they are
+ * separate for a reason: an amount USED is a provision that did its job, and an
+ * amount RELEASED is one that was never needed. Netting them into a single
+ * "movement" column loses the difference between a business that estimates well
+ * and one that provides for things that never happen, which is the question a
+ * reader of this note is asking.
+ */
+function ProvisionsBody({ note, currency }: { note: ProvisionsNote; currency: string }) {
+  if (note.state === "empty" && note.rows.length === 0 && note.contingentLiabilities.length === 0) return null;
+  const cols: { key: keyof ProvisionsNote["totals"]; label: string }[] = [
+    { key: "openingMinor", label: "At the start" },
+    { key: "additionsMinor", label: "Provided" },
+    { key: "usedMinor", label: "Used" },
+    { key: "releasedMinor", label: "Released" },
+    { key: "unwoundMinor", label: "Unwound" },
+    { key: "closingMinor", label: "At the end" },
+  ];
+  return (
+    <div className="grid gap-4 px-3 pb-3">
+      {note.rows.length > 0 && (
+        <div className="sw-scroll">
+          <table className="sw-table" data-testid="provisions-movements">
+            <caption className="sr-only">Movements on provisions in {note.periodLabel}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Class</th>
+                {cols.map((c) => (
+                  <th key={c.key} scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>{c.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {note.rows.map((r) => (
+                <tr key={r.category}>
+                  <th scope="row">{r.label}</th>
+                  {cols.map((c) => (
+                    <td key={c.key} className="sw-num">
+                      <Figure minor={r[c.key]} currency={currency} zero="dash" colour={false} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              <tr>
+                <th scope="row" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>Total</th>
+                {cols.map((c) => (
+                  <td key={c.key} className="sw-num" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                    <Figure minor={note.totals[c.key]} currency={currency} zero="zero" colour={false} />
+                  </td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!note.agreesWithRegister && (
+        // Two different facts, drawn differently. A difference explained by
+        // movements after the reporting date is expected — the note is at the
+        // reporting date and the register is at today — and it is a note. A
+        // difference with no such explanation is a note that does not tie to
+        // the accounts behind it, and publishing that is the thing to stop.
+        <p
+          className={note.movementsAfterAsOf > 0 ? "sw-note" : "sw-error"}
+          style={{ maxWidth: "80ch" }}
+          data-testid="provisions-disagrees"
+        >
+          The movements above close at a figure the provisions register does not carry
+          (<Figure minor={note.carryingPerRegisterMinor} currency={currency} zero="zero" colour={false} />).
+          {note.movementsAfterAsOf > 0
+            ? ` ${note.movementsAfterAsOf} movement${note.movementsAfterAsOf === 1 ? " was" : "s were"} recorded after ` +
+              `the reporting date, which is why the two differ.`
+            : " Nothing was recorded after the reporting date, so the difference has to be explained before this note is published."}
+        </p>
+      )}
+
+      <ContingencyTable
+        testId="provisions-contingent-liabilities"
+        caption="Contingent liabilities"
+        blurb="IAS 37.86: disclosed, not provided for — the obligation turns on something outside the entity's control."
+        rows={note.contingentLiabilities}
+        currency={currency}
+      />
+      <ContingencyTable
+        testId="provisions-contingent-assets"
+        caption="Contingent assets"
+        blurb="IAS 37.89: disclosed only where an inflow is probable, and never recognised — recognising one would book income that may never arrive."
+        rows={note.contingentAssets}
+        currency={currency}
+      />
+
+      {note.narrative.map((line) => (
+        <p key={line} className="sw-sub" style={{ maxWidth: "80ch" }}>{line}</p>
+      ))}
+    </div>
+  );
+}
+
+function ContingencyTable({
+  testId, caption, blurb, rows, currency,
+}: {
+  testId: string; caption: string; blurb: string; currency: string;
+  rows: { code: string; name: string; label: string; estimateMinor: string; expectedOn: string | null; note: string | null }[];
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div>
+      <div className="sw-label">{caption}</div>
+      <p className="sw-sub" style={{ maxWidth: "80ch" }}>{blurb}</p>
+      <div className="sw-scroll mt-1">
+        <table className="sw-table" data-testid={testId}>
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr>
+              <th scope="col">What it is</th>
+              <th scope="col">Class</th>
+              <th scope="col">Expected</th>
+              <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Estimate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.code}>
+                <th scope="row">
+                  {r.name}
+                  {r.note && <div className="sw-sub">{r.note}</div>}
+                </th>
+                <td>{r.label}</td>
+                <td>{r.expectedOn ?? <span className="sw-sub">no date</span>}</td>
+                <td className="sw-num">
+                  <Figure minor={r.estimateMinor} currency={currency} zero="zero" colour={false} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * IAS 12.81(g): deferred tax by TYPE of temporary difference, at each date
+ * presented, with the movement between them.
+ *
+ * By type rather than by item, because a note listing every fixed asset is a
+ * note nobody reads. Assets and liabilities are shown gross before the offset,
+ * since IAS 12.74 only permits netting where there is a legal right to set off
+ * — and the basis on which that was done is stated rather than assumed.
+ */
+function DeferredTaxBody({ note, currency }: { note: DeferredTaxNote; currency: string }) {
+  if (note.state === "empty" && note.rows.length === 0) return null;
+  const anyUnrecognised = note.totals.unrecognisedTaxMinor !== "0";
+  return (
+    <div className="grid gap-4 px-3 pb-3">
+      {note.rows.length > 0 && (
+        <div className="sw-scroll">
+          <table className="sw-table" data-testid="deferred-tax-rows">
+            <caption className="sr-only">
+              Deferred tax by type of temporary difference at {note.asOf}
+              {note.previousAsOf ? ` and ${note.previousAsOf}` : ""}
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Temporary difference</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>
+                  {note.previousAsOf ?? "Opening"}
+                </th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Asset</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Liability</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>{note.asOf}</th>
+                <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Movement</th>
+                {anyUnrecognised && (
+                  <th scope="col" className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Unrecognised</th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {note.rows.map((r) => (
+                <tr key={r.category}>
+                  <th scope="row">{r.label}</th>
+                  <td className="sw-num"><Figure minor={r.openingNetMinor} currency={currency} zero="dash" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={r.closingAssetMinor} currency={currency} zero="dash" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={r.closingLiabilityMinor} currency={currency} zero="dash" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={r.closingNetMinor} currency={currency} zero="dash" colour={false} /></td>
+                  <td className="sw-num"><Figure minor={r.movementMinor} currency={currency} zero="dash" /></td>
+                  {anyUnrecognised && (
+                    <td className="sw-num"><Figure minor={r.unrecognisedTaxMinor} currency={currency} zero="dash" colour={false} /></td>
+                  )}
+                </tr>
+              ))}
+              <tr>
+                <th scope="row" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>Total</th>
+                {[
+                  note.totals.openingNetMinor, note.totals.closingAssetMinor, note.totals.closingLiabilityMinor,
+                  note.totals.closingNetMinor,
+                ].map((m, i) => (
+                  <td key={i} className="sw-num" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                    <Figure minor={m} currency={currency} zero="zero" colour={false} />
+                  </td>
+                ))}
+                <td className="sw-num" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                  <Figure minor={note.totals.movementMinor} currency={currency} zero="zero" />
+                </td>
+                {anyUnrecognised && (
+                  <td className="sw-num" style={{ fontWeight: 600, borderTop: "1px solid var(--sw-line-strong)" }}>
+                    <Figure minor={note.totals.unrecognisedTaxMinor} currency={currency} zero="zero" colour={false} />
+                  </td>
+                )}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="sw-sub" style={{ maxWidth: "80ch" }} data-testid="deferred-tax-offset">{note.offsetBasis}</p>
+      {note.narrative.map((line) => (
+        <p key={line} className="sw-sub" style={{ maxWidth: "80ch" }}>{line}</p>
+      ))}
+    </div>
   );
 }
