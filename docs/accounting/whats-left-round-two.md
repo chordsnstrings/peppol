@@ -18,6 +18,98 @@ where it falls over, then regulation, then everything smaller.
 
 ---
 
+## Status
+
+This survey is a snapshot of what was true when it ran. It has since been
+worked through, and the sections below are kept exactly as written rather than
+edited, for the reason the first survey gives: a description of a defect is the
+clearest statement of why the fix is shaped the way it is, and a survey
+rewritten to agree with the code is a survey nobody can check.
+
+**Closed.** All nine sections.
+
+§1, the gateway. `LIVE` is refused server-side in the store route that is the
+only path persisting an entity, and again in the send pipeline, so an entity
+somehow marked live on a simulator gets a refusal rather than a rehearsal
+reported as a filing. The mock stamps `simulated` on every outcome it invents
+and the flag travels with the event, so the timeline, the notifications and the
+status chips all say the same thing. The evidence bundle opens with an
+attestation and reports `NOT_TRANSMITTED` for a rehearsal, with the simulator's
+own claims quarantined under `simulation`. Retention is stated at seven years
+citing Article 56 of FDL 47/2022, and the account reset keeps `Transmission`
+rows inside that window unless the caller says in as many words that it is
+destroying records.
+
+§2, the subledgers. Posting an invoice, seeing which invoices have reached the
+books, recording a receipt, entering and coding a supplier bill, and paying one
+are all actions on the screens. The capability register's new join is what
+holds this: it reports the endpoints no page, component or hook reaches, it
+found exactly the four this section named, and `--check` ratchets the count so
+it can fall and cannot rise.
+
+§3, the wrong figures. The general ledger reports the account's balance from an
+aggregate over every matching line, pages from the newest end, opens at the
+balance brought forward and says when it is truncated. Trade finance posts in
+the facility's currency at a rate looked up the way revaluation looks one up,
+refused outright when there is none. The IFRS 9 provision matrix posts the
+movement onto 1150 and the policy note says what is true. The lease liability's
+twelve-month portion is posted onto 2460 the way borrowings' is onto 2450.
+Deferred tax is classified from the chart's own hierarchy rather than the code
+band. The balance sheet has its IAS 1.60 split with net current assets. The
+consolidation caveats are unconditional. The payables maturity table is cut on
+`dueDate`, with the past-due ageing kept beside it as the different report it
+is. A subscription's billed total is a `groupBy`.
+
+§4, the controls. The approval queue is seeded from the open registers, so
+writing the rule the screen invites no longer makes bills permanently
+unpostable. Candidates come from open subjects rather than from the oldest
+5,000 decisions. `subjectFacts` resolves all five subject types, so a decision
+is guarded and recorded against the entity on the subject rather than the one
+the client named. The self-approval bar reaches every type. Eleven new
+permission keys, ten routes re-keyed, `fx.rate` separated from `ledger.post`
+and reported as a conflict with proposing a payment run. Roles are editable.
+The credit gate binds at finalisation and in the send pipeline. And there is a
+test that runs a guard in its enforcing state, which no test had ever done.
+
+§5, posting twice. `reverse()` is keyed and transactional; the manual journal
+is keyed on a token minted when the form opens; a payroll month accepts a late
+payslip as its own keyed supplement and pays it; inventory increments inside a
+transaction; a cheque's transitions are conditional on the status they leave; a
+payment run re-reads the ageing at release; petty cash resolves an instant to
+the business day at UTC+4, which is what stopped the month-end refusal.
+
+§6, scale. The bind lists are chunked at 5,000 and the ledger reads bounded;
+`reconcile` is split into a summary and an itemised page, and both loop callers
+read the summary's real count rather than the page's length; `grniReport` asks
+about open orders; `openItemsOf` buckets once; `ledgerBalances` and
+`trialBalance` sum in the database.
+
+§7, regulation. Both parties' addresses, the AED tax figure and the
+reverse-charge statement are on the document and in the UBL, computed once so
+the two cannot disagree; the credit note is a credit note. There is a corner 4.
+Retention is seven years. The mandatory-registration threshold is watched on
+the rolling twelve months the law uses, and the statutory reserve under CCL
+Article 103 is computed.
+
+§8, unreachable. Every operation this section named is reachable, and the
+register's join is what will notice the next one that is not.
+
+§9, operational. `TRUSTED_PROXY_HOPS` is documented, the nine suites run in CI,
+`parseCsv` has a test, `itemHistory` and `priceListRegister` behave, the equity
+page renders whatever the server sends, and the capability register joins its
+lists.
+
+**What this left behind.** The work generated its own tail — a count that
+became a page size when a read was bounded, an AED figure that reached only the
+document computing it, a store route with no sanitizer for the inbound records
+corner 4 had just started writing, `todayISO()` returning UTC under a comment
+claiming local. Those are closed too, and they are the argument for the join
+and the ratchet: the register now reports the shape of gap that produced this
+survey, so the next one can be found by running a command rather than by
+reading the product for a day.
+
+---
+
 ## 1. It can tell a business the FTA accepted an invoice that never left the machine
 
 `getGateway()` returns `mockGateway` unless `GATEWAY_DRIVER=taxilla` **and**
