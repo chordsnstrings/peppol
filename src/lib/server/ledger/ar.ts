@@ -245,8 +245,200 @@ export async function postInvoice(opts: {
   return { entryId: entry.id, reference: `${entry.series}-${entry.number}`, alreadyPosted: false };
 }
 
+/** One invoice a receipt is applied to, and what applying it does to the books. */
+export interface ReceiptAllocation {
+  /**
+   * The open item this settles. It becomes the settlement stamp on this
+   * line — not on the entry — which is the whole point: an entry can name one
+   * document, and a bank transfer clearing five invoices needs to name five.
+   */
+  invoiceId: string;
+  invoiceNumber: string;
+  /**
+   * What comes off 1100 for this invoice, in the functional currency. It is
+   * what the receivable was carried at, which is not always what arrived.
+   */
+  clearedMinor: number | bigint;
+  /**
+   * This invoice's share of the money that actually arrived, in the functional
+   * currency. Defaults to `clearedMinor`, and differs only where the invoice
+   * was raised at one rate and paid at another — the difference is then the
+   * realised exchange gain or loss on that invoice, and it is booked per
+   * invoice because two invoices raised at two rates produce two differences.
+   */
+  receivedMinor?: number | bigint;
+}
+
+export interface PostReceiptResult extends PostInvoiceResult {
+  /**
+   * What arrived and was applied to no invoice. It stays on the receivables
+   * account as a credit in the customer's favour rather than being forced onto
+   * an invoice it does not belong to — an over-payment is a fact about the
+   * customer, not about any one document.
+   */
+  onAccountMinor: bigint;
+}
+
 /**
- * Post a receipt against an invoice.
+ * Post one receipt from a customer against the invoices it settles.
+ *
+ *   Dr  1010  Bank                     what arrived — ONE line
+ *     Cr  1100  Trade receivables        per invoice, each naming its own
+ *     Cr  1100  Trade receivables        what was over-paid, on account
+ *     Cr  4950 / Dr 6800                 the difference on each invoice
+ *
+ * One bank line, and that is the reason this exists. Posting an entry per
+ * invoice would debit the bank five times for a statement line that shows one
+ * transfer, and the reconciler's exact-amount matcher would never pair any of
+ * them: six permanently unmatched items for one payment, growing every month.
+ * The shape is the one `payment-runs.ts` already uses on the payables side, and
+ * what makes it possible is settlement recorded on the LINE — every reader of
+ * the sales ledger keys `settlesId ?? entry.settlesId ?? sourceId`, line first.
+ *
+ * Three things happen in real life and all three are handled here rather than
+ * pushed back at the user. More money arrives than was allocated, and the
+ * remainder sits on account. Less arrives than the invoice was raised for, and
+ * the item simply stays open for the rest — nothing special is needed, because
+ * the open item is a netted balance and not a flag. And the money arrives in a
+ * currency whose rate has moved since each invoice was raised, which is why the
+ * exchange difference is computed per invoice and not once on the total.
+ */
+export async function postCustomerReceipt(opts: {
+  orgId: string;
+  entityId: string;
+  paymentId: string;
+  receivedOn: Date | string;
+  /** What actually landed in the bank, in the functional currency. */
+  bankAmountMinor: number | bigint;
+  allocations: ReceiptAllocation[];
+  bankAccount?: string;
+  actorId?: string;
+  actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
+}): Promise<PostReceiptResult> {
+  const externalKey = `receipt:${opts.paymentId}`;
+  const existing = await prisma.journalEntry.findFirst({
+    where: { orgId: opts.orgId, externalKey },
+    include: { lines: { select: { settlesId: true, functionalAmountMinor: true, accountId: true } } },
+  });
+  if (existing) {
+    // What went on account is read back off the entry rather than recomputed,
+    // so a retry reports what was actually posted and not what this call would
+    // have posted.
+    const onAccount = existing.lines
+      .filter((l) => l.settlesId === null && l.functionalAmountMinor < 0n)
+      .reduce((a, l) => a - l.functionalAmountMinor, 0n);
+    return {
+      entryId: existing.id,
+      reference: `${existing.series}-${existing.number}`,
+      alreadyPosted: true,
+      onAccountMinor: onAccount,
+    };
+  }
+
+  const bank = BigInt(opts.bankAmountMinor);
+  if (bank <= 0n) throw new LedgerError("A receipt has to be a positive amount.");
+
+  const allocations = opts.allocations ?? [];
+  if (allocations.length === 0) {
+    throw new LedgerError(
+      "A receipt has to say which invoices it pays. Money credited to the receivables account against no document " +
+        "is money the ageing can never clear.",
+    );
+  }
+
+  const seen = new Set<string>();
+  const applied = allocations.map((a) => {
+    const id = (a.invoiceId ?? "").trim();
+    if (!id) {
+      throw new LedgerError(
+        `The line for ${a.invoiceNumber || "one of the invoices"} names no invoice, so settling it would clear nothing ` +
+          `in the ageing. Give it the invoice id, or take it off the receipt.`,
+      );
+    }
+    if (seen.has(id)) {
+      // Two lines for one invoice would each stamp the same open item, which
+      // nets to the right total and reads as two settlements of one document.
+      throw new LedgerError(
+        `${a.invoiceNumber || id} appears twice on this receipt. Put one line on it for the whole amount being applied.`,
+      );
+    }
+    seen.add(id);
+    const cleared = BigInt(a.clearedMinor);
+    const received = a.receivedMinor === undefined ? cleared : BigInt(a.receivedMinor);
+    if (cleared <= 0n) throw new LedgerError(`The amount applied to ${a.invoiceNumber || id} has to be positive.`);
+    if (received <= 0n) throw new LedgerError(`The money applied to ${a.invoiceNumber || id} has to be positive.`);
+    return { invoiceId: id, invoiceNumber: a.invoiceNumber || id, cleared, received };
+  });
+
+  const allocated = applied.reduce((a, x) => a + x.received, 0n);
+  if (allocated > bank) {
+    throw new LedgerError(
+      `The receipt allocates ${allocated} across ${applied.length} invoice${applied.length === 1 ? "" : "s"} but only ` +
+        `${bank} arrived. Reduce what is applied, or split the payment.`,
+    );
+  }
+  const onAccount = bank - allocated;
+
+  const single = applied.length === 1 && onAccount === 0n;
+  const lines: PostLine[] = [
+    {
+      account: opts.bankAccount ?? "1010",
+      debit: bank,
+      memo: single ? `Receipt for ${applied[0].invoiceNumber}` : `Receipt — ${applied.length} invoices`,
+    },
+  ];
+
+  for (const x of applied) {
+    lines.push({
+      account: AR_CONTROL,
+      credit: x.cleared,
+      settlesId: x.invoiceId,
+      memo: `Settles ${x.invoiceNumber}`,
+    });
+    // More money arrived than the receivable carried -> a gain; less -> a loss.
+    // Per invoice, because gains on one and losses on another are two events;
+    // netting them first would post a single figure that is neither.
+    const diff = x.received - x.cleared;
+    if (diff > 0n) lines.push({ account: FX_GAIN, credit: diff, memo: `Realised exchange difference on ${x.invoiceNumber}` });
+    if (diff < 0n) lines.push({ account: FX_LOSS, debit: -diff, memo: `Realised exchange difference on ${x.invoiceNumber}` });
+  }
+
+  if (onAccount > 0n) {
+    // Deliberately unstamped. An unallocated credit belongs to the customer and
+    // not to a document, so it stands as its own open item until somebody says
+    // which invoice it pays — which is a decision, not arithmetic.
+    lines.push({ account: AR_CONTROL, credit: onAccount, memo: "On account — not applied to an invoice" });
+  }
+
+  const entry = await post({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    entryDate: opts.receivedOn,
+    memo: single ? `Receipt — ${applied[0].invoiceNumber}` : `Receipt — ${applied.length} invoices`,
+    source: "payment",
+    sourceType: "RECEIPT",
+    sourceId: opts.paymentId,
+    // Only where the receipt settles exactly one document and nothing is left
+    // over. Anything else cannot be named at entry level without naming one of
+    // several, and a reader that trusted it would clear the wrong invoice.
+    ...(single ? { settlesId: applied[0].invoiceId } : {}),
+    externalKey,
+    actorType: opts.actorType ?? "INTEGRATION",
+    actorId: opts.actorId,
+    series: "CR",
+    lines,
+  });
+
+  return {
+    entryId: entry.id,
+    reference: `${entry.series}-${entry.number}`,
+    alreadyPosted: false,
+    onAccountMinor: onAccount,
+  };
+}
+
+/**
+ * Post a receipt against one invoice.
  *
  *   Dr  1010  Bank             what arrived
  *     Cr  1100  Trade receivables  what the customer no longer owes
@@ -254,6 +446,9 @@ export async function postInvoice(opts: {
  * Any difference between the two — because the invoice was raised in USD and
  * the money arrived at a different rate — is a realised exchange gain or loss,
  * and it is booked explicitly rather than silently absorbed into the bank line.
+ *
+ * The single-invoice form of `postCustomerReceipt`, kept because every caller
+ * has one invoice in hand and should not have to build a list to say so.
  */
 export async function postReceipt(opts: {
   orgId: string;
@@ -271,46 +466,25 @@ export async function postReceipt(opts: {
   actorId?: string;
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<PostInvoiceResult> {
-  const externalKey = `receipt:${opts.paymentId}`;
-  const existing = await prisma.journalEntry.findFirst({
-    where: { orgId: opts.orgId, externalKey },
-    select: { id: true, series: true, number: true },
-  });
-  if (existing) {
-    return { entryId: existing.id, reference: `${existing.series}-${existing.number}`, alreadyPosted: true };
-  }
-
   const bank = BigInt(opts.bankAmountMinor);
-  const cleared = opts.clearedAmountMinor === undefined ? bank : BigInt(opts.clearedAmountMinor);
-  if (bank <= 0n) throw new LedgerError("A receipt has to be a positive amount.");
-
-  const lines: PostLine[] = [
-    { account: opts.bankAccount ?? "1010", debit: bank, memo: `Receipt for ${opts.invoiceNumber}` },
-    { account: AR_CONTROL, credit: cleared, memo: `Settles ${opts.invoiceNumber}` },
-  ];
-
-  // More money arrived than the receivable carried → a gain; less → a loss.
-  const diff = bank - cleared;
-  if (diff > 0n) lines.push({ account: FX_GAIN, credit: diff, memo: "Realised exchange difference" });
-  if (diff < 0n) lines.push({ account: FX_LOSS, debit: -diff, memo: "Realised exchange difference" });
-
-  const entry = await post({
+  return postCustomerReceipt({
     orgId: opts.orgId,
     entityId: opts.entityId,
-    entryDate: opts.receivedOn,
-    memo: `Receipt — ${opts.invoiceNumber}`,
-    source: "payment",
-    sourceType: "RECEIPT",
-    sourceId: opts.paymentId,
-    settlesId: opts.invoiceId,
-    externalKey,
-    actorType: opts.actorType ?? "INTEGRATION",
+    paymentId: opts.paymentId,
+    receivedOn: opts.receivedOn,
+    bankAmountMinor: bank,
+    bankAccount: opts.bankAccount,
     actorId: opts.actorId,
-    series: "CR",
-    lines,
+    actorType: opts.actorType,
+    allocations: [
+      {
+        invoiceId: opts.invoiceId,
+        invoiceNumber: opts.invoiceNumber,
+        clearedMinor: opts.clearedAmountMinor === undefined ? bank : BigInt(opts.clearedAmountMinor),
+        receivedMinor: bank,
+      },
+    ],
   });
-
-  return { entryId: entry.id, reference: `${entry.series}-${entry.number}`, alreadyPosted: false };
 }
 
 /** The AR ageing report, straight from the ledger rather than from the documents. */

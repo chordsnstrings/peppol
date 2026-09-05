@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { postInvoice, postReceipt, receivablesAgeing } from "@/lib/server/ledger/ar";
+import { postInvoice, postReceipt, postCustomerReceipt, receivablesAgeing } from "@/lib/server/ledger/ar";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 import { LedgerError } from "@/lib/server/ledger/post";
@@ -50,6 +50,14 @@ function invoice(over: Partial<Invoice> = {}, lines: InvoiceLine[] = [line(100_0
     createdAt: "2026-03-10T00:00:00Z", updatedAt: "2026-03-10T00:00:00Z",
     ...over,
   } as Invoice;
+}
+
+/** Every line as posted, in order — a multi-invoice receipt has several on one account. */
+async function allLinesOf(entryId: string) {
+  const rows = await db.journalLine.findMany({
+    where: { entryId }, include: { account: true }, orderBy: { lineNo: "asc" },
+  });
+  return rows.map((r) => ({ code: r.account.code, amount: r.txnAmountMinor, settles: r.settlesId, memo: r.memo }));
 }
 
 async function linesOf(entryId: string) {
@@ -349,6 +357,192 @@ d("receivables subledger", () => {
   });
 
   it("keeps the trial balance tied after everything above", async () => {
+    const tb = await trialBalance({ orgId: ORG, entityId: ENT, periodLabel: "2026-03" });
+    expect(tb.balanced).toBe(true);
+    expect(tb.differenceMinor).toBe(0n);
+  });
+
+  /* -------------------------------------- one receipt, several invoices */
+
+  it("posts ONE bank line for a transfer that settles five invoices", async () => {
+    // Five invoices of 105,000 fils each — 525,000 in one transfer.
+    const invs = [];
+    for (let i = 0; i < 5; i++) {
+      const inv = invoice({ number: `INV-MULTI-${i}` });
+      await postInvoice({ orgId: ORG, invoice: inv });
+      invs.push(inv);
+    }
+
+    const r = await postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-multi", receivedOn: "2026-03-28",
+      bankAmountMinor: 525_000,
+      allocations: invs.map((inv) => ({ invoiceId: inv.id, invoiceNumber: inv.number, clearedMinor: 105_000 })),
+    });
+
+    const lines = await allLinesOf(r.entryId);
+    // The whole point: the bank statement shows one debit of 525,000, so the
+    // ledger shows one line of 525,000. Five would never reconcile.
+    const bank = lines.filter((l) => l.code === "1010");
+    expect(bank).toHaveLength(1);
+    expect(bank[0].amount).toBe(525_000n);
+
+    // And five receivable lines, each naming the invoice it discharges.
+    const ar = lines.filter((l) => l.code === "1100");
+    expect(ar).toHaveLength(5);
+    expect(ar.every((l) => l.amount === -105_000n)).toBe(true);
+    expect(new Set(ar.map((l) => l.settles))).toEqual(new Set(invs.map((i) => i.id)));
+
+    // Which is what closes them: five open items gone, not one.
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-03-31") });
+    for (const inv of invs) expect(ageing.open.some((o) => o.sourceId === inv.id)).toBe(false);
+  });
+
+  it("puts an over-payment on account rather than onto an invoice it does not belong to", async () => {
+    const a = invoice({ number: "INV-OVER-A" });
+    const b = invoice({ number: "INV-OVER-B" });
+    await postInvoice({ orgId: ORG, invoice: a });
+    await postInvoice({ orgId: ORG, invoice: b });
+
+    // 210,000 owed, 250,000 arrived. The extra 40,000 is the customer's, and
+    // it belongs to no document until somebody says which.
+    const r = await postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-over", receivedOn: "2026-03-29",
+      bankAmountMinor: 250_000,
+      allocations: [
+        { invoiceId: a.id, invoiceNumber: a.number, clearedMinor: 105_000 },
+        { invoiceId: b.id, invoiceNumber: b.number, clearedMinor: 105_000 },
+      ],
+    });
+    expect(r.onAccountMinor).toBe(40_000n);
+
+    const lines = await allLinesOf(r.entryId);
+    expect(lines.filter((l) => l.code === "1010")).toHaveLength(1);
+    const onAccount = lines.filter((l) => l.code === "1100" && l.settles === null);
+    expect(onAccount).toHaveLength(1);
+    expect(onAccount[0].amount).toBe(-40_000n);
+
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-03-31") });
+    expect(ageing.open.some((o) => o.sourceId === a.id)).toBe(false);
+    expect(ageing.open.some((o) => o.sourceId === b.id)).toBe(false);
+    // The credit stands as its own open item, keyed on the receipt.
+    expect(ageing.open.find((o) => o.sourceId === "pay-over")?.outstandingMinor).toBe("-40000");
+  });
+
+  it("leaves a short-paid invoice open for the remainder", async () => {
+    const inv = invoice({ number: "INV-SHORT" });
+    await postInvoice({ orgId: ORG, invoice: inv });
+    await postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-short", receivedOn: "2026-03-29",
+      bankAmountMinor: 60_000,
+      allocations: [{ invoiceId: inv.id, invoiceNumber: inv.number, clearedMinor: 60_000 }],
+    });
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-03-31") });
+    // 105,000 raised less 60,000 received leaves 45,000 on the same item.
+    expect(ageing.open.find((o) => o.sourceId === inv.id)?.outstandingMinor).toBe("45000");
+  });
+
+  it("books an exchange difference per invoice where each was raised at its own rate", async () => {
+    // USD 1,000.00 twice, raised at 3.60 and at 3.70, so the receivable carries
+    // 360,000 and 370,000 fils. The customer sends USD 2,000.00 when the rate
+    // is 3.75, and AED 750,000 lands — 375,000 against each invoice.
+    const usd = (number: string, rate: string) =>
+      invoice(
+        { number, currency: "USD", fx: { rateToAED: rate, source: "CBUAE", rateDate: "2026-03-10" } },
+        [line(100_000, 0, "ZERO_EXPORT")],
+      );
+    const x = usd("INV-FX-X", "3.60");
+    const y = usd("INV-FX-Y", "3.70");
+    await postInvoice({ orgId: ORG, invoice: x });
+    await postInvoice({ orgId: ORG, invoice: y });
+
+    const r = await postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-fx-multi", receivedOn: "2026-03-30",
+      bankAmountMinor: 750_000,
+      allocations: [
+        { invoiceId: x.id, invoiceNumber: x.number, clearedMinor: 360_000, receivedMinor: 375_000 },
+        { invoiceId: y.id, invoiceNumber: y.number, clearedMinor: 370_000, receivedMinor: 375_000 },
+      ],
+    });
+
+    const lines = await allLinesOf(r.entryId);
+    expect(lines.filter((l) => l.code === "1010")).toHaveLength(1);
+    // 375,000 - 360,000 = 15,000 gained on the first; 375,000 - 370,000 = 5,000
+    // on the second. Two differences, because there were two rates.
+    const gains = lines.filter((l) => l.code === "4950").map((l) => l.amount);
+    expect(gains).toEqual([-15_000n, -5_000n]);
+    expect(lines.reduce((a, l) => a + l.amount, 0n)).toBe(0n);
+
+    const ageing = await receivablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-03-31") });
+    expect(ageing.open.some((o) => o.sourceId === x.id)).toBe(false);
+    expect(ageing.open.some((o) => o.sourceId === y.id)).toBe(false);
+  });
+
+  it("does not net a gain on one invoice against a loss on another", async () => {
+    const usd = (number: string, rate: string) =>
+      invoice(
+        { number, currency: "USD", fx: { rateToAED: rate, source: "CBUAE", rateDate: "2026-03-10" } },
+        [line(100_000, 0, "ZERO_EXPORT")],
+      );
+    const x = usd("INV-FX-G", "3.60");
+    const y = usd("INV-FX-L", "3.70");
+    await postInvoice({ orgId: ORG, invoice: x });
+    await postInvoice({ orgId: ORG, invoice: y });
+
+    // 375,000 applied against a 360,000 receivable is a 15,000 gain; 365,000
+    // against 370,000 is a 5,000 loss. Netting them would post 10,000 of gain,
+    // which is neither figure and hides both.
+    const r = await postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-fx-mixed", receivedOn: "2026-03-30",
+      bankAmountMinor: 740_000,
+      allocations: [
+        { invoiceId: x.id, invoiceNumber: x.number, clearedMinor: 360_000, receivedMinor: 375_000 },
+        { invoiceId: y.id, invoiceNumber: y.number, clearedMinor: 370_000, receivedMinor: 365_000 },
+      ],
+    });
+    const lines = await allLinesOf(r.entryId);
+    expect(lines.filter((l) => l.code === "4950").map((l) => l.amount)).toEqual([-15_000n]);
+    expect(lines.filter((l) => l.code === "6800").map((l) => l.amount)).toEqual([5_000n]);
+    expect(lines.reduce((a, l) => a + l.amount, 0n)).toBe(0n);
+  });
+
+  it("refuses to allocate more than arrived, and refuses one invoice twice", async () => {
+    const inv = invoice({ number: "INV-BAD-ALLOC" });
+    await postInvoice({ orgId: ORG, invoice: inv });
+
+    await expect(postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-too-much", receivedOn: "2026-03-30",
+      bankAmountMinor: 50_000,
+      allocations: [{ invoiceId: inv.id, invoiceNumber: inv.number, clearedMinor: 105_000, receivedMinor: 105_000 }],
+    })).rejects.toThrow(/only 50000 arrived/i);
+
+    await expect(postCustomerReceipt({
+      orgId: ORG, entityId: ENT, paymentId: "pay-dupe-alloc", receivedOn: "2026-03-30",
+      bankAmountMinor: 105_000,
+      allocations: [
+        { invoiceId: inv.id, invoiceNumber: inv.number, clearedMinor: 50_000 },
+        { invoiceId: inv.id, invoiceNumber: inv.number, clearedMinor: 55_000 },
+      ],
+    })).rejects.toThrow(/appears twice/i);
+  });
+
+  it("keeps the single-invoice receipt naming its invoice on the entry as well as the line", async () => {
+    // Every existing reader was written against the entry-level column. A
+    // receipt for one document still fills it, so nothing that read it before
+    // stops working; the line-level stamp is what the multi form adds.
+    const inv = invoice({ number: "INV-ONE" });
+    await postInvoice({ orgId: ORG, invoice: inv });
+    const r = await postReceipt({
+      orgId: ORG, entityId: ENT, invoiceId: inv.id, invoiceNumber: inv.number,
+      paymentId: "pay-one", receivedOn: "2026-03-30", bankAmountMinor: 105_000,
+    });
+    const entry = await db.journalEntry.findUnique({ where: { id: r.entryId } });
+    expect(entry?.settlesId).toBe(inv.id);
+    const ar = (await allLinesOf(r.entryId)).filter((l) => l.code === "1100");
+    expect(ar).toHaveLength(1);
+    expect(ar[0].settles).toBe(inv.id);
+  });
+
+  it("keeps the trial balance tied after the multi-invoice receipts", async () => {
     const tb = await trialBalance({ orgId: ORG, entityId: ENT, periodLabel: "2026-03" });
     expect(tb.balanced).toBe(true);
     expect(tb.differenceMinor).toBe(0n);
