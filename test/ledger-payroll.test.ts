@@ -26,6 +26,8 @@ async function wipe() {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     db.$executeRawUnsafe(`DELETE FROM "Payslip" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalDecision" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Employee" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
@@ -386,5 +388,61 @@ d("payroll", () => {
   it("refuses a period that is not a month", async () => {
     await expect(runPayroll({ orgId: ORG, entityId: ENT, period: "Q1" }))
       .rejects.toThrow(/looks like 2026-03/);
+  });
+
+  it("holds the organisation's approval rules before a payslip becomes a payment", async () => {
+    // PAYROLL is one of the five subjects the approvals engine takes rules
+    // for. It was the last posting path not asking, so a rule saying "payroll
+    // needs a director" appeared on the screen, showed in the queue, and bound
+    // on nothing.
+    const rule = await db.approvalRule.create({
+      data: {
+        orgId: ORG, entityId: ENT, subjectType: "PAYROLL",
+        thresholdMinor: 100_000n, approverRole: "DIRECTOR", approversRequired: 1,
+      },
+    });
+
+    const run = await runPayroll({ orgId: ORG, entityId: ENT, period: "2026-06" });
+    expect(run.payslips.length).toBeGreaterThan(0);
+
+    await expect(postPayroll({ orgId: ORG, entityId: ENT, period: "2026-06" }))
+      .rejects.toThrow(/needs one more approval from a director/i);
+    // Refused before anything was written: the drafts are still drafts.
+    expect(await db.payslip.count({ where: { orgId: ORG, period: "2026-06", status: "draft" } }))
+      .toBe(run.payslips.length);
+
+    // The figure a limit is written against is the cost of employing people
+    // for the month — gross plus gratuity plus the employer's pension — not
+    // net pay, which understates it by every deduction withheld.
+    const drafts = await db.payslip.findMany({ where: { orgId: ORG, entityId: ENT, period: "2026-06" } });
+    const cost = drafts.reduce(
+      (a, p) => a + p.basicMinor + p.allowancesMinor + p.overtimeMinor + p.gratuityMinor + p.pensionEmployerMinor,
+      0n,
+    );
+    await db.approvalDecision.create({
+      data: {
+        orgId: ORG, entityId: ENT, subjectType: "PAYROLL", subjectId: "2026-06",
+        decision: "APPROVED", decidedBy: "dir-a", amountMinor: cost,
+      },
+    });
+
+    const posted = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-06" });
+    expect(posted.alreadyPosted).toBe(false);
+    expect(posted.entryId).toBeTruthy();
+
+    // March was posted earlier in this file, before any rule existed. Re-posting
+    // it still hands back the original entry rather than being refused: the
+    // guard sits after the idempotency return, so a rule written today cannot
+    // turn a harmless retry of an already-posted month into a failure.
+    const again = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-03" });
+    expect(again.alreadyPosted).toBe(true);
+
+    // And a signature covers the month it was given for. June's decision does
+    // nothing for a month nobody has signed.
+    await runPayroll({ orgId: ORG, entityId: ENT, period: "2026-07" });
+    await expect(postPayroll({ orgId: ORG, entityId: ENT, period: "2026-07" }))
+      .rejects.toThrow(/needs one more approval from a director/i);
+
+    await db.approvalRule.delete({ where: { id: rule.id } });
   });
 });

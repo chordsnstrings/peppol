@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
 import { post, LedgerError, type PostLine } from "./post";
+import { assertApproved } from "./approvals";
 
 /**
  * Payroll: the employee register, the monthly run, end-of-service gratuity and
@@ -1057,6 +1058,35 @@ export async function postPayroll(opts: {
       memo: `Deductions recovered in ${period}`,
     });
   }
+
+  /*
+   * The organisation's own approval rules, before a payslip becomes a payment.
+   *
+   * PAYROLL is one of the five subjects `approvals.ts` takes rules for, and it
+   * was the last posting path not asking. A rule saying "payroll needs a
+   * director" appeared on the approvals screen, showed in the queue, and bound
+   * on nothing.
+   *
+   * The subject id is the period, which is what `sourceId` and the idempotency
+   * key already use — so a signature is given for March's payroll and covers
+   * March's payroll, not the next month's. The amount is the GROSS cost of
+   * employing people for the month, employer pension included: that is the
+   * figure an approval limit is written against, and net pay would understate
+   * it by every deduction withheld.
+   *
+   * This sits after the `externalKey` return above, so re-posting an already
+   * posted month still hands back the original entry. A rule written today
+   * cannot turn last month's harmless retry into a refusal.
+   */
+  await assertApproved({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    subjectType: "PAYROLL",
+    subjectId: period,
+    amountMinor: gross + gratuity + pensionEmployer,
+    reference: period,
+    currency: await bookCurrency(opts.orgId, opts.entityId),
+  });
 
   // Payroll is a period-end measurement of a whole month, so it lands on the
   // last day of that month unless a caller has a reason to date it otherwise.

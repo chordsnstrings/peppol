@@ -76,7 +76,7 @@ d("delivery notes", () => {
   afterAll(async () => { await wipe(); await db.$disconnect(); });
 
   it("shows the whole order still to go before anything has left", async () => {
-    const o = await outstandingOnOrder({ orgId: ORG, orderId });
+    const o = await outstandingOnOrder({ ...S, orderId });
     expect(o.lines[0].orderedMilli).toBe(60_000n);
     expect(o.lines[0].deliveredMilli).toBe(0n);
     expect(o.lines[0].outstandingMilli).toBe(60_000n);
@@ -110,7 +110,7 @@ d("delivery notes", () => {
     });
     const stock = await db.inventoryItem.findFirst({ where: { orgId: ORG, sku: "WIDGET" } });
     expect(stock!.quantityMilli).toBe(100_000n);
-    const o = await outstandingOnOrder({ orgId: ORG, orderId });
+    const o = await outstandingOnOrder({ ...S, orderId });
     // A draft counts against the order: two people must not each be told the
     // last of the stock is free.
     expect(o.lines[0].deliveredMilli).toBe(40_000n);
@@ -160,7 +160,7 @@ d("delivery notes", () => {
   });
 
   it("has nothing left on the order once both notes have gone", async () => {
-    const o = await outstandingOnOrder({ orgId: ORG, orderId });
+    const o = await outstandingOnOrder({ ...S, orderId });
     expect(o.lines[0].outstandingMilli).toBe(0n);
     await expect(createDeliveryNote({
       ...S,
@@ -222,10 +222,10 @@ d("delivery notes", () => {
         lines: [{ sku: "WIDGET", description: "Widget", quantityMilli: 10_000n, orderLineId: line!.id }],
       },
     });
-    expect((await outstandingOnOrder({ orgId: ORG, orderId: other.id })).lines[0].outstandingMilli).toBe(0n);
+    expect((await outstandingOnOrder({ ...S, orderId: other.id })).lines[0].outstandingMilli).toBe(0n);
 
     await cancelDeliveryNote({ ...S, number: "DN-4", reason: "customer deferred" });
-    expect((await outstandingOnOrder({ orgId: ORG, orderId: other.id })).lines[0].outstandingMilli).toBe(10_000n);
+    expect((await outstandingOnOrder({ ...S, orderId: other.id })).lines[0].outstandingMilli).toBe(10_000n);
   });
 
   it("takes goods back at the cost they left at, not at today's", async () => {

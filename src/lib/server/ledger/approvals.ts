@@ -857,11 +857,15 @@ export async function withdraw(opts: {
  *   - postSupplierPayment() in ap.ts, before post() — wired;
  *   - the manual journal route (api/ledger/journals), which names the subject
  *     the decisions were collected against — wired;
- *   - the payroll run in payroll.ts, before it posts the WPS batch — NOT yet
- *     wired, so payroll rules configured on the screen do not bind;
+ *   - postPayroll() in payroll.ts, before it posts the month — wired, against
+ *     the period as the subject and the gross cost of employment as the
+ *     amount;
  *   - releaseRun() in payment-runs.ts, which posts a batch of supplier
- *     payments — NOT wired either, and see the note in that file for why it
- *     keeps a control of its own regardless.
+ *     payments — wired; see the note in that file for why the run also keeps
+ *     a control of its own, and why the two are different questions.
+ *
+ * That is every posting path in the product. A rule an organisation writes on
+ * the approvals screen now binds on all of them.
  *
  * Where no rule covers the amount it returns quietly, so it is safe to call on
  * every posting rather than only on the large ones — a guard people remember to

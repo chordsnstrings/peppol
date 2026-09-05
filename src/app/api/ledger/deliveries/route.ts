@@ -28,7 +28,7 @@ export async function GET(req: Request) {
     if (view === "order") {
       const orderId = q.get("orderId");
       if (!orderId) return json({ error: "Which order?" }, 400);
-      return json(ledgerJson(await outstandingOnOrder({ orgId, orderId })));
+      return json(ledgerJson(await outstandingOnOrder({ orgId, entityId, orderId })));
     }
 
     return json(ledgerJson(await deliveryRegister({

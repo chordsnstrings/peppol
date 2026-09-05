@@ -95,9 +95,13 @@ export interface NewDeliveryNote {
  * leaving it out means two people can each raise a draft for the last of the
  * stock and both be told it is available.
  */
-export async function outstandingOnOrder(opts: { orgId: string; orderId: string }) {
+export async function outstandingOnOrder(opts: { orgId: string; entityId: string; orderId: string }) {
   const order = await prisma.salesOrder.findFirst({
-    where: { id: opts.orderId, orgId: opts.orgId },
+    // Scoped to the entity as well as the organisation, like every other read
+    // in this module. It was scoped to the organisation alone, which within a
+    // group meant one legal entity could read another's order line by line
+    // from a screen that had the entity in hand and did not pass it.
+    where: { id: opts.orderId, orgId: opts.orgId, entityId: opts.entityId },
     include: { lines: { orderBy: { lineNo: "asc" } } },
   });
   if (!order) throw new LedgerError("There is no such order.");
@@ -160,7 +164,7 @@ export async function createDeliveryNote(opts: {
   let outstanding: Awaited<ReturnType<typeof outstandingOnOrder>> | null = null;
 
   if (n.orderId) {
-    outstanding = await outstandingOnOrder({ orgId: opts.orgId, orderId: n.orderId });
+    outstanding = await outstandingOnOrder({ orgId: opts.orgId, entityId: opts.entityId, orderId: n.orderId });
     if (!customerName) customerName = outstanding.customerName;
 
     // Over-delivery is refused here rather than at dispatch, because the
