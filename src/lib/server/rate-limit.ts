@@ -54,10 +54,57 @@ export function record(key: string, windowMs: number): void {
 }
 
 /** Best-effort client IP from the proxy hop. */
+/**
+ * How many proxies sit in front of this app.
+ *
+ * X-Forwarded-For is appended to by each hop, so the addresses a proxy we
+ * control wrote are the LAST ones in the list, and everything before them was
+ * supplied by the client and can say anything at all. Taking the left-most
+ * entry — which is what this did — lets anybody rotate their own rate-limit
+ * bucket with a header, which is to say it lets anybody turn the limiter off.
+ *
+ * The right entry is counted from the right: with one trusted proxy it is the
+ * last, with two the second from last. That number is a property of the
+ * deployment and nothing in the request can tell us it, so it is configuration.
+ * The default is 1, which is what a single load balancer or CDN in front of a
+ * Next.js app gives you.
+ *
+ * Setting it to 0 means the app is exposed directly and the header is not to be
+ * trusted at all.
+ */
+const TRUSTED_PROXY_HOPS = (() => {
+  const raw = process.env.TRUSTED_PROXY_HOPS;
+  if (raw === undefined) return 1;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : 1;
+})();
+
+/**
+ * The address to rate-limit against.
+ *
+ * Falls back to "unknown" when there is nothing trustworthy, and that is
+ * deliberate: every such caller then shares one bucket, which throttles them
+ * collectively rather than letting them all through. A limiter that fails open
+ * is not a limiter.
+ */
 export function clientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0]!.trim();
-  return req.headers.get("x-real-ip") ?? "unknown";
+  if (TRUSTED_PROXY_HOPS > 0) {
+    const xff = req.headers.get("x-forwarded-for");
+    if (xff) {
+      const hops = xff.split(",").map((h) => h.trim()).filter(Boolean);
+      // Count from the right. Where the header is shorter than the number of
+      // hops we expect, something is wrong with either the header or the
+      // configuration, and the left-most entry is the least-bad answer that is
+      // still bounded by the list the proxy actually wrote.
+      const ip = hops[Math.max(0, hops.length - TRUSTED_PROXY_HOPS)];
+      if (ip) return ip;
+    }
+    // Written by the proxy itself and not appended to, so it carries no
+    // client-supplied prefix to strip.
+    const real = req.headers.get("x-real-ip");
+    if (real) return real.trim();
+  }
+  return "unknown";
 }
 
 export function tooManyResponse(retryAfter: number, extraHeaders?: Record<string, string>) {
