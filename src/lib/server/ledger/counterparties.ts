@@ -1104,6 +1104,34 @@ export async function placeOnHold(opts: {
   }
 
   const at = asDate(opts.at ?? new Date());
+
+  /*
+   * There is one hold, and it lives in CreditHold.
+   *
+   * This function used to set the flag and append a note and nothing else,
+   * while credit-control.ts derives holds exclusively from CreditHold rows and
+   * never reads the flag. So a hold placed from the Customers screen produced
+   * `decision: "allow"` from creditCheck, counted as nought in the register's
+   * on-hold summary, and showed an empty hold history — while the Customers
+   * chip and checkCreditBeforeSale both honoured it. The screen stated the
+   * opposite at the moment of the act: "A hold stops the next order."
+   *
+   * Credit limits were unified when they were built — setCreditLimit mirrors
+   * onto the counterparty and limitFrom falls back to it — which made holds the
+   * inconsistent case rather than a considered difference.
+   *
+   * The import is deferred because credit-control.ts imports this module; a
+   * static import here would be a cycle. procurement.ts does the same for
+   * inventory.ts and for the same reason.
+   */
+  const { placeCreditHold } = await import("./credit-control");
+  await placeCreditHold({
+    orgId: opts.orgId, entityId: opts.entityId, partyKey: party.code,
+    reason, on: at, actorId: opts.actorId,
+  });
+
+  // The note trail belongs to the customer record and is what somebody reads
+  // on this screen; the hold row is the history the credit controller reads.
   const trail = record(party.notes, `${iso(at)} Placed on hold${who(opts.actorId)}: ${reason}`);
   const updated = await prisma.counterparty.update({
     where: { id: party.id },
@@ -1134,6 +1162,22 @@ export async function releaseHold(opts: {
   if (!party.onHold) throw new LedgerError(`${party.name} is not on hold, so there is nothing to release.`);
 
   const at = asDate(opts.at ?? new Date());
+
+  // The same single store. A release recorded on the flag alone would leave the
+  // CreditHold row open forever, and the credit controller's register would go
+  // on refusing sales this screen says are allowed.
+  const { releaseCreditHold } = await import("./credit-control");
+  await releaseCreditHold({
+    orgId: opts.orgId, entityId: opts.entityId, partyKey: party.code,
+    reason, on: at, actorId: opts.actorId,
+  }).catch((e) => {
+    // A counterparty flagged before the two stores were unified has no row to
+    // release. Clearing the flag is still the right outcome, and the backfill
+    // migration means this can only be a record created outside both paths.
+    if (e instanceof LedgerError && /not on hold/.test(e.message)) return;
+    throw e;
+  });
+
   const trail = record(
     party.notes,
     `${iso(at)} Hold released${who(opts.actorId)}: ${reason} (was held for: ${party.holdReason})`,

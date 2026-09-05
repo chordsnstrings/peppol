@@ -60,7 +60,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     await assertSameOrigin(req);
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
       action?: "create" | "update" | "send" | "accept" | "decline" | "cancel" | "convert" | "invoice" | "expire";
       entityId?: string;
@@ -72,6 +72,8 @@ export async function POST(req: Request) {
       acceptedOn?: string;
       invoiceLines?: InvoiceLineInput[];
       asOf?: string;
+      /** Accept or invoice anyway when credit refuses. The reason is recorded. */
+      overrideReason?: string;
     };
 
     const entityId = b.entityId;
@@ -96,12 +98,23 @@ export async function POST(req: Request) {
       case "cancel": {
         if (!b.orderId) return json({ error: "Which document?" }, 400);
         const args = { orgId, orderId: b.orderId, entityId };
+        // The actor comes from the session, never from the body: an override
+        // signed by whoever the client says signed it is not a control.
+        const override = b.overrideReason?.trim()
+          ? { reason: b.overrideReason.trim(), actorId: userId }
+          : null;
         const order =
           b.action === "send" ? await sendOrder(args)
-          : b.action === "accept" ? await acceptOrder({ ...args, acceptedOn: b.acceptedOn, reference: b.reference })
+          : b.action === "accept" ? await acceptOrder({ ...args, acceptedOn: b.acceptedOn, reference: b.reference, override })
           : b.action === "decline" ? await declineOrder({ ...args, reason: b.reason })
           : await cancelOrder({ ...args, reason: b.reason });
-        return json(ledgerJson({ order: { id: order.id, number: order.number, status: order.status } }));
+        return json(ledgerJson({
+          order: { id: order.id, number: order.number, status: order.status },
+          // Present on acceptance only. The screen shows the sentence whether
+          // the answer was allow, review or an override — a review nobody is
+          // shown is a review that did not happen.
+          credit: "credit" in order ? order.credit : undefined,
+        }));
       }
 
       case "convert": {
@@ -112,7 +125,10 @@ export async function POST(req: Request) {
 
       case "invoice": {
         if (!b.orderId) return json({ error: "Which order?" }, 400);
-        return json(ledgerJson(await invoiceOrder({ orgId, orderId: b.orderId, entityId, lines: b.invoiceLines })));
+        return json(ledgerJson(await invoiceOrder({
+          orgId, orderId: b.orderId, entityId, lines: b.invoiceLines,
+          override: b.overrideReason?.trim() ? { reason: b.overrideReason.trim(), actorId: userId } : null,
+        })));
       }
 
       case "expire": {

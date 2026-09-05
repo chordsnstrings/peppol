@@ -594,19 +594,139 @@ export async function sendOrder(opts: { orgId: string; orderId: string; entityId
  * the customer has never seen cannot have been agreed, and a document that has
  * expired or been declined is no longer on the table.
  */
-export async function acceptOrder(opts: { orgId: string; orderId: string; entityId?: string; acceptedOn?: Date | string; reference?: string }) {
+export async function acceptOrder(opts: {
+  orgId: string; orderId: string; entityId?: string; acceptedOn?: Date | string; reference?: string;
+  /** Accept anyway, on the record, when credit refuses. */
+  override?: { reason: string; actorId?: string } | null;
+}) {
   const order = await loadOrder(opts);
   if (order.status !== "sent") refuse(order, "accepted — only a document the customer has been sent can be accepted");
 
-  const note = opts.reference?.trim()
-    ? `Accepted${opts.acceptedOn ? ` on ${iso(asDate(opts.acceptedOn, "The acceptance date"))}` : ""}: ${opts.reference.trim()}`
-    : null;
+  // Acceptance is the commitment. It is the last point at which declining
+  // costs nothing but a conversation.
+  const gate = await creditGate({
+    orgId: opts.orgId, entityId: order.entityId,
+    customerCode: order.customerCode, customerName: order.customerName,
+    additionalMinor: BigInt(totalsOf(order.lines, (l) => l.quantityMilli).grossMinor),
+    override: opts.override,
+  });
 
-  return prisma.salesOrder.update({
+  const notes = [
+    order.notes,
+    opts.reference?.trim()
+      ? `Accepted${opts.acceptedOn ? ` on ${iso(asDate(opts.acceptedOn, "The acceptance date"))}` : ""}: ${opts.reference.trim()}`
+      : null,
+    gate.overrode
+      ? `Credit refused and was overridden${opts.override?.actorId ? ` by ${opts.override.actorId}` : ""}: ` +
+        `${opts.override?.reason?.trim()} (${gate.reasons.join(" ")})`
+      : null,
+  ].filter(Boolean).join("\n");
+
+  const updated = await prisma.salesOrder.update({
     where: { id: order.id },
-    data: { status: "accepted", notes: note ? [order.notes, note].filter(Boolean).join("\n") : order.notes },
+    data: { status: "accepted", notes: notes || order.notes },
     include: { lines: { orderBy: { lineNo: "asc" } } },
   });
+  return Object.assign(updated, { credit: gate });
+}
+
+
+/* ------------------------------------------------------------ credit gate */
+
+export interface CreditGate {
+  /** What the check said, or null where there was nobody to check against. */
+  decision: "allow" | "review" | "refuse" | "unknown";
+  headline: string;
+  reasons: string[];
+  overrode: boolean;
+}
+
+/**
+ * Ask the credit check before committing to a sale.
+ *
+ * Neither credit check had a single call site outside an advisory GET endpoint,
+ * so a customer on hold could have an order accepted and invoiced with nothing
+ * said. The same `onHold` flag *is* enforced on the supplier side —
+ * payment-runs.ts excludes a held supplier's bill from a run with a reason
+ * sentence — so this was a one-sided omission rather than a stance about
+ * controls.
+ *
+ * `creditCheck` is the one used, deliberately: it is the wider measure, adding
+ * accepted-but-uninvoiced orders to ledger exposure, which is exactly the
+ * figure that matters at the moment somebody commits to another one.
+ *
+ * Three things it does not do.
+ *
+ * It does not refuse an unrecognised customer. An order carries a free-text
+ * customer code, so "no such counterparty" means the sales team typed a name,
+ * not that the customer is bad for the money. That is a review.
+ *
+ * It does not block on `review`. Review is what a person is for, and the
+ * decision is returned so the screen can put the sentence in front of them.
+ *
+ * And an override is allowed but never silent: it takes a reason, and the
+ * reason goes on the order where the next person reads it.
+ *
+ * `postInvoice` deliberately still does not call this, and its own docstring
+ * says why — refusing to post would leave the books denying a document the
+ * customer is already holding. The gate belongs before the document exists.
+ */
+async function creditGate(opts: {
+  orgId: string;
+  entityId: string;
+  customerCode: string | null;
+  customerName: string;
+  additionalMinor: bigint;
+  override?: { reason: string; actorId?: string } | null;
+}): Promise<CreditGate> {
+  const key = (opts.customerCode ?? "").trim() || opts.customerName.trim();
+  if (!key) {
+    return {
+      decision: "unknown",
+      headline: "The document names no customer, so there is nobody to check credit against.",
+      reasons: [],
+      overrode: false,
+    };
+  }
+
+  // Deferred: credit-control.ts imports this module, so a static import here
+  // would be a cycle.
+  const { creditCheck } = await import("./credit-control");
+
+  let check;
+  try {
+    check = await creditCheck({
+      orgId: opts.orgId, entityId: opts.entityId, partyKey: key,
+      additionalMinor: opts.additionalMinor,
+    });
+  } catch (e) {
+    // An unmatched or ambiguous code is a data problem, not a credit problem.
+    return {
+      decision: "unknown",
+      headline:
+        `Credit could not be checked for "${key}": ${e instanceof Error ? e.message : "the customer could not be resolved"} ` +
+        `The order is not blocked by that — an unrecognised code means somebody typed a name, not that the ` +
+        `customer is bad for the money.`,
+      reasons: [],
+      overrode: false,
+    };
+  }
+
+  const reasons = (check.reasons ?? []).map((r: { message: string }) => r.message);
+  if (check.decision !== "refuse") {
+    return { decision: check.decision, headline: check.summary, reasons, overrode: false };
+  }
+
+  const reason = opts.override?.reason?.trim();
+  if (!reason) {
+    // `summary` already reads the reasons out; repeating them would print the
+    // same sentence twice, which is how a refusal starts being skimmed.
+    throw new LedgerError(
+      `${check.summary} Release the hold, raise the limit, or override this with a reason — an override is ` +
+        `allowed and is recorded on the order where the next person reads it.`,
+    );
+  }
+  return { decision: "refuse", headline: check.summary, reasons, overrode: true };
 }
 
 /** The customer said no: sent → declined. The reason is the useful part. */
@@ -745,6 +865,8 @@ export interface InvoiceOrderResult {
   status: SalesOrderStatus;
   /** What this instalment is worth. Nothing has been posted for it. */
   totals: OrderTotals;
+  /** What the credit check said, and whether somebody overrode it. */
+  credit: CreditGate;
   lines: {
     orderLineId: string;
     lineNo: number;
@@ -773,6 +895,8 @@ export async function invoiceOrder(opts: {
   entityId?: string;
   /** Left out, everything still outstanding is invoiced. */
   lines?: InvoiceLineInput[];
+  /** Invoice anyway, on the record, when credit refuses. */
+  override?: { reason: string; actorId?: string } | null;
 }): Promise<InvoiceOrderResult> {
   const order = await loadOrder(opts);
 
@@ -837,6 +961,36 @@ export async function invoiceOrder(opts: {
   });
   const nextStatus: SalesOrderStatus = fullyInvoiced ? "invoiced" : "part_invoiced";
 
+  const instalmentNow = requested.map((r) => ({ ...r.line, invoicedNow: r.quantityMilli }));
+
+  /*
+   * The second commitment point.
+   *
+   * Acceptance is checked against the whole order; this is checked against
+   * what is being billed now, because a customer who was inside their limit
+   * when the order was taken may not be by the third instalment. The check
+   * runs before the quantities move, so a refusal leaves the order exactly
+   * where it was rather than half-advanced.
+   */
+  const gate = await creditGate({
+    orgId: opts.orgId, entityId: order.entityId,
+    customerCode: order.customerCode, customerName: order.customerName,
+    additionalMinor: BigInt(totalsOf(instalmentNow, (l) => l.invoicedNow).grossMinor),
+    override: opts.override,
+  });
+  if (gate.overrode) {
+    await prisma.salesOrder.update({
+      where: { id: order.id },
+      data: {
+        notes: [
+          order.notes,
+          `Credit refused at invoicing and was overridden${opts.override?.actorId ? ` by ${opts.override.actorId}` : ""}: ` +
+            `${opts.override?.reason?.trim()} (${gate.reasons.join(" ")})`,
+        ].filter(Boolean).join("\n"),
+      },
+    });
+  }
+
   // The quantities and the status move together: a line advanced without the
   // status would leave an order that is fully billed still looking open, and a
   // status advanced without the quantities would let the rest be billed twice.
@@ -850,13 +1004,12 @@ export async function invoiceOrder(opts: {
     await tx.salesOrder.update({ where: { id: order.id }, data: { status: nextStatus } });
   });
 
-  const instalment = requested.map((r) => ({ ...r.line, invoicedNow: r.quantityMilli }));
-
   return {
     orderId: order.id,
     number: order.number,
     status: nextStatus,
-    totals: totalsOf(instalment, (l) => l.invoicedNow),
+    credit: gate,
+    totals: totalsOf(instalmentNow, (l) => l.invoicedNow),
     lines: requested.map((r) => ({
       orderLineId: r.line.id,
       lineNo: r.line.lineNo,

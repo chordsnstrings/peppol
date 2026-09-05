@@ -259,7 +259,15 @@ d("credit control", () => {
       },
     });
     await sendOrder({ orgId: ORG, orderId: order.id, entityId: ENT });
-    await acceptOrder({ orgId: ORG, orderId: order.id, entityId: ENT, acceptedOn: "2026-06-12" });
+    // This fixture deliberately builds a customer 208 days in arrears and then
+    // accepts an order for them, so that later assertions have committed-but-
+    // unbilled exposure to measure. Acceptance now runs the credit check and
+    // refuses exactly that — which is the control working, not the fixture
+    // being wrong — so the fixture states that it is overriding, on the record.
+    await acceptOrder({
+      orgId: ORG, orderId: order.id, entityId: ENT, acceptedOn: "2026-06-12",
+      override: { reason: "Fixture: committed exposure is what this suite measures", actorId: "fixture" },
+    });
     // A quote for the same customer, which is an offer and must not count.
     const quote = await createOrder({
       ...S,
