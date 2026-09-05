@@ -18,6 +18,19 @@ interface Contract {
   unearnedMinor: string;
   obligations: Obligation[];
 }
+interface ContractBalances {
+  from: string;
+  to: string;
+  openingAssetMinor: string;
+  closingAssetMinor: string;
+  openingLiabilityMinor: string;
+  closingLiabilityMinor: string;
+  assetMovementMinor: string;
+  liabilityMovementMinor: string;
+  basis: string;
+  /** What the module says it cannot derive, and why. Printed as written. */
+  notDerivable: string[];
+}
 interface Register {
   contracts: Contract[];
   totals: { priceMinor: string; billedMinor: string; earnedMinor: string; unearnedMinor: string };
@@ -27,16 +40,27 @@ interface Register {
     pendingAssetMinor: string; pendingLiabilityMinor: string;
     agrees: boolean; explained: boolean;
   };
+  /** Null until a period is asked for; the server only draws it with both dates. */
+  contractBalances: ContractBalances | null;
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+/** The first of January this year — the opening date of the period a close reports on. */
+const yearStart = () => `${new Date().getUTCFullYear()}-01-01`;
 const pct = (bps: number) => `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2)}%`;
 
 export default function RevenuePage() {
   const entityId = useEntityId();
   const ask = useAsk();
+  /* The period the IFRS 15.116 note is drawn for. It is not the recognition
+   * date below: one is the reporting period a disclosure covers, the other is
+   * the day a run posts as at, and conflating them would move the note every
+   * time somebody recognised something. */
+  const [from, setFrom] = React.useState(yearStart);
+  const [to, setTo] = React.useState(today);
   const { data, error, loading, reload } = useLedgerQuery<Register>(
-    entityId ? `/api/ledger/revenue?entityId=${entityId}` : null,
+    entityId ? `/api/ledger/revenue?entityId=${entityId}&from=${from}&to=${to}` : null,
+    [from, to],
   );
   const [busy, setBusy] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
@@ -222,7 +246,13 @@ export default function RevenuePage() {
             )}
           </Panel>
 
-          <ContractBalances assetMinor={rec.ledgerAssetMinor} liabilityMinor={rec.ledgerLiabilityMinor} />
+          <ContractBalancesNote
+            note={data.contractBalances}
+            from={from}
+            to={to}
+            onFrom={setFrom}
+            onTo={setTo}
+          />
 
           <Panel className="mb-4 p-4">
             <div className="sw-label">Across every contract</div>
@@ -373,73 +403,149 @@ function positionWord(c: Contract): string {
  *     deliver. Putting a paragraph number against the wrong one of those two
  *     figures is how a note stops being a note.
  */
-function ContractBalances({ assetMinor, liabilityMinor }: { assetMinor: string; liabilityMinor: string }) {
+/**
+ * IFRS 15.116(a): the contract balances at both ends of the period, and the
+ * movement between them.
+ *
+ * Read from accounts 1310 and 2310 at two dates, which is why it can be drawn
+ * at all: a contract carries what has been recognised as current state — one
+ * figure, overwritten on every progress update — so nothing on the register can
+ * say what March looked like. The postings can, because they are dated.
+ *
+ * What IFRS 15.116(b) asks for — revenue recognised in the period out of the
+ * opening contract liability — and what IFRS 15.116(c) asks for — revenue from
+ * obligations satisfied in earlier periods — is not here, and in both cases the
+ * reason is printed rather than the row being left out.
+ * Neither is derivable from how recognition posts: the run corrects each
+ * contract to what it should carry rather than posting an increment for each
+ * cause, so one entry can be a billing, a delivery and a variation at once and
+ * no posting says which of them it was. That sentence is not restated here. It
+ * comes from `contractBalancesNote`, in `notDerivable`, and is printed as the
+ * module writes it — a disclosure that says why a figure is absent is a
+ * disclosure, a missing row is only a gap somebody will read as a nil, and a
+ * copy of the reason kept on the screen is a copy that stops being true.
+ */
+function ContractBalancesNote({ note, from, to, onFrom, onTo }: {
+  note: ContractBalances | null;
+  from: string;
+  to: string;
+  onFrom: (v: string) => void;
+  onTo: (v: string) => void;
+}) {
   return (
     <Panel className="mb-4 p-4">
-      <div className="sw-label">Contract balances — IFRS 15.116</div>
-      <table className="sw-table mt-3" style={{ maxWidth: "48rem" }}>
-        <caption className="sr-only">Contract assets and contract liabilities as the ledger stands</caption>
-        <thead>
-          <tr>
-            <th />
-            <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>As the ledger stands</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
-              Contract assets <span className="sw-code sw-sub">1310</span> — earned, not yet billed
-            </th>
-            <td className="sw-num" data-testid="note-contract-asset">
-              <Figure minor={assetMinor} zero="zero" colour={false} />
-            </td>
-          </tr>
-          <tr>
-            <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
-              Contract liabilities <span className="sw-code sw-sub">2310</span> — billed, not yet earned
-            </th>
-            <td className="sw-num" data-testid="note-contract-liability">
-              <Figure minor={liabilityMinor} zero="zero" colour={false} />
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <div className="sw-label">Contract balances — IFRS 15.116</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5">
+            <span className="sw-label">Period from</span>
+            <input
+              type="date"
+              className="sw-input"
+              style={{ width: "10rem" }}
+              value={from}
+              onChange={(e) => onFrom(e.target.value)}
+              aria-label="First day of the reporting period"
+              data-testid="note-from"
+            />
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span className="sw-label">to</span>
+            <input
+              type="date"
+              className="sw-input"
+              style={{ width: "10rem" }}
+              value={to}
+              onChange={(e) => onTo(e.target.value)}
+              aria-label="Last day of the reporting period"
+              data-testid="note-to"
+            />
+          </label>
+        </div>
+      </div>
 
-      <p className="sw-sub mt-3 max-w-[78ch]">
-        Read from accounts 1310 and 2310 themselves, so these are the figures the balance sheet carries rather than a
-        summary of the register above them. Both are stated as the ledger stands today.
-      </p>
+      {!note ? (
+        <p className="sw-sub mt-3 max-w-[78ch]" data-testid="note-no-period">
+          Give the note a period and it is drawn from accounts 1310 and 2310 at both ends of it.
+        </p>
+      ) : (
+        <>
+          <div className="sw-scroll mt-3">
+            <table className="sw-table" style={{ maxWidth: "52rem" }}>
+              <caption className="sr-only">
+                Contract assets and contract liabilities at {note.from} and at {note.to}, and the movement between them
+              </caption>
+              <thead>
+                <tr>
+                  <th />
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Opening</th>
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Closing</th>
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Movement</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
+                    Contract assets <span className="sw-code sw-sub">1310</span> — earned, not yet billed
+                  </th>
+                  <td className="sw-num" data-testid="note-opening-asset">
+                    <Figure minor={note.openingAssetMinor} zero="zero" colour={false} />
+                  </td>
+                  <td className="sw-num" data-testid="note-contract-asset">
+                    <Figure minor={note.closingAssetMinor} zero="zero" colour={false} />
+                  </td>
+                  <td className="sw-num" data-testid="note-asset-movement">
+                    <Figure minor={note.assetMovementMinor} zero="zero" />
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
+                    Contract liabilities <span className="sw-code sw-sub">2310</span> — billed, not yet earned
+                  </th>
+                  <td className="sw-num" data-testid="note-opening-liability">
+                    <Figure minor={note.openingLiabilityMinor} zero="zero" colour={false} />
+                  </td>
+                  <td className="sw-num" data-testid="note-contract-liability">
+                    <Figure minor={note.closingLiabilityMinor} zero="zero" colour={false} />
+                  </td>
+                  <td className="sw-num" data-testid="note-liability-movement">
+                    <Figure minor={note.liabilityMovementMinor} zero="zero" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
 
-      <div className="sw-label mt-4">What this note does not yet carry</div>
-      <ul className="sw-sub mt-2 max-w-[78ch]" data-testid="note-gaps">
-        <li className="mt-1">
-          <strong>Opening balances, and the movement to these ones.</strong> IFRS 15.116(a) asks for both ends of the
-          reporting period. This screen has no period on it, so it states today&rsquo;s position; an opening figure
-          worked backwards from today would be an invention rather than a disclosure.
-        </li>
-        <li className="mt-1">
-          <strong>Revenue recognised in the period that was in the opening contract liability</strong> (IFRS 15.116(b)).
-          Not derivable from these books at all. Recognition corrects each contract to what it should carry rather than
-          posting an increment for each cause, so one entry can be a billing, a delivery and a variation at once and no
-          posting says which of them it was.
-        </li>
-        <li className="mt-1">
-          <strong>Revenue from obligations satisfied in earlier periods</strong> (IFRS 15.116(c)). Not derivable, for
-          the same reason.
-        </li>
-        <li className="mt-1">
-          <strong>Receivables from contracts with customers</strong>, which 15.116(a) asks for beside the two accounts
-          above. Trade receivables are not split between contract and non-contract customers anywhere in these books,
-          so nothing here can say which part of 1100 belongs in this note.
-        </li>
-        <li className="mt-1">
-          <strong>The transaction price allocated to obligations not yet satisfied</strong> (IFRS 15.120). The
-          &ldquo;still to earn&rdquo; figure above is not it: that is every contract on the register, and this
-          disclosure leaves out the cancelled and the completed, because neither has anything left to deliver. And
-          15.120(b) asks when the remainder becomes revenue, in time bands &mdash; nothing records an expected
-          completion date, so a band would be a guess wearing a disclosure&rsquo;s clothes.
-        </li>
-      </ul>
+          <p className="sw-sub mt-3 max-w-[78ch]">
+            {note.basis}. Read from accounts 1310 and 2310 themselves — the day before {note.from} and the close of{" "}
+            {note.to} — so these are the figures the balance sheet carried on those dates rather than a summary of the
+            register above them. A liability is a credit balance in the ledger and is shown here the way a note shows
+            it, as a positive obligation.
+          </p>
+
+          <div className="sw-label mt-4">What this note does not carry, and why</div>
+          <ul className="sw-sub mt-2 max-w-[78ch]" data-testid="note-gaps">
+            {note.notDerivable.map((reason) => (
+              <li key={reason} className="mt-1">{reason}</li>
+            ))}
+            {/* Two gaps the module does not speak to, because they are about
+                what this screen shows rather than about what recognition
+                posts. They read in the same voice as the list above them. */}
+            <li className="mt-1">
+              Receivables from contracts with customers, which 15.116(a) asks for beside the two accounts above. Trade
+              receivables are not split between contract and non-contract customers anywhere in these books, so nothing
+              here can say which part of 1100 belongs in this note.
+            </li>
+            <li className="mt-1">
+              The transaction price allocated to obligations not yet satisfied (IFRS 15.120). The &ldquo;still to
+              earn&rdquo; figure below is not it: that is every contract on the register, and this disclosure leaves out
+              the cancelled and the completed, because neither has anything left to deliver. And 15.120(b) asks when the
+              remainder becomes revenue, in time bands &mdash; nothing records an expected completion date, so a band
+              would be a guess wearing a disclosure&rsquo;s clothes.
+            </li>
+          </ul>
+        </>
+      )}
     </Panel>
   );
 }

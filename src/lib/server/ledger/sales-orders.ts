@@ -455,15 +455,60 @@ export interface OrderPatch {
 }
 
 /**
+ * What has already left the warehouse against these order lines.
+ *
+ * The import is deferred because deliveries.ts imports `lineNet` from this
+ * module, so a static one here would be a cycle — the same reason `creditGate`
+ * above defers credit-control.
+ */
+async function deliveredFor(orgId: string, orderLineIds: string[]): Promise<Map<string, bigint>> {
+  const { deliveredByOrderLine } = await import("./deliveries");
+  return deliveredByOrderLine({ orgId, orderLineIds });
+}
+
+/**
+ * How far down a line may be cut, and which fact decides it.
+ *
+ * Both quantities put a floor under the line on their own, so the binding one
+ * is simply the larger. Where both are non-nil the sentence names both, because
+ * somebody told only that goods have gone will credit nothing, and somebody
+ * told only that an invoice exists will credit it and find the stock still out.
+ */
+function floorOf(invoicedMilli: bigint, deliveredMilli: bigint) {
+  const delivered = deliveredMilli > invoicedMilli;
+  return {
+    milli: delivered ? deliveredMilli : invoicedMilli,
+    said:
+      invoicedMilli > 0n && deliveredMilli > 0n
+        ? `has been invoiced for ${qty(invoicedMilli)} and has had ${qty(deliveredMilli)} delivered, and the ` +
+          `${delivered ? "delivered" : "invoiced"} quantity is the binding one`
+        : delivered
+          ? `has already had ${qty(deliveredMilli)} delivered`
+          : `has already been invoiced for ${qty(invoicedMilli)}`,
+    remedy: delivered
+      ? "Take the goods back on a return note first"
+      : "Raise a credit note for the difference first",
+  };
+}
+
+/**
  * Change a document that is still in play.
  *
  * Freely, while it is a draft or has merely been sent: the customer has an
  * offer, not an agreement, and correcting a typo is not a variation. Once it
  * has been accepted the customer can still vary what they asked for, and the
  * document has to be able to say so — but no line may then be cut below what
- * has already been invoiced. That number is not an intention, it is a tax
- * invoice somebody has been sent; making the order disagree with it would leave
- * the books billing for goods the order says were never ordered.
+ * has already happened to it. Two things can have: part of it has been
+ * invoiced, and part of it has left the warehouse. Neither is an intention.
+ * The invoiced quantity is a tax invoice somebody has been sent, and making the
+ * order disagree with it would leave the books billing for goods the order says
+ * were never ordered; the delivered quantity is a lorry that has been, and
+ * cutting below it leaves a delivery note quoting a quantity its own order no
+ * longer carries. They move independently — goods go out before they are billed
+ * on a distribution business, and a deposit is invoiced before anything ships on
+ * a construction one — so the floor is the greater of the two, and the refusal
+ * says which of them it is, because an invoice is credited and goods are
+ * returned.
  *
  * A finished, refused or cancelled document is not edited at all. Its whole
  * value is that it says what it said.
@@ -493,6 +538,13 @@ export async function updateOrder(opts: {
   const byId = new Map(order.lines.map((l) => [l.id, l]));
   const patchLines = p.lines;
 
+  // What the lorries have already taken, asked once and used by both refusals
+  // below, and read before the transaction opens so a refusal leaves the order
+  // exactly where it was.
+  const delivered = patchLines
+    ? await deliveredFor(opts.orgId, order.lines.map((l) => l.id))
+    : new Map<string, bigint>();
+
   if (patchLines) {
     const seen = new Set<string>();
     for (const l of patchLines) {
@@ -507,16 +559,18 @@ export async function updateOrder(opts: {
       seen.add(l.id);
     }
 
-    // A line that has been invoiced cannot be dropped: dropping it is cutting
-    // it to nothing, and the invoice would then be for a line the order has
-    // never heard of.
+    // A line that has been invoiced or delivered cannot be dropped: dropping it
+    // is cutting it to nothing, and the invoice or the delivery note would then
+    // be for a line the order has never heard of.
     for (const line of order.lines) {
-      if (!seen.has(line.id) && line.invoicedMilli > 0n) {
-        throw new LedgerError(
-          `Line ${line.lineNo} of ${order.number} (${line.description}) has already been invoiced for ${qty(line.invoicedMilli)}, so it cannot be taken off the order. ` +
-            `Credit the invoice first, or leave the line where it is.`,
-        );
-      }
+      if (seen.has(line.id)) continue;
+      const gone = delivered.get(line.id) ?? 0n;
+      if (line.invoicedMilli === 0n && gone === 0n) continue;
+      const floor = floorOf(line.invoicedMilli, gone);
+      throw new LedgerError(
+        `Line ${line.lineNo} of ${order.number} (${line.description}) ${floor.said}, so it cannot be taken off the order. ` +
+          `${floor.remedy}, or leave the line where it is.`,
+      );
     }
   }
 
@@ -539,11 +593,15 @@ export async function updateOrder(opts: {
           discountBps: input.discountBps ?? existing?.discountBps ?? 0,
         });
 
-        if (existing && prepared.quantityMilli < existing.invoicedMilli) {
-          throw new LedgerError(
-            `Line ${existing.lineNo} of ${order.number} (${existing.description}) has already been invoiced for ${qty(existing.invoicedMilli)}, ` +
-              `so its quantity cannot be cut to ${qty(prepared.quantityMilli)}. Raise a credit note for the difference first, or leave the line at ${qty(existing.invoicedMilli)} or more.`,
-          );
+        if (existing) {
+          const floor = floorOf(existing.invoicedMilli, delivered.get(existing.id) ?? 0n);
+          if (prepared.quantityMilli < floor.milli) {
+            throw new LedgerError(
+              `Line ${existing.lineNo} of ${order.number} (${existing.description}) ${floor.said}, ` +
+                `so its quantity cannot be cut to ${qty(prepared.quantityMilli)}. ${floor.remedy}, or leave the line at ` +
+                `${qty(floor.milli)} or more.`,
+            );
+          }
         }
 
         if (existing) {
@@ -1202,6 +1260,13 @@ export interface OrderDetail {
     netMinor: string;
     invoicedMilli: string;
     invoicedNetMinor: string;
+    /**
+     * What has left the warehouse against this line, across every delivery note
+     * that is not cancelled. It is here because it is a floor on the quantity —
+     * `updateOrder` refuses a cut below it — and an editor that cannot see the
+     * figure cannot warn about it before the round trip.
+     */
+    deliveredMilli: string;
     remainingMilli: string;
     remainingNetMinor: string;
   }[];
@@ -1216,6 +1281,8 @@ export interface OrderDetail {
 export async function orderDetail(opts: { orgId: string; orderId: string; entityId?: string; asOf?: Date | string }): Promise<OrderDetail> {
   const order = await loadOrder(opts);
   const asOf = opts.asOf ? asDate(opts.asOf, "The as-at date") : new Date();
+
+  const delivered = await deliveredFor(opts.orgId, order.lines.map((l) => l.id));
 
   return {
     id: order.id,
@@ -1246,6 +1313,7 @@ export async function orderDetail(opts: { orgId: string; orderId: string; entity
         netMinor: lineNet(l.unitPriceMinor, l.quantityMilli, l.discountBps).toString(),
         invoicedMilli: l.invoicedMilli.toString(),
         invoicedNetMinor: lineNet(l.unitPriceMinor, l.invoicedMilli, l.discountBps).toString(),
+        deliveredMilli: (delivered.get(l.id) ?? 0n).toString(),
         remainingMilli: remainingMilli.toString(),
         remainingNetMinor: lineNet(l.unitPriceMinor, remainingMilli, l.discountBps).toString(),
       };

@@ -7,6 +7,7 @@ import { ledgerJson } from "@/lib/server/ledger/serialize";
 import {
   createContract, modifyContract, recordBilling, satisfyObligation, setProgress,
   cancelContract, runRecognition, runRecognitionAll, contractRegister, contractDetail,
+  contractBalancesNote,
   type NewContract,
 } from "@/lib/server/ledger/revenue";
 
@@ -15,6 +16,13 @@ export const runtime = "nodejs";
 /**
  * The contract register with the ledger balances it should agree with, or one
  * contract in full when a code is given.
+ *
+ * With a from/to pair the IFRS 15.116 contract balances note comes back beside
+ * the register. It is a period disclosure and the register is a position, so
+ * the two are served together rather than from two round trips: the note's
+ * closing balances and the register's ledger column are read from the same two
+ * accounts, and a screen that fetched them separately could draw a closing
+ * figure that disagreed with the balance printed above it.
  */
 export async function GET(req: Request) {
   try {
@@ -22,12 +30,20 @@ export async function GET(req: Request) {
     const params = new URL(req.url).searchParams;
     const entityId = params.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
-    /* The register and its ledger balances are a report. */
+    /* The register and its ledger balances are a report. So is the note: it is
+     * the same two accounts read at two dates. */
     await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const code = params.get("code");
     if (code) return json(ledgerJson(await contractDetail({ orgId, entityId, code })));
-    return json(ledgerJson(await contractRegister({ orgId, entityId })));
+
+    const from = params.get("from");
+    const to = params.get("to");
+    const register = await contractRegister({ orgId, entityId });
+    return json(ledgerJson({
+      ...register,
+      contractBalances: from && to ? await contractBalancesNote({ orgId, entityId, from, to }) : null,
+    }));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);

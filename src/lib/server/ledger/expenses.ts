@@ -307,6 +307,38 @@ export async function addLine(opts: { orgId: string; claimId: string; line: NewC
   return prisma.expenseClaimLine.create({ data: { orgId: opts.orgId, claimId: claim.id, ...line } });
 }
 
+/**
+ * Correct a receipt that is already on a draft claim.
+ *
+ * There was no verb for this. `addLine` and `removeLine` were the only two, so
+ * a mistyped amount meant taking the line off and keying the whole receipt
+ * again — the date, the account, the supplier's TRN and the recoverable flag
+ * along with the one figure that was wrong. That is not a small inconvenience:
+ * it is how a valid TRN gets dropped on the way back in, and with it the input
+ * tax the receipt entitled the business to.
+ *
+ * Same validation as `addLine`, through the same `prepareLine`, and the same
+ * guard: only a draft claim can be changed, because an approver has to see the
+ * claim the claimant submitted. Editing a submitted line in place is precisely
+ * what that control exists to prevent, so this refuses it exactly as `addLine`
+ * and `removeLine` do.
+ *
+ * The whole line is replaced rather than patched a field at a time. A receipt
+ * is one fact — this amount, this tax, this supplier, recoverable or not — and
+ * a partial update could leave recoverable VAT standing against a TRN that the
+ * same edit had just taken away.
+ */
+export async function updateLine(opts: {
+  orgId: string; claimId: string; lineId: string; line: NewClaimLine;
+}) {
+  const claim = await loadClaim(opts.orgId, opts.claimId);
+  assertDraft(claim);
+  const existing = claim.lines.find((l) => l.id === opts.lineId);
+  if (!existing) throw new LedgerError(`Claim ${claim.reference} has no line ${opts.lineId}.`);
+  const line = prepareLine(claim.reference, opts.line);
+  return prisma.expenseClaimLine.update({ where: { id: existing.id }, data: line });
+}
+
 /** Take a receipt back off a draft claim. */
 export async function removeLine(opts: { orgId: string; claimId: string; lineId: string }) {
   const claim = await loadClaim(opts.orgId, opts.claimId);

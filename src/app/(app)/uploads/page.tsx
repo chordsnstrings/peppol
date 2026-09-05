@@ -13,14 +13,13 @@ import {
   Sparkles,
   Wand2,
   PartyPopper,
-  Send,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
 import { validateInvoice } from "@/lib/domain/validation";
 import { useAppState } from "@/lib/app-state";
-import { persistInvoice, sendInvoice } from "@/lib/db/repo";
+import { persistInvoice } from "@/lib/db/repo";
 import {
   parseFile,
   guessMapping,

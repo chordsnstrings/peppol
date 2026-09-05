@@ -14,13 +14,59 @@ export const runtime = "nodejs";
  * the guard that stops a tenant fabricating payment/compliance state in their own
  * records. Payment state and (post-send) transmission status come only from the
  * server pipelines, never a client write.
+ *
+ * Two stores need the guard for opposite reasons. On `invoices` the tenant owns
+ * the document and the server owns what has happened to it, so the server's
+ * fields are pinned onto whatever the client posts. On `inbound` the tenant owns
+ * nothing but their own answer: every other field is the provenance of a
+ * document somebody else sent them, so the direction is reversed and the body is
+ * read for one field only.
  */
 /** Lifecycle states only ever reached via the server send pipeline. */
 const SERVER_LIFECYCLE = new Set(["QUEUED", "SENDING", "SENT", "DELIVERED", "COMPLETED", "FAILED"]);
 
+/**
+ * Where an invoice may be taken by a client write.
+ *
+ * READY is not in it. Finalising is where the credit limit is checked
+ * (`/api/ledger/credit-control/invoice`), and a transition a client can make
+ * for itself on this route is a check the busy day skips — so the editor saves
+ * the document and the gated route moves it. CANCELLED stays, because
+ * abandoning a draft commits nothing and needs no permission.
+ */
+const CLIENT_LIFECYCLE = new Set(["DRAFT", "CANCELLED"]);
+
+/** The four answers `InboundDoc.buyerAction` has. Anything else is not a state. */
+const BUYER_ACTIONS = new Set(["NONE", "ACKNOWLEDGED", "EXPORTED", "DISPUTED"]);
+
 function sanitizeRecord(store: string, body: Record<string, unknown>, prev: Record<string, unknown> | null): Record<string, unknown> {
   const clean = { ...body };
   delete clean.orgId; // always re-stamped from the session
+
+  if (store === "inbound") {
+    /* An arrival is not a record a tenant writes. It is the account of what a
+     * supplier sent them, written by the receiving pipeline in inbound.ts: the
+     * gateway's delivery reference, both participant ids, the document type,
+     * the XML and its hash, the issues found in it, whether a simulator
+     * produced it, the note saying so — and the decision, whose `transmitted`
+     * is the one field on this row that claims something about the outside
+     * world. A client that re-posted a record it holds could flip every one of
+     * them, and the prize is a business able to show that it rejected a
+     * supplier's invoice and told them so.
+     *
+     * So the row stands as the server left it and only `buyerAction` is taken
+     * from the body — whether the recipient has dealt with it, which is theirs
+     * to say and claims nothing about the network. `prev` is never null: POST
+     * refuses a create on this store, because an arrival nobody delivered is
+     * the forgery in its purest form.
+     */
+    const asked = String(body.buyerAction ?? "");
+    return {
+      ...(prev ?? {}),
+      id: body.id,
+      buyerAction: BUYER_ACTIONS.has(asked) ? asked : (prev?.buyerAction ?? "NONE"),
+    };
+  }
 
   if (store === "invoices") {
     // Payment/AR fields: only the payment webhook / mark-paid routes set these.
@@ -38,17 +84,23 @@ function sanitizeRecord(store: string, body: Record<string, unknown>, prev: Reco
     clean.deliveredAt = prev?.deliveredAt;
     clean.reportedAt = prev?.reportedAt;
 
-    // Lifecycle: a server-terminal state (SENT…COMPLETED) is only ever reached via
-    // the send pipeline. If already there it's pinned; the client may otherwise
-    // transition DRAFT ↔ READY ↔ CANCELLED but can never jump straight to a
-    // sent/terminal state on its own record.
+    // When a document was locked is written by the transition that locked it —
+    // finalisation, or the send pipeline — and never by the editor saving it.
+    clean.lockedAt = prev?.lockedAt;
+
+    // Lifecycle: a server-terminal state (SENT…COMPLETED) is only ever reached
+    // via the send pipeline, and READY only via the finalisation route. If the
+    // row is already in a server state it is pinned there; otherwise the client
+    // may move it between the states it owns, and an attempt to enter one it
+    // does not own leaves the row where it was rather than failing the save —
+    // the editor is posting a whole document, and refusing the write would lose
+    // the lines somebody just typed over a field they never touched.
     const prevLc = prev ? String(prev.lifecycleStatus) : null;
+    const asked = String(clean.lifecycleStatus);
     if (prevLc && SERVER_LIFECYCLE.has(prevLc)) {
       clean.lifecycleStatus = prev!.lifecycleStatus;
-      clean.lockedAt = prev!.lockedAt;
-    } else if (SERVER_LIFECYCLE.has(String(clean.lifecycleStatus))) {
+    } else if (asked !== prevLc && !CLIENT_LIFECYCLE.has(asked)) {
       clean.lifecycleStatus = prevLc ?? "DRAFT";
-      if (!prev) clean.lockedAt = undefined;
     }
   }
   return clean;
@@ -110,6 +162,19 @@ export async function POST(req: Request, ctx: { params: Promise<{ store: string 
       !gatewayIsLive()
     ) {
       return json({ error: SIMULATED_ACTIVATION_BLOCK }, 409);
+    }
+
+    /* A document arrives; it is not created. Every inbound row is written by
+     * the receiving pipeline out of a delivery the gateway made, so a POST for
+     * an id that does not exist yet is a tenant inventing a supplier's invoice
+     * — and unlike the fields the sanitizer pins, there is nothing here to pin
+     * it back to. Refused rather than quietly emptied, because a row that says
+     * nothing would still sit in somebody's inbox. */
+    if (store === "inbound" && !prev) {
+      return json(
+        { error: "An inbound document is written when one is delivered to you. It cannot be created here." },
+        403,
+      );
     }
 
     const clean = sanitizeRecord(store, body, prev);

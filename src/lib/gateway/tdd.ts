@@ -1,5 +1,5 @@
-import { minorToMajor } from "@/lib/domain/money";
-import { DOC_TYPE_LABEL } from "@/lib/domain/tax";
+import { convertMinorAtRate, minorToMajor } from "@/lib/domain/money";
+import { aedTaxTotals, DOC_TYPE_LABEL } from "@/lib/domain/tax";
 import type { Invoice } from "@/lib/domain/types";
 import { createHash } from "node:crypto";
 
@@ -24,18 +24,68 @@ function amt(minor: number): string {
 
 export function buildTDD(invoice: Invoice, ublXml: string): string {
   const docHash = createHash("sha256").update(ublXml, "utf8").digest("hex");
-  const rateToAED = invoice.fx ? Number(invoice.fx.rateToAED) : 1;
-  const aed = (minor: number) => amt(Math.round(minor * rateToAED));
+  // The same derivation the exchanged UBL and the printed invoice use, so the
+  // reporting leg cannot state a different tax in AED from the document it
+  // reports on. It is defined only where the document is in another currency
+  // AND carries a rate this product can convert at.
+  const aed = aedTaxTotals(invoice);
+  const alreadyAED = invoice.currency === "AED";
+
+  /**
+   * One amount of the document, stated in AED.
+   *
+   * The conversion goes through `convertMinorAtRate` — whole minor units at the
+   * exact decimal rate — because that is what the UBL uses, and the
+   * `Math.round(minor * Number(rate))` this used to be diverges from it by a
+   * fils at ordinary rates: 1.80 of tax at 1.025 is 1.845, which is 1.85 here
+   * and was 1.84 there, and so are 88.25 at 2.260 and 539.05 at 8.700. Two
+   * statements of the same supply to the same authority, a fils apart.
+   *
+   * Undefined where the figure cannot be stated at all. That is a document in
+   * another currency carrying no usable rate, and it used to convert at an
+   * implied 1 — which filed the foreign-currency figure with the FTA under an
+   * AED label, so a hundred dollars of tax was reported as a hundred dirhams.
+   * Nought is the one amount that survives a missing rate, because nought
+   * converts to nought at every rate; that is what lets a zero-rated export
+   * still report its nil tax while its taxable amount goes unstated.
+   */
+  const inAED = (minor: number): string | undefined => {
+    if (alreadyAED) return amt(minor);
+    if (aed) {
+      const converted = convertMinorAtRate(minor, aed.rateToAED);
+      return converted === undefined ? undefined : amt(converted);
+    }
+    return minor === 0 ? amt(0) : undefined;
+  };
+
+  /** The element, or nothing at all where the figure cannot be stated. */
+  const element = (tag: string, minor: number, indent: string): string => {
+    const value = inAED(minor);
+    return value === undefined ? "" : `${indent}<${tag}>${value}</${tag}>`;
+  };
 
   const breakdown = invoice.totals.perCategory
-    .map(
-      (c) => `    <TaxSubtotal>
-      <Category>${esc(c.categoryCode)}</Category>
-      <RatePercent>${c.ratePercent.toFixed(2)}</RatePercent>
-      <TaxableAmountAED>${aed(c.taxableMinor)}</TaxableAmountAED>
-      <TaxAmountAED>${aed(c.vatMinor)}</TaxAmountAED>
-    </TaxSubtotal>`,
+    .map((c) =>
+      [
+        `    <TaxSubtotal>`,
+        `      <Category>${esc(c.categoryCode)}</Category>`,
+        `      <RatePercent>${c.ratePercent.toFixed(2)}</RatePercent>`,
+        element("TaxableAmountAED", c.taxableMinor, "      "),
+        element("TaxAmountAED", c.vatMinor, "      "),
+        `    </TaxSubtotal>`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
     )
+    .join("\n");
+
+  const summary = [
+    breakdown,
+    element("TotalTaxableAED", invoice.totals.taxExclusiveMinor, "    "),
+    element("TotalTaxAED", invoice.totals.vatMinor, "    "),
+    element("TotalPayableAED", invoice.totals.taxInclusiveMinor, "    "),
+  ]
+    .filter(Boolean)
     .join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -51,7 +101,7 @@ export function buildTDD(invoice: Invoice, ublXml: string): string {
     <IssueDate>${invoice.issueDate}</IssueDate>
     <SupplyDate>${invoice.supplyDate}</SupplyDate>
     <DocumentCurrency>${esc(invoice.currency)}</DocumentCurrency>
-    ${invoice.fx ? `<AEDConversionRate>${esc(invoice.fx.rateToAED)}</AEDConversionRate>` : ""}
+    ${aed ? `<AEDConversionRate>${esc(aed.rateToAED)}</AEDConversionRate>` : ""}
   </Invoice>
   <Seller>
     <Name>${esc(invoice.seller.nameEn)}</Name>
@@ -64,10 +114,7 @@ export function buildTDD(invoice: Invoice, ublXml: string): string {
     <PeppolID>${esc(invoice.buyer.peppolId)}</PeppolID>
   </Buyer>
   <TaxSummary>
-${breakdown}
-    <TotalTaxableAED>${aed(invoice.totals.taxExclusiveMinor)}</TotalTaxableAED>
-    <TotalTaxAED>${aed(invoice.totals.vatMinor)}</TotalTaxAED>
-    <TotalPayableAED>${aed(invoice.totals.taxInclusiveMinor)}</TotalPayableAED>
+${summary}
   </TaxSummary>
 </TaxDataDocument>`;
 }

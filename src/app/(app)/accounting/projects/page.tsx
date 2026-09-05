@@ -36,12 +36,18 @@ interface Wip {
   totalCostMinor: string; totalInvoicedMinor: string; totalWipMinor: string;
   excludedStatuses: string[];
 }
+interface BudgetRevision {
+  id: string; priorMinor: string; budgetMinor: string; movementMinor: string;
+  reason: string; revisedBy: string | null; revisedAt: string;
+}
 interface Profitability {
   code: string; name: string; customerName: string | null; status: string;
   startsOn: string; endsOn: string | null; from: string; to: string; currency: string;
   revenueMinor: string; costMinor: string; grossProfitMinor: string; grossMarginBps: string | null;
   budgetMinor: string; hasBudget: boolean; spentMinor: string; remainingMinor: string;
   percentOfBudgetBps: string | null; overBudget: boolean; overBudgetByMinor: string;
+  /** Most recent first. Empty is not proof it never moved — see BudgetHistory. */
+  budgetRevisions: BudgetRevision[];
   reconciles: boolean; differenceMinor: string;
 }
 interface DetailLine {
@@ -174,24 +180,21 @@ export default function ProjectsPage() {
             detail={oneQ.data.detail}
             busy={busy === `close:${oneQ.data.profitability.code}`}
             revising={busy === `budget:${oneQ.data.profitability.code}`}
-            onRevise={async (code, budgetMinor) => {
+            onRevise={async (code, budgetMinor, reason) => {
               const p = oneQ.data!.profitability!;
-              const ok = await act(`budget:${code}`, { action: "update", code, budgetMinor });
+              const ok = await act(`budget:${code}`, { action: "update", code, budgetMinor, reason });
               // The panel stays open on a refusal, with the figure still typed
               // in it: the answer to "that is not an amount I can read" is to
               // correct it, not to key the whole thing again.
               if (!ok) return false;
-              /* Both figures, named. The old one is about to stop existing —
-               * the project row holds a single budget — so this sentence is
-               * the only record of what it was that anybody will be handed. */
               const was = fmtMinor(p.budgetMinor, p.currency, { zero: "zero" });
               const now = fmtMinor(budgetMinor, p.currency, { zero: "zero" });
               const moved = BigInt(budgetMinor) - BigInt(p.budgetMinor);
               setMsg(
                 `${code} was budgeted at ${was} and is now budgeted at ${now} — ` +
                   `${moved > 0n ? "an increase" : "a reduction"} of ${fmtMinor(moved < 0n ? -moved : moved, p.currency, { zero: "zero" })}. ` +
-                  `Cost of ${fmtMinor(p.spentMinor, p.currency, { zero: "zero" })} is measured against the new figure from now on; ` +
-                  `the old one is not kept anywhere, so record what was agreed where it will be found.`,
+                  `Cost of ${fmtMinor(p.spentMinor, p.currency, { zero: "zero" })} is measured against the new figure from now on, ` +
+                  `and both figures are kept with the reason in the revision history below.`,
               );
               return true;
             }}
@@ -345,14 +348,25 @@ function OneProject({
   revising: boolean;
   onClose: (code: string) => void;
   /** True once the new figure is on the project. False leaves the panel open. */
-  onRevise: (code: string, budgetMinor: string) => Promise<boolean>;
+  onRevise: (code: string, budgetMinor: string, reason: string) => Promise<boolean>;
 }) {
   const [budgeting, setBudgeting] = React.useState(false);
+  /*
+   * Why the budget is moving.
+   *
+   * The database will not take a revision without one — `ProjectBudgetRevision`
+   * has a CHECK that the reason is not blank — and `updateProject` refuses
+   * before the write so the message names the job rather than a constraint.
+   * Asking here, beside the figure, is what makes that refusal avoidable rather
+   * than something the reader discovers after typing.
+   */
+  const [reason, setReason] = React.useState("");
+  const [asked, setAsked] = React.useState(false);
 
   /* The panel follows the selection. Leaving it open across a change of
    * project would put one job's figures under another job's heading, which is
    * the one mistake a job-costing screen cannot afford to make. */
-  React.useEffect(() => setBudgeting(false), [p.code]);
+  React.useEffect(() => { setBudgeting(false); setReason(""); setAsked(false); }, [p.code]);
 
   return (
     <Panel className="overflow-hidden">
@@ -410,24 +424,61 @@ function OneProject({
       )}
 
       {budgeting && (
-        <ProjectBudgetRevision
-          project={{
-            code: p.code,
-            name: p.name,
-            currency: p.currency,
-            budgetMinor: p.budgetMinor,
-            // The report's own figure, not a second definition of what was
-            // spent: `spentMinor` is exactly `costMinor` on the server.
-            spentMinor: p.spentMinor,
-            hasBudget: p.hasBudget,
-          }}
-          busy={revising}
-          onCancel={() => setBudgeting(false)}
-          onRevise={async (budgetMinor) => {
-            if (await onRevise(p.code, budgetMinor)) setBudgeting(false);
-          }}
-        />
+        <>
+          <div className="px-3 pt-3">
+            <label className="block">
+              <span className="sw-label">Why the budget is changing</span>
+              <span className="mt-1 block">
+                <input
+                  className={`sw-input ${asked && !reason.trim() ? "sw-cell-invalid" : ""}`}
+                  style={{ width: "min(38rem, 100%)" }}
+                  value={reason}
+                  placeholder="Variation 3 agreed with the client, 12 March"
+                  aria-invalid={(asked && !reason.trim()) || undefined}
+                  aria-label={`Why the budget on ${p.code} is changing`}
+                  onChange={(e) => setReason(e.target.value)}
+                  data-testid="budget-reason"
+                />
+              </span>
+            </label>
+            <p className="sw-sub mt-1 max-w-[78ch]">
+              Required, and kept with both figures in the history below. A budget that moved with nothing said about
+              why makes an overspend disappear instead of explaining it.
+              {asked && !reason.trim() && (
+                <span className="sw-error" data-testid="budget-reason-missing">
+                  {" "}Write the reason before revising the figure.
+                </span>
+              )}
+            </p>
+          </div>
+
+          <ProjectBudgetRevision
+            project={{
+              code: p.code,
+              name: p.name,
+              currency: p.currency,
+              budgetMinor: p.budgetMinor,
+              // The report's own figure, not a second definition of what was
+              // spent: `spentMinor` is exactly `costMinor` on the server.
+              spentMinor: p.spentMinor,
+              hasBudget: p.hasBudget,
+            }}
+            busy={revising}
+            onCancel={() => { setBudgeting(false); setReason(""); setAsked(false); }}
+            onRevise={async (budgetMinor) => {
+              setAsked(true);
+              if (!reason.trim()) return;
+              if (await onRevise(p.code, budgetMinor, reason.trim())) {
+                setBudgeting(false);
+                setReason("");
+                setAsked(false);
+              }
+            }}
+          />
+        </>
       )}
+
+      <BudgetHistory project={p} />
 
       {detail && (
         <div className="sw-scroll" style={{ borderTop: "1px solid var(--sw-line)" }}>
@@ -600,6 +651,79 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="sw-label">{label}</span>
       {children}
     </label>
+  );
+}
+
+/**
+ * What the job has been quoted at, over time.
+ *
+ * The budget is one column on the project and a revision replaces it, so
+ * without this the figure every percentage is measured against could move
+ * overnight with nothing to explain it — and an overspend would vanish at the
+ * moment somebody raised the number. Each revision now keeps both figures and
+ * the reason, and this is where they are read.
+ *
+ * An empty list is drawn as "nothing recorded", never as "never revised". The
+ * history begins where the table begins: a job set up before it existed may
+ * carry a budget that was changed and cannot say so, and claiming otherwise
+ * would be a reassurance nothing behind this screen can honour.
+ */
+function BudgetHistory({ project }: { project: Profitability }) {
+  const revisions = project.budgetRevisions;
+  return (
+    <div className="p-3" style={{ borderTop: "1px solid var(--sw-line)" }} data-testid="budget-history">
+      <div className="sw-label">Budget revisions</div>
+      {revisions.length === 0 ? (
+        <p className="sw-sub mt-1 max-w-[78ch]" data-testid="budget-history-empty">
+          No revision has been recorded against {project.code}. That is not the same as the budget never having
+          moved: revisions are only kept from the day this history was added, and a change made before that
+          overwrote the figure and left nothing behind.
+        </p>
+      ) : (
+        <>
+          <div className="sw-scroll mt-2">
+            <table className="sw-table" style={{ maxWidth: "60rem" }}>
+              <caption className="sr-only">
+                Every recorded revision to the budget on {project.code}, most recent first
+              </caption>
+              <thead>
+                <tr>
+                  <th style={{ width: "11rem" }}>Revised</th>
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>From</th>
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>To</th>
+                  <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Movement</th>
+                  <th style={{ width: "10rem" }}>By</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                {revisions.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.revisedAt.slice(0, 10)}</td>
+                    <td className="sw-num">
+                      <Figure minor={r.priorMinor} currency={project.currency} zero="zero" colour={false} />
+                    </td>
+                    <td className="sw-num">
+                      <Figure minor={r.budgetMinor} currency={project.currency} zero="zero" colour={false} />
+                    </td>
+                    <td className="sw-num">
+                      <Figure minor={r.movementMinor} currency={project.currency} zero="zero" />
+                    </td>
+                    <td className="truncate">{r.revisedBy ?? <span className="sw-zero">not recorded</span>}</td>
+                    <td className="max-w-0 truncate" title={r.reason}>{r.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="sw-sub mt-2 max-w-[78ch]">
+            The budget on this job now stands at{" "}
+            <Figure minor={project.budgetMinor} currency={project.currency} zero="zero" colour={false} />. Cost is
+            measured against that figure, and the ones above it are what it was measured against before.
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 

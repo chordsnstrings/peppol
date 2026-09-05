@@ -152,12 +152,22 @@ export default function InvoicesPage() {
     if (!currentEntity || sendable.length === 0) return;
     setBusy(true);
     let ok = 0;
+    /* Why the first refusal is kept rather than counted.
+     *
+     * A send can now be stopped by the credit gate, which the pipeline applies
+     * to every draft that goes through it — and a credit refusal is not a
+     * document fault: it is not in the fix-it queue, nothing in the invoice
+     * needs correcting, and it names a customer, a limit and who may let it
+     * through. Reporting it as "they have issues" would send somebody to the
+     * wrong screen to look for a fault that is not there. */
+    let firstProblem: string | null = null;
     for (const inv of sendable) {
       try {
         await sendInvoice(inv, currentEntity);
         ok++;
-      } catch {
-        /* validation blocked — surfaced in fix-it */
+      } catch (e) {
+        const issues = (e as { issues?: unknown }).issues;
+        if (!issues && e instanceof Error) firstProblem ??= e.message;
       }
     }
     setBusy(false);
@@ -178,7 +188,9 @@ export default function InvoicesPage() {
       }
     }
     if (ok < sendable.length)
-      toast.warning(`${sendable.length - ok} couldn't be sent`, { description: "They have issues — see the fix-it queue." });
+      toast.warning(`${sendable.length - ok} couldn't be sent`, {
+        description: firstProblem ?? "They have issues — see the fix-it queue.",
+      });
   };
 
   /**

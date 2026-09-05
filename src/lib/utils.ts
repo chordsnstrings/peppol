@@ -46,15 +46,45 @@ export function timeAgo(value?: string | number | Date | null, locale = "en") {
   return formatDate(d);
 }
 
-/** Today's date as YYYY-MM-DD in Asia/Dubai calendar terms (approx via local). */
+/**
+ * The offset the books are kept at. The UAE observes no daylight saving, so
+ * UTC+4 is a fixed offset all year and not an approximation of one; the server
+ * keeps its own copy of this in `businessDay()` in the petty cash module, and
+ * the two have to agree or a screen offers a date its own ledger would date
+ * differently.
+ */
+const BUSINESS_UTC_OFFSET_MINUTES = 4 * 60;
+
+/**
+ * Today's date as YYYY-MM-DD, on the Gulf calendar the books are kept on.
+ *
+ * This used to slice `new Date().toISOString()`, which is UTC and not local at
+ * all: between midnight and four in the morning here it is still yesterday in
+ * UTC. Every date field that defaults from this — an invoice issue date, a
+ * receipt, a payment, a petty cash chit — pre-filled the previous day for
+ * anybody working late, and the previous day can be in the previous VAT
+ * quarter or in a period that has since been closed.
+ *
+ * Shifting the instant by the offset and then reading its UTC calendar day is
+ * the whole of it: what comes back is the date somebody in Dubai would write
+ * down.
+ */
 export function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  return new Date(Date.now() + BUSINESS_UTC_OFFSET_MINUTES * 60_000).toISOString().slice(0, 10);
 }
 
-/** Add days to an ISO date, returning YYYY-MM-DD. */
+/**
+ * Add days to an ISO date, returning YYYY-MM-DD.
+ *
+ * The arithmetic is done in UTC because the input is a plain date and so is the
+ * answer — no clock belongs anywhere near it. Parsing "2026-01-01T00:00:00" as
+ * a local instant and then printing it back through `toISOString()` returns the
+ * day before for every reader east of Greenwich, which is every reader of this
+ * product: local midnight in Dubai is 20:00 UTC on the previous day.
+ */
 export function addDays(iso: string, days: number): string {
-  const d = new Date(iso + "T00:00:00");
-  d.setDate(d.getDate() + days);
+  const d = new Date(`${iso.slice(0, 10)}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 

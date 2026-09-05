@@ -180,6 +180,33 @@ d("fixed assets", () => {
     expect(byCode["6900"]).toBe(1_600_000n);     // Dr loss on disposal
   });
 
+  it("says on the register when a disposed asset went and what it fetched", async () => {
+    const reg = await assetRegister({ orgId: ORG, entityId: ENT });
+    const van = reg.assets.find((a) => a.code === "FA-001")!;
+    expect(van.status).toBe("disposed");
+    // The disposal entry takes the cost and the depreciation back out of the
+    // ledger, so the register row is the only place left that can say when the
+    // van went and what it fetched. Without these two it said neither, and a
+    // status chip is not an answer to either question.
+    expect(van.disposedOn).toBe("2026-04-10");
+    expect(van.proceedsMinor).toBe("10000000");
+
+    // An asset still held carries neither — not an empty string, and not a
+    // zero, which would read as "sold for nothing".
+    const future = reg.assets.find((a) => a.code === "FA-FUTURE")!;
+    expect(future.disposedOn).toBeNull();
+    expect(future.proceedsMinor).toBeNull();
+
+    // And drawn at a date before the sale, the van had not been sold: it is on
+    // the register as active, and carrying the date or the proceeds onto that
+    // row would date a disposal into a year that never saw it.
+    const before = await assetRegister({ orgId: ORG, entityId: ENT, asOf: "2026-03-31" });
+    const earlier = before.assets.find((a) => a.code === "FA-001")!;
+    expect(earlier.status).toBe("active");
+    expect(earlier.disposedOn).toBeNull();
+    expect(earlier.proceedsMinor).toBeNull();
+  });
+
   it("will not dispose of the same asset twice", async () => {
     await expect(disposeAsset({
       orgId: ORG, entityId: ENT, assetCode: "FA-001",

@@ -1027,7 +1027,13 @@ const dunningSource: Source = {
   key: "dunning",
   label: "Customers who are late",
   async run(ctx) {
-    const plan = await dunningPlan({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    // Through the shared reads, so the receivables ageing this needs is the one
+    // the attention list has already asked for at the same date. Both are right
+    // to net the control account — it is the only place the answer lives — and
+    // neither could see the other doing it.
+    const plan = await dunningPlan({
+      orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf, reads: ctx.reads,
+    });
     const actionable = plan.rows.filter((r) => !r.suppressed);
     if (actionable.length === 0) return [];
 

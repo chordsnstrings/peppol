@@ -15,6 +15,7 @@ import {
   projectSummary,
   workInProgress,
   projectDetail,
+  budgetHistory,
 } from "@/lib/server/ledger/projects";
 
 const db = new PrismaClient();
@@ -35,6 +36,7 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "ProjectBudgetRevision" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Project" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "DimensionValue" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Dimension" WHERE "orgId" = '${ORG}'`),
@@ -464,5 +466,100 @@ d("projects and job costing", () => {
 
     await expect(updateProject({ ...E, code: "SITE_E", status: "finished" })).rejects.toThrow(/active, on_hold, complete, cancelled/);
     await expect(updateProject({ ...E, code: "SITE_E", status: "complete" })).rejects.toThrow(/without the date it finished/i);
+  });
+
+  /* ------------------------------------------------- revising the budget --- */
+
+  it("changes everything but the budget without asking for a reason", async () => {
+    const before = await projectProfitability({ ...E, projectCode: "SITE_B", from: FEB.from, to: FEB.to });
+    await updateProject({ ...E, code: "SITE_B", customerName: "Emaar Properties" });
+    expect(await budgetHistory({ ...E, code: "SITE_B" })).toEqual([]);
+    const after = await projectProfitability({ ...E, projectCode: "SITE_B", from: FEB.from, to: FEB.to });
+    expect(after.budgetMinor).toBe(before.budgetMinor);
+    expect(after.budgetRevisions).toEqual([]);
+  });
+
+  it("refuses to move the budget with nothing said about why", async () => {
+    await expect(updateProject({ ...E, code: "SITE_B", budgetMinor: 300_000 }))
+      .rejects.toThrow(/needs a reason/i);
+    await expect(updateProject({ ...E, code: "SITE_B", budgetMinor: 300_000, reason: "   " }))
+      .rejects.toThrow(/needs a reason/i);
+
+    // Refused before the write, so the figure the job is measured against has
+    // not moved and no half-written revision is left behind.
+    const b = await projectProfitability({ ...E, projectCode: "SITE_B", from: FEB.from, to: FEB.to });
+    expect(b.budgetMinor).toBe("200000");
+    expect(b.budgetRevisions).toEqual([]);
+  });
+
+  /*
+   * The whole defect, in one test.
+   *
+   * SITE_B is 250,000 spent against a 200,000 budget — 50,000 over. Raising the
+   * budget to 300,000 makes the overspend go away, which is exactly what a
+   * revision is for and exactly what used to leave nothing behind. The overrun
+   * is now still readable: the row says the job was measured against 200,000,
+   * who moved it and why.
+   */
+  it("keeps what the budget was, who moved it and why, in the same write as the change", async () => {
+    await updateProject({
+      ...E, code: "SITE_B", budgetMinor: 300_000,
+      reason: "Variation 3 — additional piling agreed with the client",
+      revisedBy: "u-quantity-surveyor",
+    });
+
+    const b = await projectProfitability({ ...E, projectCode: "SITE_B", from: FEB.from, to: FEB.to });
+    expect(b.budgetMinor).toBe("300000");
+    // The overspend is gone from the position, because the budget really did
+    // move. It is not gone from the record.
+    expect(b.overBudget).toBe(false);
+    expect(b.budgetRevisions).toHaveLength(1);
+    expect(b.budgetRevisions[0]).toMatchObject({
+      priorMinor: "200000",
+      budgetMinor: "300000",
+      movementMinor: "100000",
+      reason: "Variation 3 — additional piling agreed with the client",
+      revisedBy: "u-quantity-surveyor",
+    });
+    expect(b.budgetRevisions[0].revisedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("reads the revisions most recent first, and signs a cut as a cut", async () => {
+    await updateProject({
+      ...E, code: "SITE_B", budgetMinor: 260_000,
+      reason: "Scaffold hire taken back out of scope", revisedBy: "u-quantity-surveyor",
+    });
+
+    const history = await budgetHistory({ ...E, code: "SITE_B" });
+    expect(history).toHaveLength(2);
+    expect(history[0].priorMinor).toBe("300000");
+    expect(history[0].budgetMinor).toBe("260000");
+    expect(history[0].movementMinor).toBe("-40000");
+    expect(history[1].movementMinor).toBe("100000");
+
+    // Each row reads on its own: the prior of the newer one is the budget of
+    // the older, so the chain is checkable without joining it up by hand.
+    expect(history[0].priorMinor).toBe(history[1].budgetMinor);
+  });
+
+  it("refuses a revision raised against a budget somebody else has already moved", async () => {
+    // Two people revising at once. Both read 260,000; only one of them can be
+    // right about what the figure went from, and a history that recorded both
+    // would say it went from 260,000 twice.
+    const both = await Promise.allSettled([
+      updateProject({ ...E, code: "SITE_B", budgetMinor: 270_000, reason: "First revision" }),
+      updateProject({ ...E, code: "SITE_B", budgetMinor: 280_000, reason: "Second revision" }),
+    ]);
+    expect(both.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+
+    const history = await budgetHistory({ ...E, code: "SITE_B" });
+    expect(history).toHaveLength(3);
+    expect(history[0].priorMinor).toBe("260000");
+    expect(["270000", "280000"]).toContain(history[0].budgetMinor);
+  });
+
+  it("does not hand one entity another's budget history", async () => {
+    await expect(budgetHistory({ orgId: ORG, entityId: "t-ent-proj-other", code: "SITE_B" }))
+      .rejects.toThrow(/no project SITE_B/i);
   });
 });

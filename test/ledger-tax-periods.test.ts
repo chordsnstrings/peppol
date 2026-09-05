@@ -162,6 +162,24 @@ d("the registration and its filings", () => {
     expect(read?.reference).toBe("FTA-99");
   });
 
+  it("refuses a filing that names nobody as having filed it", async () => {
+    // The database will not hold one: `TaxFiling_filed_check` requires
+    // `(filedOn IS NULL) = (filedBy IS NULL)`, and `filedOn` always has a value
+    // on this path because it falls back to today. So a caller that omitted the
+    // filer got a PrismaClientUnknownRequestError out of the driver — a
+    // constraint name, in a stack trace, where every other refusal in this
+    // module is a sentence. It is refused in words instead, and the assertion
+    // is on the words: a raw driver error would not match.
+    await expect(recordFiling({
+      orgId: ORG, entityId: ENT, periodLabel: "Dec 2025-Feb 2026",
+      filedOn: "2026-03-10", asOf: "2026-07-01",
+    })).rejects.toThrow(/needs the person who filed it/i);
+
+    // And nothing was written, so the period is still outstanding and the
+    // caller can record it properly once they know whose filing it was.
+    expect(await filingFor({ orgId: ORG, entityId: ENT, periodLabel: "Dec 2025-Feb 2026" })).toBeNull();
+  });
+
   it("refuses a filing for a period that has not ended", async () => {
     // Jun-Aug 2026 is still running on 1 July. There is nothing to file: the
     // supplies of July and August have not happened yet.

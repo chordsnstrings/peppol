@@ -10,6 +10,9 @@ import { addItem, setReorderLevel } from "@/lib/server/ledger/inventory";
 import { addBorrowing, addCovenant } from "@/lib/server/ledger/borrowings";
 import { issueFacility } from "@/lib/server/ledger/trade-finance";
 import { sharedReads, type SharedReads } from "@/lib/server/ledger/attention";
+import { createCounterparty } from "@/lib/server/ledger/counterparties";
+import { postInvoice } from "@/lib/server/ledger/ar";
+import type { Invoice } from "@/lib/domain/types";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -20,6 +23,8 @@ const ENT = "t-ent-ntf";
 const BARE = "t-ent-ntf-bare";
 /** A third, trading straight past the VAT registration threshold and not registered. */
 const GROWING = "t-ent-ntf-growing";
+/** A fourth, with one customer who is late — which is what makes the dunning source say anything. */
+const LATE = "t-ent-ntf-late";
 const S = { orgId: ORG, entityId: ENT };
 const ACTOR = "t-user-ntf";
 
@@ -51,6 +56,8 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Counterparty" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Record" WHERE "orgId" = '${ORG}'`),
   ]);
 }
 
@@ -142,6 +149,43 @@ async function seed() {
       { account: "2100", credit: 2_000_000n, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
     ],
   });
+
+  /*
+   * A customer who is late, on books of their own.
+   *
+   * The dunning source needs a customer, an invoice attributed to them, and a
+   * due date behind us — without all three it returns nothing and the row that
+   * shares the page's receivables ageing is never reached. It is a separate
+   * entity because the entity above is what every other test here reads, and a
+   * receivable on it would change the ageing every one of them stands on.
+   */
+  await openFiscalYear({ orgId: ORG, entityId: LATE, label: "2026", startsOn: "2026-01-01" });
+  await openBooks({ orgId: ORG, entityId: LATE });
+  await createCounterparty({
+    orgId: ORG, entityId: LATE,
+    counterparty: { code: "C-LATE", name: "Late Payer LLC", paymentTerms: 30, email: "ap@latepayer.example" },
+  });
+  const overdue = {
+    id: "ntf-inv-late", orgId: ORG, entityId: LATE, direction: "OUTBOUND", docType: "TAX_INVOICE",
+    number: "INV-LATE", customerId: "C-LATE",
+    issueDate: "2026-01-05", supplyDate: "2026-01-05", dueDate: "2026-01-20", currency: "AED",
+    buyer: { nameEn: "Late Payer LLC" }, seller: { nameEn: "Our Company" },
+    lines: [{
+      id: "ntf-l1", lineNo: 1, description: "Consulting", qty: 1, unitCode: "C62",
+      unitPriceMinor: 200_000, taxProfileCode: "STANDARD_5", lineNetMinor: 200_000, lineVatMinor: 10_000,
+    }],
+    totals: { taxExclusiveMinor: 200_000, vatMinor: 10_000, taxInclusiveMinor: 210_000, payableMinor: 210_000, perCategory: [] },
+    lifecycleStatus: "SENT", exchangeStatus: "NOT_SENT", reportingStatusC2: "NOT_REPORTED", source: "EDITOR",
+    compliance: { taxableEventDate: "2026-01-05", daysRemaining: 14, breached: false },
+    createdAt: "2026-01-05T00:00:00Z", updatedAt: "2026-01-05T00:00:00Z",
+  } as unknown as Invoice;
+  // The document store is where a journal entry's counterparty comes from — a
+  // journal line records what an entry did to the books, never who it was with —
+  // so an invoice that never reaches the store is one no dunning row can name.
+  await db.record.create({
+    data: { id: overdue.id, orgId: ORG, store: "invoices", entityId: LATE, data: JSON.stringify(overdue) },
+  });
+  await postInvoice({ orgId: ORG, invoice: overdue });
 
   // A guarantee expiring inside the ninety-day window, with margin the bank is
   // holding against it.
@@ -556,6 +600,44 @@ d("the notification centre", () => {
 
     expect(answered.length).toBeGreaterThanOrEqual(3);
     // The same object every time, which is only possible if it was read once.
+    expect(new Set(answered).size).toBe(1);
+  });
+
+  it("nets the receivables control account once for the whole page", async () => {
+    // Two of the twelve sources want it at the same date: the attention list,
+    // which reports what is past its terms, and the dunning plan, which decides
+    // who to chase and at which rung. Both are right to call the module that
+    // owns the fact, and neither can see the other doing it — so the plan used
+    // to net every movement on 1100 a second time to reach open items the page
+    // already had.
+    const real = sharedReads({ orgId: ORG, entityId: LATE });
+    const answered: unknown[] = [];
+    const reads: SharedReads = {
+      ...real,
+      async receivables(asOf) {
+        const ageing = await real.receivables(asOf);
+        // The month-end checklist asks for the same report at the month end,
+        // which is a different fact and rightly a second read. This counts the
+        // askers at the day the page is being read at.
+        if (asOf.toISOString().slice(0, 10) === A) answered.push(ageing);
+        return ageing;
+      },
+    };
+
+    const centre = await notificationCentre({ orgId: ORG, entityId: LATE, asOf: A, reads });
+
+    // The dunning source has something to say, which is what makes this a test
+    // of two askers rather than one. INV-LATE fell due on 20 January, so by 15
+    // March it is 54 days past due — the third rung.
+    const chase = centre.notices.find((n) => n.key === "dunning:letters_due");
+    expect(chase).toBeDefined();
+    expect(chase!.itemCount).toBe(1);
+    expect(chase!.detail).toMatch(/Late Payer LLC/);
+    expect(chase!.detail).toMatch(/the rung due is the second/);
+    expect(centre.sources.find((s) => s.key === "dunning")!.ok).toBe(true);
+
+    expect(answered.length).toBeGreaterThanOrEqual(2);
+    // The same object every time, which is only possible if it was netted once.
     expect(new Set(answered).size).toBe(1);
   });
 

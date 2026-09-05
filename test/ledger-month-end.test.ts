@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { monthEnd, closeMonth } from "@/lib/server/ledger/month-end";
 import { post } from "@/lib/server/ledger/post";
 import { addAsset } from "@/lib/server/ledger/assets";
+import { importStatement } from "@/lib/server/ledger/bank";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 
 const db = new PrismaClient();
@@ -17,6 +18,7 @@ async function wipe() {
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
     db.$executeRawUnsafe(`DELETE FROM "AssetRevaluation" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "FixedAsset" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "BankStatementLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
@@ -196,6 +198,38 @@ d("the month-end checklist", () => {
     // ageing and the control account are both read at the end of March.
     const march = await monthEnd({ ...S, period: "2026-03" });
     expect(check(march, "control_accounts")!.severity).toBe("done");
+  });
+
+  it("counts every unmatched bank line, not the page a reconciliation itemises", async () => {
+    // The defect: the advisory counted the rows of the reconciliation's own
+    // list, which stops at 200. So an account with 250 unexplained lines was
+    // reported as having 200 — the page size, told to somebody deciding
+    // whether the month is finished, on the check that exists to say how much
+    // of the cash nobody has explained.
+    const LINES = 250;
+    const PAGE = 200;
+    await importStatement({
+      ...S, accountCode: "1010", batch: "me-april",
+      // A different amount and a different description on every line, so none
+      // is a re-import of another and all 250 land. All of them are inside
+      // April, so the months the tests above are written against do not move.
+      lines: Array.from({ length: LINES }, (_, i) => ({
+        postedOn: `2026-04-${String((i % 28) + 1).padStart(2, "0")}`,
+        description: `Unexplained credit ${i + 1}`,
+        amountMinor: 1_000 + i,
+      })),
+    });
+
+    const m = await monthEnd({ ...S, period: "2026-04" });
+    const bank = check(m, "bank")!;
+    expect(bank).toBeDefined();
+    expect(bank.count).toBe(LINES);
+    expect(bank.count).not.toBe(PAGE);
+    expect(bank.detail).toMatch(new RegExp(`${LINES} statement lines`));
+    // An unmatched line means the bank knows something the books do not. That
+    // is worth chasing and it does not make the month wrong, so it stays an
+    // advisory however many of them there are.
+    expect(bank.severity).toBe("advisory");
   });
 
   it("does not read another organisation's month", async () => {

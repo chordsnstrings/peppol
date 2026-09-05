@@ -4,6 +4,7 @@ import {
   nextDate, createSubscription, pauseSubscription, resumeSubscription, endSubscription,
   dueSubscriptions, issueDue, issueAllDue, subscriptionRegister,
 } from "@/lib/server/ledger/subscriptions";
+import { createCounterparty, placeOnHold, releaseHold } from "@/lib/server/ledger/counterparties";
 import { receivablesAgeing } from "@/lib/server/ledger/ar";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
@@ -21,6 +22,10 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "RecurringInvoiceIssue" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "RecurringInvoice" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Record" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "CreditHold" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "CreditLimit" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Counterparty" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "FxRate" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
     db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
@@ -281,5 +286,136 @@ d("subscriptions", () => {
   it("does not raise another organisation's subscription", async () => {
     await expect(issueDue({ orgId: "someone-else", entityId: ENT, code: "SUB-1" }))
       .rejects.toThrow(/no subscription SUB-1/i);
+  });
+
+  /**
+   * Credit control on the one sale nobody is present for.
+   *
+   * The gate on the invoice screen catches a person about to finalise a
+   * document. A standing arrangement has no such moment, so a customer put on
+   * hold went on being invoiced every month by the arrangement — and the ledger
+   * ended up holding exactly the debt the hold was placed to prevent.
+   */
+  it("stops invoicing a customer who has been put on credit hold", async () => {
+    await createCounterparty({
+      ...S, counterparty: { code: "HELDCO", name: "Held Company LLC", kind: "CUSTOMER" },
+    });
+    await placeOnHold({ ...S, code: "HELDCO", reason: "Cheque returned unpaid twice", actorId: "u1" });
+    await createSubscription({
+      ...S,
+      subscription: {
+        code: "SUB-HOLD", customerCode: "HELDCO", customerName: "Held Company LLC",
+        frequency: "MONTHLY", startsOn: "2026-05-01", paymentTerms: 30,
+        lines: [{ description: "Retainer", quantityMilli: 1000, unitPriceMinor: 400_000 }],
+      },
+    });
+
+    const run = await issueDue({ ...S, code: "SUB-HOLD", asOf: "2026-06-15" });
+    expect(run.raised).toHaveLength(0);
+    expect(run.refused.map((r) => r.scheduledOn)).toEqual(["2026-05-01"]);
+    expect(run.refused[0].reasons.join(" ")).toContain("Cheque returned unpaid twice");
+    expect(run.refused[0].overridePermission).toBe("ar.credit_hold");
+
+    // The period is not skipped. The supply is still owed, so it stays due and
+    // the run stops there rather than stepping over a month's billing.
+    expect(run.nextOn).toBe("2026-05-01");
+    expect(run.note).toContain("still due");
+
+    const t = await db.recurringInvoice.findFirstOrThrow({ where: { orgId: ORG, code: "SUB-HOLD" } });
+    expect(iso(t.nextOn)).toBe("2026-05-01");
+    expect(t.issuedCount).toBe(0);
+    // Nothing reached the store and nothing reached the books.
+    expect(await db.recurringInvoiceIssue.count({ where: { templateId: t.id } })).toBe(0);
+    expect(await db.record.count({ where: { orgId: ORG, store: "invoices", id: { startsWith: t.id } } })).toBe(0);
+  });
+
+  it("says so where somebody will see it, and says it once", async () => {
+    // A refusal on an unattended run that only ever went back to the worker is
+    // a refusal nobody reads until they wonder why a customer stopped paying.
+    const notices = await db.record.findMany({ where: { orgId: ORG, store: "notifications" } });
+    expect(notices).toHaveLength(1);
+    const notice = JSON.parse(notices[0].data) as { type: string; title: string; body: string; tone: string };
+    expect(notice.type).toBe("subscription.credit_refused");
+    expect(notice.title).toContain("SUB-HOLD");
+    expect(notice.title).toContain("Held Company LLC");
+    expect(notice.body).toContain("2026-05-01");
+    expect(notice.tone).toBe("warning");
+
+    // A hold that stands for a month must not file thirty of these, nor un-read
+    // the one somebody has already dealt with.
+    await issueDue({ ...S, code: "SUB-HOLD", asOf: "2026-06-15" });
+    expect(await db.record.count({ where: { orgId: ORG, store: "notifications" } })).toBe(1);
+  });
+
+  it("bills the periods it held back once the account is released", async () => {
+    await releaseHold({ ...S, code: "HELDCO", reason: "Replacement cheque cleared", actorId: "u1" });
+    const run = await issueDue({ ...S, code: "SUB-HOLD", asOf: "2026-06-15" });
+    expect(run.refused).toEqual([]);
+    expect(run.raised.map((r) => r.scheduledOn)).toEqual(["2026-05-01", "2026-06-01"]);
+    // The refusals consumed no numbers, so the first invoice this arrangement
+    // ever raises is still its first.
+    expect(run.raised.map((r) => r.number)).toEqual(["SUB-HOLD-0001", "SUB-HOLD-0002"]);
+  });
+
+  /**
+   * The AED figures a foreign-currency invoice has to carry.
+   *
+   * Article 69 of Federal Decree-Law 8/2017 converts the tax on a
+   * foreign-currency document to dirhams and Article 59(1)(k) of the Executive
+   * Regulation puts the converted figure and the rate on the document. A
+   * template carries a currency and no rate — it is written once and billed for
+   * years — so the rate is the one on file for the day the period fell due.
+   */
+  it("states the tax in AED on a foreign-currency invoice, at the rate on file for that period", async () => {
+    await db.fxRate.create({
+      data: { orgId: ORG, entityId: ENT, currency: "USD", rate: "3.6725", rateDate: D("2026-08-01"), source: "CBUAE" },
+    });
+    await createSubscription({
+      ...S,
+      subscription: {
+        code: "SUB-USD", customerName: "Jebel Ali Freight FZE", currency: "USD",
+        frequency: "MONTHLY", startsOn: "2026-09-01", paymentTerms: 30,
+        lines: [{ description: "Platform licence", quantityMilli: 1000, unitPriceMinor: 200_000 }],
+      },
+    });
+
+    const run = await issueDue({ ...S, code: "SUB-USD", asOf: "2026-09-15" });
+    expect(run.raised).toHaveLength(1);
+
+    const row = await db.record.findFirstOrThrow({
+      where: { orgId: ORG, store: "invoices", id: run.raised[0].invoiceId },
+    });
+    const inv = JSON.parse(row.data) as {
+      currency: string;
+      fx: { rateToAED: string; source: string; rateDate: string };
+      totals: { vatMinor: number; vatMinorAED?: number; payableMinorAED?: number };
+    };
+    expect(inv.currency).toBe("USD");
+    // On the face of the document as well as in its totals: the printed invoice
+    // and the UBL both derive the conversion from the rate the document carries.
+    expect(Number(inv.fx.rateToAED)).toBe(3.6725);
+    expect(inv.fx.source).toBe("CBUAE");
+    expect(inv.fx.rateDate).toBe("2026-08-01");
+    // 2,000.00 USD at 5% is 100.00 USD of tax; at 3.6725 that is 367.25 AED,
+    // and the payable of 2,100.00 is 7,712.25.
+    expect(inv.totals.vatMinor).toBe(10_000);
+    expect(inv.totals.vatMinorAED).toBe(36_725);
+    expect(inv.totals.payableMinorAED).toBe(771_225);
+  });
+
+  it("raises no foreign-currency invoice at a rate nobody recorded", async () => {
+    // The alternative is an invoice whose AED tax was made up, and the books
+    // would carry the conversion too. `postInvoice` refuses it for the same
+    // reason, which is why this comes back as an error rather than a document.
+    await createSubscription({
+      ...S,
+      subscription: {
+        code: "SUB-EUR", customerName: "Rotterdam Chartering BV", currency: "EUR",
+        frequency: "MONTHLY", startsOn: "2026-09-01", paymentTerms: 30,
+        lines: [{ description: "Platform licence", quantityMilli: 1000, unitPriceMinor: 200_000 }],
+      },
+    });
+    await expect(issueDue({ ...S, code: "SUB-EUR", asOf: "2026-09-15" }))
+      .rejects.toThrow(/no exchange rate to AED/i);
   });
 });

@@ -155,7 +155,13 @@ export function makeDraft(entity: Entity, opts: { direction?: "OUTBOUND"; number
 /** Recompute derived fields (lines, totals, doc type, compliance) — determinism. */
 export function recalc(inv: Invoice): Invoice {
   const lines: InvoiceLine[] = recomputeLines(inv.lines);
-  const totals = computeTotals(lines);
+  // With the currency and the rate, because this is the whole invoice and both
+  // are on it. Article 59(1)(k) of the Executive Regulation wants the tax stated
+  // in AED on a foreign-currency document, and `computeTotals` records that
+  // figure only for a caller that hands it the two things it takes to work out —
+  // so totalling without them persisted an invoice whose stored totals said
+  // nothing about the conversion the document has to print.
+  const totals = computeTotals(lines, { currency: inv.currency, fx: inv.fx });
   // Credit notes and proformas are explicit user choices — never re-derived.
   const pinned = inv.docType === "TAX_CREDIT_NOTE" || inv.docType === "PROFORMA";
   const docType = pinned ? inv.docType : deriveDocType(lines);

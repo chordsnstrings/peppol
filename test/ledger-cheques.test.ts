@@ -585,3 +585,211 @@ d("post-dated cheques", () => {
     }
   });
 });
+
+
+/* ------------------------------------------------- cheques in other money */
+
+const FX_ORG = "t-org-chq-fx";
+const FX_ENT = "t-ent-chq-fx";
+/** A second entity in the same organisation whose books are not kept in dirhams. */
+const SAR_ENT = "t-ent-chq-sar";
+const fx = { orgId: FX_ORG, entityId: FX_ENT };
+
+/** One account as the book holds it: functional amounts, not transaction ones. */
+async function bookBalanceOf(code: string, orgId: string) {
+  const rows = await db.journalLine.findMany({
+    where: { orgId, account: { code } },
+    select: { functionalAmountMinor: true },
+  });
+  return rows.reduce((a, r) => a + r.functionalAmountMinor, 0n);
+}
+
+async function wipeFx() {
+  await db.$transaction([
+    db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
+    db.$executeRawUnsafe(`DELETE FROM "Cheque" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${FX_ORG}')`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "AccountBalance" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Account" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "AccountingPeriod" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${FX_ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${FX_ORG}'`),
+  ]);
+}
+
+/*
+ * The register used to add `amountMinor` across the paper regardless of what
+ * each cheque was written in, and set the result against a holding account kept
+ * in one currency. One foreign cheque in the drawer was enough to make the
+ * difference a translation rather than a finding — and the chip beside it
+ * called it a finding.
+ */
+d("a register that holds paper in more than one currency", () => {
+  let sarChequeId = "";
+
+  beforeAll(async () => {
+    await wipeFx();
+    await openFiscalYear({ ...fx, label: "2026", startsOn: "2026-01-01" });
+    await openBooks(fx);
+    await openFiscalYear({ orgId: FX_ORG, entityId: SAR_ENT, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: FX_ORG, entityId: SAR_ENT, functionalCurrency: "SAR" });
+
+    // A thousand riyals at 0.98, and five hundred dirhams. The ledger holds
+    // 980.00 for the first, because that is the rate it was posted at.
+    const sar = await recordCheque({
+      ...fx, direction: "RECEIVED", number: "SAR-1", counterparty: "Riyadh Trading",
+      writtenOn: "2026-02-01", dueOn: "2026-05-01", amountMinor: 100_000,
+      currency: "SAR", fxRate: 0.98,
+    });
+    sarChequeId = sar.chequeId;
+    await recordCheque({
+      ...fx, direction: "RECEIVED", number: "AED-1", counterparty: "Dubai Trading",
+      writtenOn: "2026-02-01", dueOn: "2026-05-01", amountMinor: 50_000,
+    });
+  });
+  afterAll(async () => { await wipeFx(); });
+
+  it("states every total in the book's own currency, and ties to the account", async () => {
+    const reg = await chequeRegister({ ...fx, asOf: "2026-03-01" });
+    expect(reg.functionalCurrency).toBe("AED");
+
+    // 980.00 of translated riyals plus 500.00 of dirhams. The face sum would
+    // have been 1,500.00, which is the figure that could not tie.
+    expect(reg.received.outstandingMinor).toBe(148_000n);
+    expect(reg.received.heldMinor).toBe(148_000n);
+    expect(reg.received.outstandingMinor).not.toBe(150_000n);
+
+    // The account itself, in the book's currency. `balanceOf` above sums
+    // transaction amounts, which for this drawer comes to 1,500.00 — the very
+    // figure the register used to hand back and set against 1,480.00.
+    expect(reg.received.ledgerMinor).toBe(await bookBalanceOf("1060", FX_ORG));
+    expect(await balanceOf("1060", FX_ORG)).toBe(150_000n);
+    expect(reg.received.differenceMinor).toBe(0n);
+    expect(reg.received.comparable).toBe(true);
+    expect(reg.received.reconciled).toBe(true);
+    expect(reg.received.buckets.d61_90).toBe(148_000n);
+    expect(reg.basis).toMatch(/rate its own opening journal was posted at/);
+  });
+
+  it("keeps the face amounts apart, currency by currency", async () => {
+    const reg = await chequeRegister({ ...fx, asOf: "2026-03-01" });
+    expect(reg.received.byCurrency).toEqual([
+      { currency: "AED", count: 1, heldMinor: 50_000n, depositedMinor: 0n, outstandingMinor: 50_000n },
+      { currency: "SAR", count: 1, heldMinor: 100_000n, depositedMinor: 0n, outstandingMinor: 100_000n },
+    ]);
+  });
+
+  /*
+   * A cheque row whose opening journal never landed. The ledger cannot carry
+   * it either, but the register has no way to know that from here — what it
+   * knows is that it cannot say what the account was debited with for this
+   * piece of paper, and a subtraction missing a term is not a reconciliation.
+   */
+  it("leaves out a foreign cheque it cannot state in the book's currency, and says which", async () => {
+    await db.cheque.update({ where: { id: sarChequeId }, data: { heldEntryId: null } });
+    const reg = await chequeRegister({ ...fx, asOf: "2026-03-01" });
+
+    expect(reg.received.comparable).toBe(false);
+    expect(reg.received.reconciled).toBe(false);
+    expect(reg.received.outstandingMinor).toBe(50_000n);
+    expect(reg.received.untranslated).toHaveLength(1);
+    expect(reg.received.untranslated[0].number).toBe("SAR-1");
+    expect(reg.received.untranslated[0].currency).toBe("SAR");
+    expect(reg.received.untranslated[0].amountMinor).toBe(100_000n);
+    // Still counted as paper, because it is paper.
+    expect(reg.received.byCurrency.find((t) => t.currency === "SAR")?.outstandingMinor).toBe(100_000n);
+  });
+
+  /*
+   * The cover test is the thing this diary exists for, and it is arithmetic in
+   * one currency: a bank balance is in the book's, a cheque is in whatever it
+   * was written in. Weighing a face amount against a balance in another money
+   * says a cheque is covered when it is not.
+   */
+  it("weighs an issued cheque against the bank in the book's own currency", async () => {
+    // 1,000 riyals at 0.98 is 980.00 in the book. The bank holds 990.00, so it
+    // is covered — at face value it would have read as 1,000.00 and short.
+    await post({
+      orgId: FX_ORG, entityId: FX_ENT, entryDate: "2026-01-02", memo: "Capital introduced", series: "GJ",
+      lines: [{ account: "1010", debit: 99_000 }, { account: "3000", credit: 99_000 }],
+    });
+    await recordCheque({
+      ...fx, direction: "ISSUED", number: "SAR-OUT-1", counterparty: "Riyadh Supplies",
+      writtenOn: "2026-02-01", dueOn: "2026-02-20", amountMinor: 100_000,
+      currency: "SAR", fxRate: 0.98,
+    });
+
+    const diary = await dueSoon({ ...fx, asOf: "2026-02-01", days: 30 });
+    expect(diary.functionalCurrency).toBe("AED");
+    const row = diary.issued.find((r) => r.number === "SAR-OUT-1")!;
+    expect(row.amountMinor).toBe(100_000n);   // as written, in riyals
+    expect(row.bookMinor).toBe(98_000n);      // as the bank will meet it
+    expect(row.cumulativeMinor).toBe(98_000n);
+    expect(row.covered).toBe(true);
+    expect(diary.issuedMinor).toBe(98_000n);
+    expect(diary.uncoveredCount).toBe(0);
+    expect(diary.basis).toMatch(/cover test is run in AED/);
+  });
+
+  it("will not call a cheque covered when it cannot weigh it at all", async () => {
+    const stranded = await recordCheque({
+      ...fx, direction: "ISSUED", number: "SAR-OUT-2", counterparty: "Riyadh Supplies",
+      writtenOn: "2026-02-02", dueOn: "2026-02-21", amountMinor: 500_000,
+      currency: "SAR", fxRate: 0.98,
+    });
+    await db.cheque.update({ where: { id: stranded.chequeId }, data: { heldEntryId: null } });
+
+    const diary = await dueSoon({ ...fx, asOf: "2026-02-01", days: 30 });
+    const row = diary.issued.find((r) => r.number === "SAR-OUT-2")!;
+    // Neither covered nor short: both would be drawn from nothing.
+    expect(row.covered).toBeNull();
+    expect(row.bookMinor).toBeNull();
+    // And it adds nothing to the running commitment, which stays in AED.
+    expect(row.cumulativeMinor).toBe(98_000n);
+    expect(diary.issuedMinor).toBe(98_000n);
+    expect(diary.uncoveredCount).toBe(0);
+    expect(diary.untranslated.map((u) => u.number)).toContain("SAR-OUT-2");
+  });
+
+  it("tells the screen which currency the books are kept in", async () => {
+    const cheque = await db.cheque.findFirstOrThrow({ where: { orgId: FX_ORG, number: "AED-1" } });
+    const one = await chequeDetail({ ...fx, chequeId: cheque.id, asOf: "2026-03-01" });
+    expect(one.functionalCurrency).toBe("AED");
+  });
+
+  /*
+   * The book that is not kept in dirhams. `fxOf` compared the cheque's currency
+   * against the literal "AED", so this entity's own domestic cheque was treated
+   * as foreign and refused for want of a rate to itself.
+   */
+  it("treats a cheque in the book's own currency as domestic, whatever that currency is", async () => {
+    const sarBook = { orgId: FX_ORG, entityId: SAR_ENT };
+    const r = await recordCheque({
+      ...sarBook, direction: "RECEIVED", number: "HOME-1", counterparty: "Jeddah Trading",
+      writtenOn: "2026-02-01", dueOn: "2026-05-01", amountMinor: 100_000, currency: "SAR",
+    });
+    expect(r.cheque.currency).toBe("SAR");
+
+    const reg = await chequeRegister({ ...sarBook, asOf: "2026-03-01" });
+    expect(reg.functionalCurrency).toBe("SAR");
+    expect(reg.received.outstandingMinor).toBe(100_000n);
+    expect(reg.received.comparable).toBe(true);
+    expect(reg.received.reconciled).toBe(true);
+
+    // And a cheque with no currency named takes the book's, not a literal.
+    const home = await recordCheque({
+      ...sarBook, direction: "RECEIVED", number: "HOME-2", counterparty: "Jeddah Trading",
+      writtenOn: "2026-02-02", dueOn: "2026-05-02", amountMinor: 20_000,
+    });
+    expect(home.cheque.currency).toBe("SAR");
+
+    // A dirham cheque in a riyal book is the foreign one here, and it says so.
+    await expect(recordCheque({
+      ...sarBook, direction: "RECEIVED", number: "AWAY-1", counterparty: "Dubai Trading",
+      writtenOn: "2026-02-03", dueOn: "2026-05-03", amountMinor: 30_000, currency: "AED",
+    })).rejects.toThrow(/is in AED but the cheque carries no exchange rate to SAR/);
+  });
+});

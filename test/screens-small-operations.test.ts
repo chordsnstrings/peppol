@@ -160,13 +160,20 @@ describe("the cheque screen can reach the foreign-currency path", () => {
     expect(source).toMatch(/cheque\.status === "bounced" && \(to === "returned" \|\| to === "cancelled"\)/);
   });
 
-  it("says that a register holding foreign paper cannot be subtracted from the ledger", () => {
-    // `chequeRegister` adds face amounts across currencies; the account beside
-    // it is in the book's currency. Calling that difference a finding would be
-    // telling somebody their books are broken when they are not.
+  it("does not call a translation a finding, and says which basis it translated on", () => {
+    // `chequeRegister` used to add face amounts across currencies and set the
+    // result against a functional-currency balance, so the difference was a
+    // translation and the chip beside it called it a finding — telling somebody
+    // their books were broken when they were not. It now translates each
+    // foreign cheque at the rate its own opening journal carried, and states
+    // that basis rather than leaving the reader to assume one.
     const source = read(CHEQUES);
+    expect(source).toContain("register.comparable");
+    expect(source).toMatch(/basis/);
+    // The one case that still cannot be subtracted: a foreign cheque whose
+    // opening journal carries no rate. The chip must claim neither way.
     expect(source).toContain("not comparable");
-    expect(source).toMatch(/translation rather than a\s+finding/);
+    expect(source).toMatch(/!comparable \? "sw-chip-warn"/);
   });
 
   it("reads 250 differently in a dirham and in a dinar", () => {
@@ -236,14 +243,27 @@ describe("the revenue screen carries the IFRS 15 contract-balance disclosure", (
     expect(source).toContain("IFRS 15.120");
     expect(source).toContain("15.120(b)");
     expect(source).toMatch(/Receivables from contracts with customers/);
-    expect(source).toMatch(/still to earn.{0,40}is not it/s);
+    // 15.120 must not be answered with the "still to earn" total, which counts
+    // the cancelled and the completed — neither of which has anything left to
+    // deliver, and so neither of which belongs in a remaining-price figure.
+    expect(source).toMatch(/still to earn/);
+    expect(source).toMatch(/cancelled and the completed/);
   });
 
-  it("does not print an opening balance it does not have", () => {
-    // The whole failure mode this panel exists to avoid. 15.116(a) wants both
-    // ends of the period; the screen has today's position and says so.
+  it("prints both ends of the period, because it now has both", () => {
+    // The panel first shipped with today's position only, and said so rather
+    // than inventing an opening figure. `contractBalancesNote` is now served
+    // over a from/to pair, so IFRS 15.116(a) gets the answer it asks for: the
+    // contract asset and contract liability at the opening AND the close.
     const source = read(REVENUE);
-    expect(source).toMatch(/As the ledger stands/);
-    expect(source).toMatch(/would be an invention rather than a disclosure/);
+    expect(source).toContain("note-opening-asset");
+    expect(source).toContain("note-opening-liability");
+    expect(source).toContain("openingAssetMinor");
+    expect(source).toContain("openingLiabilityMinor");
+    // Both ends and the movement between them, which is what makes the pair a
+    // disclosure rather than two balances printed next to each other.
+    expect(source).toContain("note-asset-movement");
+    expect(source).toContain("assetMovementMinor");
+    expect(source).toContain("liabilityMovementMinor");
   });
 });

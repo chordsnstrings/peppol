@@ -427,16 +427,38 @@ async function loadCheque(orgId: string, entityId: string, chequeId: string) {
 type Actor = { actorId?: string; actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION" };
 
 /**
+ * The currency the books are kept in.
+ *
+ * Read from the entity's own book rather than stated as a literal. It was the
+ * literal "AED" here and again on the cheque screen, whose comment said the
+ * screen could restate it because this function held the same one — so an
+ * entity keeping its books in anything else had every one of its own domestic
+ * cheques treated as foreign and refused for want of a rate to itself.
+ *
+ * The schema's default stands in where no chart has been opened yet: nothing
+ * can have been posted in that case, so nothing can be measured against it
+ * either. `contingentLiabilities` falls back the same way.
+ */
+async function functionalCurrencyOf(orgId: string, entityId: string): Promise<string> {
+  const book = await prisma.book.findFirst({
+    where: { orgId, entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  return book?.functionalCurrency ?? "AED";
+}
+
+/**
  * A cheque in a currency other than the book's is posted the way every other
  * foreign-currency document is: the amount stays in the cheque's currency and
  * carries a rate. There is no rate column on the cheque, because a rate belongs
  * to the day money moves and a cheque moves on several different days.
  */
-function fxOf(c: ChequeLike, fxRate: number | undefined, what: string) {
-  if (c.currency === "AED") return {};
+async function fxOf(c: ChequeLike, fxRate: number | undefined, what: string) {
+  const functional = await functionalCurrencyOf(c.orgId, c.entityId);
+  if (c.currency === functional) return {};
   if (!(fxRate && fxRate > 0)) {
     throw new LedgerError(
-      `Cheque ${c.number} is in ${c.currency} but ${what} carries no exchange rate to AED. Set the rate first.`,
+      `Cheque ${c.number} is in ${c.currency} but ${what} carries no exchange rate to ${functional}. Set the rate first.`,
     );
   }
   return { currency: c.currency, fxRate };
@@ -520,6 +542,11 @@ export async function recordCheque(opts: {
     );
   }
 
+  // A cheque with no currency named is one written in the money the books are
+  // kept in. It was defaulted to the literal "AED", which for an entity whose
+  // book is kept in anything else silently made every domestic cheque foreign.
+  const currency = (opts.currency ?? "").trim() || (await functionalCurrencyOf(opts.orgId, opts.entityId));
+
   const existing = await prisma.cheque.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, direction, number },
   });
@@ -527,7 +554,7 @@ export async function recordCheque(opts: {
     throw new LedgerError(
       `Cheque ${number} is already in the register for ` +
         `${fmtMinor(existing.amountMinor, existing.currency)} from ${existing.counterparty}, ` +
-        `and this one is for ${fmtMinor(amountMinor, opts.currency ?? "AED")}. ` +
+        `and this one is for ${fmtMinor(amountMinor, currency)}. ` +
         `Two different cheques cannot share a number — check the paper for a transposed digit.`,
     );
   }
@@ -564,7 +591,7 @@ export async function recordCheque(opts: {
         writtenOn,
         dueOn,
         amountMinor,
-        currency: opts.currency ?? "AED",
+        currency,
         status: "held",
         settlesId: opts.settlesId ?? null,
         statusOn: writtenOn,
@@ -581,7 +608,7 @@ export async function recordCheque(opts: {
       direction === "RECEIVED"
         ? `Cheque ${cheque.number} from ${cheque.counterparty}, due ${day(cheque.dueOn)}`
         : `Cheque ${cheque.number} to ${cheque.counterparty}, due ${day(cheque.dueOn)}`,
-    lines: takeLines(cheque, opts.fxRate),
+    lines: await takeLines(cheque, opts.fxRate),
     actorId: opts.actorId,
     actorType: opts.actorType,
   });
@@ -615,8 +642,8 @@ export async function recordCheque(opts: {
  * carrying it back on the bounce is what puts the customer back exactly where
  * they were — same document, same date, same band.
  */
-function takeLines(c: ChequeLike, fxRate: number | undefined): PostLine[] {
-  const fx = fxOf(c, fxRate, "the cheque");
+async function takeLines(c: ChequeLike, fxRate: number | undefined): Promise<PostLine[]> {
+  const fx = await fxOf(c, fxRate, "the cheque");
   const settles = c.settlesId ?? undefined;
   const held = { account: holdingAccount(c.direction), ...fx, settlesId: settles };
   const trade = { account: tradeAccount(c.direction), ...fx, settlesId: settles };
@@ -632,8 +659,8 @@ function takeLines(c: ChequeLike, fxRate: number | undefined): PostLine[] {
 }
 
 /** The same entry the other way up: the paper failed, the debt goes back. */
-function unwindLines(c: ChequeLike, fxRate: number | undefined, why: string): PostLine[] {
-  const fx = fxOf(c, fxRate, "the cheque");
+async function unwindLines(c: ChequeLike, fxRate: number | undefined, why: string): Promise<PostLine[]> {
+  const fx = await fxOf(c, fxRate, "the cheque");
   const settles = c.settlesId ?? undefined;
   const held = { account: holdingAccount(c.direction), ...fx, settlesId: settles };
   const trade = { account: tradeAccount(c.direction), ...fx, settlesId: settles };
@@ -649,8 +676,8 @@ function unwindLines(c: ChequeLike, fxRate: number | undefined, why: string): Po
 }
 
 /** The bank paid it: paper becomes money. */
-function clearLines(c: ChequeLike, fxRate: number | undefined): PostLine[] {
-  const fx = fxOf(c, fxRate, "the clearing");
+async function clearLines(c: ChequeLike, fxRate: number | undefined): Promise<PostLine[]> {
+  const fx = await fxOf(c, fxRate, "the clearing");
   const held = { account: holdingAccount(c.direction), ...fx, settlesId: c.settlesId ?? undefined };
   const bank = { account: c.bankAccount || BANK, ...fx };
   return c.direction === "RECEIVED"
@@ -808,7 +835,7 @@ export async function clearCheque(opts: {
     sourceType: "CHEQUE_CLEARED",
     entryDate: on,
     memo: `Cheque ${c.number} cleared — ${c.counterparty}`,
-    lines: clearLines(c, opts.fxRate),
+    lines: await clearLines(c, opts.fxRate),
     actorId: opts.actorId,
     actorType: opts.actorType,
   });
@@ -892,7 +919,7 @@ export async function bounceCheque(opts: {
     sourceType: "CHEQUE_BOUNCED",
     entryDate: on,
     memo: `Cheque ${c.number} bounced — ${c.counterparty}: ${reason}`,
-    lines: unwindLines(c, opts.fxRate, `Cheque ${c.number} dishonoured: ${reason}`),
+    lines: await unwindLines(c, opts.fxRate, `Cheque ${c.number} dishonoured: ${reason}`),
     actorId: opts.actorId,
     actorType: opts.actorType,
   }).catch(async (e) => {
@@ -957,7 +984,7 @@ export async function representCheque(opts: {
     entryDate: on,
     dueDate: on > c.dueOn ? null : c.dueOn,
     memo: `Cheque ${c.number} re-presented (presentation ${presentation}) — ${c.counterparty}`,
-    lines: takeLines(c, opts.fxRate),
+    lines: await takeLines(c, opts.fxRate),
     actorId: opts.actorId,
     actorType: opts.actorType,
   }).catch(async (e) => {
@@ -1029,7 +1056,7 @@ async function closeOut(to: "returned" | "cancelled", opts: CloseOutInput): Prom
         sourceType: to === "returned" ? "CHEQUE_RETURNED" : "CHEQUE_CANCELLED",
         entryDate: on,
         memo: why,
-        lines: unwindLines(c, opts.fxRate, why),
+        lines: await unwindLines(c, opts.fxRate, why),
         actorId: opts.actorId,
         actorType: opts.actorType,
       }).catch(async (e) => {
@@ -1061,6 +1088,24 @@ export const cancelCheque = (opts: CloseOutInput): Promise<ChequeMoveResult> => 
 
 /* ------------------------------------------------------------- the register */
 
+/** Outstanding paper in one currency, at the face amounts as they are written. */
+export interface CurrencyTotal {
+  currency: string;
+  count: number;
+  heldMinor: bigint;
+  depositedMinor: bigint;
+  outstandingMinor: bigint;
+}
+
+/** A cheque the register cannot state in the book's currency, and why not. */
+export interface UntranslatedCheque {
+  number: string;
+  currency: string;
+  /** As written on the paper, in its own currency. */
+  amountMinor: bigint;
+  reason: string;
+}
+
 export interface DirectionRegister {
   direction: ChequeDirection;
   accountCode: string;
@@ -1069,6 +1114,11 @@ export interface DirectionRegister {
   cleared: ChequeRow[];
   bounced: ChequeRow[];
   closed: ChequeRow[];
+  /**
+   * Every figure below this line is in the book's functional currency — see
+   * `basis` on the register. A cheque written in something else is counted at
+   * the rate its own opening journal was posted at, never added in as written.
+   */
   heldMinor: bigint;
   depositedMinor: bigint;
   /** Held plus deposited: what the holding account should carry. */
@@ -1077,6 +1127,22 @@ export interface DirectionRegister {
   bouncedMinor: bigint;
   /** The outstanding paper, aged by the day it may be presented. */
   buckets: Record<DueBucket, bigint>;
+  /**
+   * The outstanding paper as it is written, currency by currency. This is the
+   * one place face amounts appear, and they are never summed across currencies:
+   * dirhams and riyals added together make a figure that ties to nothing and
+   * reads as though it did.
+   */
+  byCurrency: CurrencyTotal[];
+  /** Outstanding paper left out of the totals above, with the reason. */
+  untranslated: UntranslatedCheque[];
+  /**
+   * False when some outstanding cheque could not be stated in the book's
+   * currency. The ledger carries it and the register cannot, so the difference
+   * below is a gap in this report rather than a finding about the books, and
+   * nothing here should be read as a reconciliation.
+   */
+  comparable: boolean;
   /** What the ledger's holding account carries at `asOf`, as a positive figure. */
   ledgerMinor: bigint;
   /** ledger − register. Anything but nil needs a person. */
@@ -1113,6 +1179,31 @@ export interface DirectionRegister {
  * with the bank. The split is therefore approximate for a back-dated run; the
  * outstanding total is not, because both states sit in the same account, and
  * that total is what the reconciliation is against.
+ *
+ * ── The currency the totals are in ─────────────────────────────────────────
+ *
+ * A cheque keeps the currency it was written in; the holding account is kept
+ * in the book's. Adding face amounts across currencies and setting the result
+ * against that account produced a difference that was a translation rather than
+ * a finding, and the chip beside it called it one — so the totals here are
+ * stated in the book's currency and `basis` says how they got there.
+ *
+ * A foreign cheque is counted at the rate its OWN opening journal was posted
+ * at, which is the rate the holding account was actually debited with. Not
+ * today's rate: retranslating at today's would report a movement in the rate as
+ * a difference between the register and the ledger, when it is a revaluation
+ * question and belongs on the revaluation screen. And it does not make the
+ * control circular — only the rate comes from the ledger. The face amount is
+ * still the register's, and which cheques are outstanding is still the
+ * register's, so a cheque the bank cleared and nobody marked is still counted
+ * here at its face while the ledger no longer carries it, which is exactly the
+ * drift this comparison exists to find.
+ *
+ * A foreign cheque whose opening journal cannot be found carries no rate at
+ * all. It is listed in `untranslated`, left out of the totals, and `comparable`
+ * goes false — the ledger carries that cheque and the register cannot say what
+ * it carries it at, so the subtraction below is not a reconciliation and must
+ * not be drawn as one.
  */
 export async function chequeRegister(opts: {
   orgId: string;
@@ -1120,6 +1211,10 @@ export async function chequeRegister(opts: {
   asOf?: Date | string;
 }): Promise<{
   asOf: string;
+  /** The currency every total below is stated in. */
+  functionalCurrency: string;
+  /** How a cheque written in something else got into those totals. */
+  basis: string;
   received: DirectionRegister;
   issued: DirectionRegister;
   reconciled: boolean;
@@ -1132,13 +1227,32 @@ export async function chequeRegister(opts: {
     orderBy: [{ dueOn: "asc" }, { number: "asc" }],
   });
 
+  const functional = await functionalCurrencyOf(opts.orgId, opts.entityId);
+  const rates = await openingRates(opts.orgId, cheques.filter((c) => c.currency !== functional));
   const ledger = await holdingBalances(opts.orgId, opts.entityId, asOf);
+
+  /** The cheque as the holding account carries it, or why it cannot be said. */
+  const inBook = (c: ChequeLike): { minor: bigint } | { reason: string } => {
+    if (c.currency === functional) return { minor: c.amountMinor };
+    const rate = rates.get(c.id);
+    if (rate === undefined) {
+      return {
+        reason:
+          `its opening journal carries no rate this register can read, so what account ` +
+          `${holdingAccount(c.direction)} was debited with for it is not knowable from here`,
+      };
+    }
+    return { minor: convert(c.amountMinor, rate) };
+  };
 
   const build = (direction: ChequeDirection): DirectionRegister => {
     const mine = cheques.filter((c) => c.direction === direction);
     const held: ChequeRow[] = [], deposited: ChequeRow[] = [], cleared: ChequeRow[] = [];
     const bounced: ChequeRow[] = [], closed: ChequeRow[] = [];
     const buckets: Record<DueBucket, bigint> = { overdue: 0n, d0_30: 0n, d31_60: 0n, d61_90: 0n, over90: 0n };
+    const faces = new Map<string, CurrencyTotal>();
+    const untranslated: UntranslatedCheque[] = [];
+    let heldMinor = 0n, depositedMinor = 0n, clearedMinor = 0n, bouncedMinor = 0n;
 
     for (const c of mine) {
       const row = rowOf(c, asOf);
@@ -1147,29 +1261,58 @@ export async function chequeRegister(opts: {
       const asAt: ChequeStatus =
         c.statusOn && c.statusOn > asOf ? "held" : (c.status as ChequeStatus);
       const at = { ...row, status: asAt, outstanding: isOutstanding(asAt) };
+      const book = inBook(c);
+
       if (isOutstanding(asAt)) {
         (asAt === "held" ? held : deposited).push(at);
-        buckets[at.bucket] += c.amountMinor;
-      } else if (asAt === "cleared") cleared.push(at);
-      else if (asAt === "bounced") bounced.push(at);
-      else closed.push(at);
+
+        // The paper as it is written, before any translation: this total is
+        // what somebody counting the drawer would arrive at.
+        const face = faces.get(c.currency) ?? {
+          currency: c.currency, count: 0, heldMinor: 0n, depositedMinor: 0n, outstandingMinor: 0n,
+        };
+        face.count += 1;
+        if (asAt === "held") face.heldMinor += c.amountMinor;
+        else face.depositedMinor += c.amountMinor;
+        face.outstandingMinor += c.amountMinor;
+        faces.set(c.currency, face);
+
+        if ("reason" in book) {
+          untranslated.push({ number: c.number, currency: c.currency, amountMinor: c.amountMinor, reason: book.reason });
+        } else {
+          if (asAt === "held") heldMinor += book.minor;
+          else depositedMinor += book.minor;
+          buckets[at.bucket] += book.minor;
+        }
+      } else if (asAt === "cleared") {
+        cleared.push(at);
+        if (!("reason" in book)) clearedMinor += book.minor;
+      } else if (asAt === "bounced") {
+        bounced.push(at);
+        if (!("reason" in book)) bouncedMinor += book.minor;
+      } else closed.push(at);
     }
 
-    const sum = (rows: ChequeRow[]) => rows.reduce((a, r) => a + r.amountMinor, 0n);
-    const heldMinor = sum(held);
-    const depositedMinor = sum(deposited);
     const outstandingMinor = heldMinor + depositedMinor;
     const accountCode = holdingAccount(direction);
     const ledgerMinor = ledger.get(accountCode) ?? 0n;
     const differenceMinor = ledgerMinor - outstandingMinor;
+    const comparable = untranslated.length === 0;
 
     return {
       direction, accountCode,
       held, deposited, cleared, bounced, closed,
       heldMinor, depositedMinor, outstandingMinor,
-      clearedMinor: sum(cleared), bouncedMinor: sum(bounced),
-      buckets, ledgerMinor, differenceMinor,
-      reconciled: differenceMinor === 0n,
+      clearedMinor, bouncedMinor,
+      buckets,
+      byCurrency: [...faces.values()].sort((a, b) => (a.currency < b.currency ? -1 : 1)),
+      untranslated,
+      comparable,
+      ledgerMinor, differenceMinor,
+      // Agreement is only claimed where the register could state every piece of
+      // outstanding paper in the same currency as the account it is set
+      // against. Otherwise the subtraction is missing a term.
+      reconciled: comparable && differenceMinor === 0n,
       count: mine.length,
     };
   };
@@ -1178,11 +1321,67 @@ export async function chequeRegister(opts: {
   const issued = build("ISSUED");
   return {
     asOf: day(asOf),
+    functionalCurrency: functional,
+    basis:
+      `Every total is in ${functional}. A cheque written in ${functional} is counted as it is written; a cheque in ` +
+      `any other currency is counted at the rate its own opening journal was posted at — the rate the holding ` +
+      `account was debited with — so the register and the account are one measurement and a difference between ` +
+      `them is a difference in the paper rather than in the rate. Nothing here is retranslated at today's rate: a ` +
+      `movement in the rate since a cheque was taken is a revaluation, and it is answered on the revaluation ` +
+      `screen. The face amounts, currency by currency, are beside the totals and are never added across.`,
     received,
     issued,
     reconciled: received.reconciled && issued.reconciled,
     outstandingMinor: received.outstandingMinor + issued.outstandingMinor,
   };
+}
+
+/**
+ * The same conversion `toFunctional` in post.ts makes, digit for digit: the
+ * rate scaled to an integer at 1e9, half-up, no floats near the amount. The
+ * totals above are compared against balances that function produced, so a
+ * different rounding here would show up as a difference nobody posted.
+ */
+function convert(amountMinor: bigint, rate: number): bigint {
+  if (rate === 1) return amountMinor;
+  const SCALE = 1_000_000_000n;
+  const scaled = BigInt(Math.round(rate * 1e9));
+  const neg = amountMinor < 0n;
+  const abs = neg ? -amountMinor : amountMinor;
+  const out = (abs * scaled + SCALE / 2n) / SCALE;
+  return neg ? -out : out;
+}
+
+/**
+ * The rate each foreign cheque's own opening journal was posted at, by cheque.
+ *
+ * `heldEntryId` is the entry that put the paper into the holding account, and
+ * it is rewritten on a re-presentation, so it is always the entry the account's
+ * current balance came from. A cheque with no opening entry — a row half
+ * written by a failed record — has no rate, and the register says so rather
+ * than guessing one.
+ */
+async function openingRates(
+  orgId: string,
+  cheques: { id: string; heldEntryId: string | null }[],
+): Promise<Map<string, number>> {
+  const chequeOf = new Map<string, string>();
+  for (const c of cheques) if (c.heldEntryId) chequeOf.set(c.heldEntryId, c.id);
+
+  const out = new Map<string, number>();
+  if (chequeOf.size === 0) return out;
+
+  const lines = await prisma.journalLine.findMany({
+    where: { orgId, entryId: { in: [...chequeOf.keys()] } },
+    select: { entryId: true, fxRate: true },
+  });
+  for (const l of lines) {
+    const chequeId = chequeOf.get(l.entryId);
+    if (!chequeId || out.has(chequeId)) continue;
+    const rate = Number(l.fxRate.toFixed());
+    if (Number.isFinite(rate) && rate > 0) out.set(chequeId, rate);
+  }
+  return out;
 }
 
 /**
@@ -1222,12 +1421,27 @@ async function holdingBalances(orgId: string, entityId: string, asOf: Date): Pro
 /* ----------------------------------------------------------------- the diary */
 
 export interface DueSoonRow extends ChequeRow {
-  /** Every issued cheque due on or before this one, this bank account, summed. */
+  /**
+   * The cheque in the book's currency, at the rate its own opening journal was
+   * posted at — see `chequeRegister`. Null where that rate cannot be read, and
+   * the cover test below then has nothing to weigh this cheque with.
+   */
+  bookMinor: bigint | null;
+  /**
+   * Every issued cheque due on or before this one, this bank account, summed —
+   * in the book's currency, because that is what the balance it is measured
+   * against is in. A cheque whose book value is unknown adds nothing to it.
+   */
   cumulativeMinor: bigint;
   /** The balance of the account it will be drawn on, today. */
   bankMinor: bigint;
-  /** False when the cheques due by this date come to more than the bank holds. */
-  covered: boolean;
+  /**
+   * False when the cheques due by this date come to more than the bank holds.
+   * Null where this cheque could not be stated in the book's currency: neither
+   * "covered" nor "short" is a thing that can be said about it, and saying
+   * either would be a reassurance or an alarm drawn from nothing.
+   */
+  covered: boolean | null;
   shortfallMinor: bigint;
 }
 
@@ -1251,6 +1465,15 @@ export interface DueSoonRow extends ChequeRow {
  *
  * Cheques already past due and still not cleared are included rather than
  * filtered out: they are more urgent than anything in the window, not less.
+ *
+ * The cover test is arithmetic in ONE currency, and it has to be: a bank
+ * balance is in the book's currency and a cheque is in whatever it was written
+ * in. So each cheque is translated the way the register translates it — at the
+ * rate its own opening journal was posted at — and the cheques that carry no
+ * such rate are left out of the test and named, rather than being weighed
+ * against a balance in a different money. Comparing a riyal face amount against
+ * a dirham balance would say a cheque was covered when it was not, which is the
+ * one thing this diary exists to prevent.
  */
 export async function dueSoon(opts: {
   orgId: string;
@@ -1261,13 +1484,19 @@ export async function dueSoon(opts: {
   asOf: string;
   days: number;
   until: string;
+  /** The currency every total here is in, and the one the cover test is run in. */
+  functionalCurrency: string;
+  basis: string;
   received: ChequeRow[];
   issued: DueSoonRow[];
+  /** In the book's currency, and only the paper that could be stated in it. */
   receivedMinor: bigint;
   issuedMinor: bigint;
   bankMinor: bigint;
   shortfallMinor: bigint;
   uncoveredCount: number;
+  /** Cheques left out of the totals and the cover test, with the reason. */
+  untranslated: UntranslatedCheque[];
   /** The first day the account is committed beyond its balance, if any. */
   firstShortDay: string | null;
 }> {
@@ -1285,25 +1514,64 @@ export async function dueSoon(opts: {
     orderBy: [{ dueOn: "asc" }, { number: "asc" }],
   });
 
-  const received = cheques.filter((c) => c.direction === "RECEIVED").map((c) => rowOf(c, asOf));
+  const functional = await functionalCurrencyOf(opts.orgId, opts.entityId);
+  const rates = await openingRates(opts.orgId, cheques.filter((c) => c.currency !== functional));
+  const untranslated: UntranslatedCheque[] = [];
+
+  /** The cheque as the ledger holds it, or nothing, with the reason recorded. */
+  const inBook = (c: ChequeLike): bigint | null => {
+    if (c.currency === functional) return c.amountMinor;
+    const rate = rates.get(c.id);
+    if (rate === undefined) {
+      untranslated.push({
+        number: c.number, currency: c.currency, amountMinor: c.amountMinor,
+        reason: `its opening journal carries no rate this diary can read, so it cannot be weighed in ${functional}`,
+      });
+      return null;
+    }
+    return convert(c.amountMinor, rate);
+  };
+
+  const received = cheques.filter((c) => c.direction === "RECEIVED");
   const issuedRaw = cheques.filter((c) => c.direction === "ISSUED");
 
   const codes = [...new Set([BANK, ...issuedRaw.map((c) => c.bankAccount || BANK)])];
   const balances = await ledgerBalances({ orgId: opts.orgId, entityId: opts.entityId, codes });
 
+  const receivedMinor = received.reduce((a, c) => a + (inBook(c) ?? 0n), 0n);
+
   const running = new Map<string, bigint>();
   let shortfallMinor = 0n;
+  let issuedMinor = 0n;
   let firstShortDay: string | null = null;
   const issued: DueSoonRow[] = issuedRaw.map((c) => {
     const account = c.bankAccount || BANK;
-    const cumulative = (running.get(account) ?? 0n) + c.amountMinor;
-    running.set(account, cumulative);
     const bank = balances.get(account) ?? 0n;
+    const book = inBook(c);
+
+    // A cheque that cannot be stated in the book's currency adds nothing to the
+    // running commitment: adding its face amount would be adding two different
+    // moneys, and the cover test below would then be about neither of them.
+    if (book === null) {
+      return {
+        ...rowOf(c, asOf),
+        bookMinor: null,
+        cumulativeMinor: running.get(account) ?? 0n,
+        bankMinor: bank,
+        covered: null,
+        shortfallMinor: 0n,
+      };
+    }
+
+    issuedMinor += book;
+    const cumulative = (running.get(account) ?? 0n) + book;
+    running.set(account, cumulative);
     const short = cumulative > bank ? cumulative - bank : 0n;
     if (short > shortfallMinor) shortfallMinor = short;
     if (short > 0n && firstShortDay === null) firstShortDay = day(c.dueOn);
     return {
       ...rowOf(c, asOf),
+      bookMinor: book,
       cumulativeMinor: cumulative,
       bankMinor: bank,
       covered: short === 0n,
@@ -1315,13 +1583,20 @@ export async function dueSoon(opts: {
     asOf: day(asOf),
     days,
     until: day(until),
-    received,
+    functionalCurrency: functional,
+    basis:
+      `The bank balance is in ${functional}, so the cover test is run in ${functional}: a cheque written in another ` +
+      `currency is weighed at the rate its own opening journal was posted at, never at its face. A cheque that ` +
+      `carries no such rate is left out of both the totals and the test and named beside them — a cheque nobody can ` +
+      `measure is not a cheque that is covered.`,
+    received: received.map((c) => rowOf(c, asOf)),
     issued,
-    receivedMinor: received.reduce((a, r) => a + r.amountMinor, 0n),
-    issuedMinor: issued.reduce((a, r) => a + r.amountMinor, 0n),
+    receivedMinor,
+    issuedMinor,
     bankMinor: codes.reduce((a, code) => a + (balances.get(code) ?? 0n), 0n),
     shortfallMinor,
-    uncoveredCount: issued.filter((r) => !r.covered).length,
+    uncoveredCount: issued.filter((r) => r.covered === false).length,
+    untranslated,
     firstShortDay,
   };
 }
@@ -1342,9 +1617,14 @@ export async function chequeDetail(opts: {
   entityId: string;
   chequeId: string;
   asOf?: Date | string;
-}): Promise<{ cheque: ChequeRow; history: ChequeEvent[] }> {
+}): Promise<{ cheque: ChequeRow; history: ChequeEvent[]; functionalCurrency: string }> {
   const c = await loadCheque(opts.orgId, opts.entityId, opts.chequeId);
   const asOf = asDay(opts.asOf ?? new Date(), "The register date");
+  // Returned so the screen can say which currency the journals are written in
+  // rather than restating a literal of its own. Whether a move on this cheque
+  // needs a rate is exactly `c.currency !== functionalCurrency`, and that is a
+  // question about this entity's book, not about the product.
+  const functionalCurrency = await functionalCurrencyOf(opts.orgId, opts.entityId);
 
   const entries = await prisma.journalEntry.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId, source: "cheque", sourceId: c.id },
@@ -1381,7 +1661,7 @@ export async function chequeDetail(opts: {
     });
   }
 
-  return { cheque: rowOf(c, asOf), history };
+  return { cheque: rowOf(c, asOf), history, functionalCurrency };
 }
 
 export {

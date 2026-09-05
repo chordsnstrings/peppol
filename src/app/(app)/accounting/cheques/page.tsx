@@ -51,6 +51,21 @@ interface ChequeRow {
   accountCode: string;
 }
 
+interface CurrencyTotal {
+  currency: string;
+  count: number;
+  heldMinor: string;
+  depositedMinor: string;
+  outstandingMinor: string;
+}
+
+interface UntranslatedCheque {
+  number: string;
+  currency: string;
+  amountMinor: string;
+  reason: string;
+}
+
 interface DirectionRegister {
   direction: Direction;
   accountCode: string;
@@ -59,12 +74,17 @@ interface DirectionRegister {
   cleared: ChequeRow[];
   bounced: ChequeRow[];
   closed: ChequeRow[];
+  /** In the book's currency — see `basis` on the register. */
   heldMinor: string;
   depositedMinor: string;
   outstandingMinor: string;
   clearedMinor: string;
   bouncedMinor: string;
   buckets: Record<DueBucket, string>;
+  /** The outstanding paper as it is written, never added across currencies. */
+  byCurrency: CurrencyTotal[];
+  untranslated: UntranslatedCheque[];
+  comparable: boolean;
   ledgerMinor: string;
   differenceMinor: string;
   reconciled: boolean;
@@ -72,9 +92,12 @@ interface DirectionRegister {
 }
 
 interface DueSoonRow extends ChequeRow {
+  /** The cheque in the book's currency, or null where that cannot be said. */
+  bookMinor: string | null;
   cumulativeMinor: string;
   bankMinor: string;
-  covered: boolean;
+  /** Null where the cheque could not be weighed against the balance at all. */
+  covered: boolean | null;
   shortfallMinor: string;
 }
 
@@ -82,19 +105,26 @@ interface Diary {
   asOf: string;
   days: number;
   until: string;
+  functionalCurrency: string;
+  basis: string;
   received: ChequeRow[];
   issued: DueSoonRow[];
+  /** In the book's currency, and only the paper that could be stated in it. */
   receivedMinor: string;
   issuedMinor: string;
   bankMinor: string;
   shortfallMinor: string;
   uncoveredCount: number;
+  untranslated: UntranslatedCheque[];
   firstShortDay: string | null;
 }
 
 interface RegisterResponse {
   register: {
     asOf: string;
+    /** The entity's own book currency, read from the ledger rather than assumed. */
+    functionalCurrency: string;
+    basis: string;
     received: DirectionRegister;
     issued: DirectionRegister;
     reconciled: boolean;
@@ -114,6 +144,7 @@ interface ChequeEvent {
 interface DetailResponse {
   cheque: ChequeRow;
   history: ChequeEvent[];
+  functionalCurrency: string;
 }
 
 /** The same table the subledger enforces, so a blocked action says why here too. */
@@ -177,19 +208,13 @@ const BUCKETS: { key: DueBucket; label: string; hint: string }[] = [
 const today = () => new Date().toISOString().slice(0, 10);
 
 /**
- * The currency the journal is written in. A cheque may be drawn in anything —
- * a supplier in Riyadh writes one in SAR — but the entry that records it is in
- * the book's own currency, so anything else has to arrive with a rate.
- *
- * The subledger says the same thing by comparing the cheque's currency against
- * this literal, which is why the screen can state it rather than read it: if
- * the book ever stops being kept in dirhams, `fxOf` in cheques.ts is the place
- * that changes and this follows it.
- */
-const BOOK_CURRENCY = "AED";
-
-/**
  * Which moves need a rate to the book's currency.
+ *
+ * `book` is the entity's own functional currency, read from the register and
+ * the detail rather than stated here. It was the literal "AED", with a comment
+ * saying `fxOf` in cheques.ts held the same literal so the screen could repeat
+ * it; both now read the book, and an entity keeping its books in anything else
+ * is no longer told every one of its domestic cheques is foreign.
  *
  * Not "every move on a foreign cheque": banking a cheque raises no journal at
  * all — the paper went from a drawer to a counter — and handing back or
@@ -197,8 +222,8 @@ const BOOK_CURRENCY = "AED";
  * bounce already put the debt back on the trade account. Demanding a rate for
  * a posting that will not happen is a gate that teaches the wrong rule.
  */
-function needsRate(cheque: { currency: string; status: ChequeStatus }, to: ChequeStatus): boolean {
-  if (cheque.currency.toUpperCase() === BOOK_CURRENCY) return false;
+function needsRate(cheque: { currency: string; status: ChequeStatus }, to: ChequeStatus, book: string): boolean {
+  if (cheque.currency.toUpperCase() === book.toUpperCase()) return false;
   if (to === "deposited") return false;
   if (cheque.status === "bounced" && (to === "returned" || to === "cancelled")) return false;
   return true;
@@ -299,9 +324,13 @@ export default function ChequesPage() {
       {msg && <div className="sw-note mb-3" role="status" data-testid="cheque-result">{msg}</div>}
       {q.error && <ErrorNote>{q.error}</ErrorNote>}
 
-      {recording && (
+      {/* The form needs the book's currency, and the register is where it is
+          read from. Until that has loaded there is no honest default to offer:
+          a form that guesses would put the wrong currency on the paper. */}
+      {recording && reg && (
         <RecordCheque
           busy={busy === "record"}
+          book={reg.functionalCurrency}
           onRecord={async (cheque) => {
             const r = await act("record", { action: "record", ...cheque });
             if (r) {
@@ -334,12 +363,16 @@ export default function ChequesPage() {
               sub="Customers' paper, held until it clears."
               register={reg.received}
               asOf={reg.asOf}
+              book={reg.functionalCurrency}
+              basis={reg.basis}
             />
             <Reconciliation
               title="Cheques issued"
               sub="Our own paper, committed and dated."
               register={reg.issued}
               asOf={reg.asOf}
+              book={reg.functionalCurrency}
+              basis={reg.basis}
             />
           </div>
 
@@ -354,12 +387,14 @@ export default function ChequesPage() {
             <RegisterTable
               title="Received — the register"
               register={reg.received}
+              book={reg.functionalCurrency}
               onOpen={(id) => setSelected(id === selected ? null : id)}
               selected={selected}
             />
             <RegisterTable
               title="Issued — the register"
               register={reg.issued}
+              book={reg.functionalCurrency}
               onOpen={(id) => setSelected(id === selected ? null : id)}
               selected={selected}
             />
@@ -388,28 +423,33 @@ export default function ChequesPage() {
  * The register against the ledger, drawn as the subtraction it is.
  *
  * The two figures are computed from different places on purpose — one from the
- * cheques, one from the journal lines — so agreement means something. The chip
- * is never the only signal: the difference is shown as a figure beside it.
+ * cheques, one from the journal lines — so agreement means something. A foreign
+ * cheque borrows one thing from the ledger, the rate its own opening entry was
+ * posted at, because the register holds no rate; the amount and the list of
+ * what is outstanding are still the register's, which is what the comparison
+ * actually tests. The chip is never the only signal: the difference is shown as
+ * a figure beside it.
  */
-function Reconciliation({ title, sub, register, asOf }: {
-  title: string; sub: string; register: DirectionRegister; asOf: string;
+function Reconciliation({ title, sub, register, asOf, book, basis }: {
+  title: string; sub: string; register: DirectionRegister; asOf: string; book: string; basis: string;
 }) {
-  const currency = register.held[0]?.currency ?? register.deposited[0]?.currency ?? BOOK_CURRENCY;
   /*
-   * Whether the outstanding total is a total of one currency.
+   * Both columns are in the book's currency now, so they are one measurement
+   * and the subtraction means something again. The register used to add face
+   * amounts across currencies and set the result against a functional-currency
+   * balance, which made the difference a translation rather than a
+   * finding — and the chip beside it called it one. `chequeRegister` translates
+   * each foreign cheque at the rate its own opening journal was posted at and
+   * says so in `basis`, and the face amounts are drawn separately below,
+   * currency by currency.
    *
-   * `chequeRegister` adds `amountMinor` across the paper it is a register of,
-   * and a cheque keeps its own currency — so once a foreign cheque is in the
-   * drawer, that total is dirhams and riyals added together, while the ledger
-   * figure beside it is the entity's functional currency alone. The difference
-   * between them is then a translation and not a fault, and the chip above
-   * would be calling it one. Saying so is the only honest thing to draw here:
-   * the register cannot be made to tie in a currency it does not carry.
+   * The one case that still cannot be compared is a foreign cheque whose
+   * opening journal carries no rate this register can read. The ledger carries
+   * it and the register cannot, so the subtraction is missing a term — the
+   * server says so with `comparable`, and the chip must not claim either way.
    */
-  const currencies = [...new Set(
-    [...register.held, ...register.deposited].map((c) => c.currency.toUpperCase()),
-  )];
-  const mixed = currencies.length > 1 || (currencies.length === 1 && currencies[0] !== BOOK_CURRENCY);
+  const comparable = register.comparable;
+  const foreign = register.byCurrency.filter((t) => t.currency.toUpperCase() !== book.toUpperCase());
   return (
     <Panel className="p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -418,10 +458,10 @@ function Reconciliation({ title, sub, register, asOf }: {
           <p className="sw-sub mt-0.5">{sub}</p>
         </div>
         <span
-          className={`sw-chip ${mixed ? "sw-chip-warn" : register.reconciled ? "sw-chip-ok" : "sw-chip-bad"}`}
+          className={`sw-chip ${!comparable ? "sw-chip-warn" : register.reconciled ? "sw-chip-ok" : "sw-chip-bad"}`}
           data-testid={`chip-${register.direction}`}
         >
-          {mixed ? "not comparable" : register.reconciled ? "ties to the ledger" : "does not tie"}
+          {!comparable ? "not comparable" : register.reconciled ? "ties to the ledger" : "does not tie"}
         </span>
       </div>
 
@@ -433,7 +473,7 @@ function Reconciliation({ title, sub, register, asOf }: {
           <tr>
             <th scope="row" style={{ fontWeight: 400 }}>In hand</th>
             <td className="sw-num" data-testid={`held-${register.direction}`}>
-              <Figure minor={register.heldMinor} currency={currency} zero="zero" colour={false} />
+              <Figure minor={register.heldMinor} currency={book} zero="zero" colour={false} />
             </td>
           </tr>
           <tr>
@@ -441,7 +481,7 @@ function Reconciliation({ title, sub, register, asOf }: {
               <span aria-hidden="true">+ </span>With the bank
             </th>
             <td className="sw-num">
-              <Figure minor={register.depositedMinor} currency={currency} zero="zero" colour={false} />
+              <Figure minor={register.depositedMinor} currency={book} zero="zero" colour={false} />
             </td>
           </tr>
         </tbody>
@@ -449,7 +489,7 @@ function Reconciliation({ title, sub, register, asOf }: {
           <tr>
             <th scope="row">Outstanding paper</th>
             <td className="sw-num" data-testid={`outstanding-${register.direction}`}>
-              <Figure minor={register.outstandingMinor} currency={currency} zero="zero" colour={false} />
+              <Figure minor={register.outstandingMinor} currency={book} zero="zero" colour={false} />
             </td>
           </tr>
           <tr>
@@ -461,26 +501,58 @@ function Reconciliation({ title, sub, register, asOf }: {
               in the ledger
             </th>
             <td className="sw-num">
-              <Figure minor={register.ledgerMinor} currency={currency} zero="zero" colour={false} />
+              <Figure minor={register.ledgerMinor} currency={book} zero="zero" colour={false} />
             </td>
           </tr>
           <tr>
             <th scope="row" style={{ fontWeight: 400 }}>Difference</th>
             <td className="sw-num" data-testid={`difference-${register.direction}`}>
-              <Figure minor={register.differenceMinor} currency={currency} />
+              <Figure minor={register.differenceMinor} currency={book} />
             </td>
           </tr>
         </tfoot>
       </table>
 
-      {mixed && (
-        <p className="sw-sub mt-2 max-w-[60ch]" data-testid={`mixed-${register.direction}`}>
-          This register holds paper in {currencies.join(", ")}, and the outstanding figure adds those face amounts
-          together as they are written. Account {register.accountCode} is kept in {BOOK_CURRENCY} at the rate on each
-          posting, so the two are not the same measurement and the difference above is a translation rather than a
-          finding. The paper itself is right; only the subtraction is meaningless.
+      {foreign.length > 0 && (
+        <div className="sw-scroll mt-3">
+          <table className="sw-table" style={{ maxWidth: "32rem" }}>
+            <caption className="sr-only">
+              {title}: the outstanding paper as it is written, currency by currency
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Paper as written</th>
+                <th className="sw-num" scope="col" style={{ width: "4rem" }}>Cheques</th>
+                <th className="sw-num" scope="col" style={{ width: "var(--sw-col-amount)" }}>Outstanding</th>
+              </tr>
+            </thead>
+            <tbody data-testid={`by-currency-${register.direction}`}>
+              {register.byCurrency.map((t) => (
+                <tr key={t.currency}>
+                  <th scope="row" className="sw-code" style={{ fontWeight: 400 }}>{t.currency}</th>
+                  <td className="sw-num">{t.count}</td>
+                  <td className="sw-num">
+                    <Figure minor={t.outstandingMinor} currency={t.currency} zero="zero" colour={false} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!comparable && (
+        <p className="sw-sub mt-2 max-w-[64ch]" data-testid={`untranslated-${register.direction}`}>
+          {register.untranslated.length === 1 ? "One cheque is" : `${register.untranslated.length} cheques are`} left
+          out of the totals above, so they are not the whole of this drawer and the difference is not a
+          reconciliation:{" "}
+          {register.untranslated
+            .map((u) => `${u.number} (${fmtMinor(u.amountMinor, u.currency)}) — ${u.reason}`)
+            .join("; ")}.
         </p>
       )}
+
+      <p className="sw-sub mt-2 max-w-[64ch]" data-testid={`basis-${register.direction}`}>{basis}</p>
 
       <div className="sw-scroll mt-3">
         <table className="sw-table">
@@ -496,7 +568,7 @@ function Reconciliation({ title, sub, register, asOf }: {
             <tr>
               {BUCKETS.map((b) => (
                 <td key={b.key} className="sw-num" data-testid={`bucket-${register.direction}-${b.key}`}>
-                  <Figure minor={register.buckets[b.key]} currency={currency} colour={false} />
+                  <Figure minor={register.buckets[b.key]} currency={book} colour={false} />
                 </td>
               ))}
             </tr>
@@ -515,11 +587,30 @@ function Reconciliation({ title, sub, register, asOf }: {
   );
 }
 
+/**
+ * A cheque's face amount, with its currency code beside it where that is not
+ * the book's own.
+ *
+ * `fmtMinor` uses the currency for the exponent and prints no code, so a riyal
+ * cheque and a dirham cheque in the same column render identically. In a list
+ * that mixes them — which every one of these lists now can — the code is the
+ * only thing that says which is which.
+ */
+function Face({ minor, currency, book }: { minor: string; currency: string; book: string }) {
+  return (
+    <>
+      <Figure minor={minor} currency={currency} colour={false} />
+      {currency.toUpperCase() !== book.toUpperCase() && <span className="sw-code sw-sub"> {currency}</span>}
+    </>
+  );
+}
+
 /* ---------------------------------------------------------------- the diary */
 
 function ComingIn({ diary, onOpen, selected }: {
   diary: Diary; onOpen: (id: string) => void; selected: string | null;
 }) {
+  const book = diary.functionalCurrency;
   return (
     <Panel className="overflow-hidden">
       <PanelHead
@@ -554,7 +645,7 @@ function ComingIn({ diary, onOpen, selected }: {
                     {c.counterparty}
                     {c.bankName && <span className="sw-sub"> · {c.bankName}</span>}
                   </td>
-                  <td className="sw-num"><Figure minor={c.amountMinor} currency={c.currency} colour={false} /></td>
+                  <td className="sw-num"><Face minor={c.amountMinor} currency={c.currency} book={book} /></td>
                 </tr>
               ))}
             </tbody>
@@ -562,7 +653,7 @@ function ComingIn({ diary, onOpen, selected }: {
               <tr>
                 <th scope="row" colSpan={3} style={{ textAlign: "end" }}>Expected in</th>
                 <td className="sw-num" data-testid="diary-in-total">
-                  <Figure minor={diary.receivedMinor} zero="zero" colour={false} />
+                  <Figure minor={diary.receivedMinor} currency={diary.functionalCurrency} zero="zero" colour={false} />
                 </td>
               </tr>
             </tfoot>
@@ -586,6 +677,7 @@ function ComingIn({ diary, onOpen, selected }: {
 function GoingOut({ diary, onOpen, selected }: {
   diary: Diary; onOpen: (id: string) => void; selected: string | null;
 }) {
+  const book = diary.functionalCurrency;
   return (
     <Panel className="overflow-hidden">
       <PanelHead
@@ -628,16 +720,25 @@ function GoingOut({ diary, onOpen, selected }: {
                     <OpenButton cheque={c} onOpen={onOpen} selected={selected} />
                   </td>
                   <td className="max-w-0 truncate">{c.counterparty}</td>
-                  <td className="sw-num"><Figure minor={c.amountMinor} currency={c.currency} colour={false} /></td>
-                  <td className="sw-num"><Figure minor={c.cumulativeMinor} currency={c.currency} colour={false} /></td>
+                  <td className="sw-num"><Face minor={c.amountMinor} currency={c.currency} book={book} /></td>
+                  <td className="sw-num">
+                    {/* The running commitment is in the book's currency, because
+                        the balance it is weighed against is. A cheque that could
+                        not be translated adds nothing to it and says so. */}
+                    <Figure minor={c.cumulativeMinor} currency={diary.functionalCurrency} colour={false} />
+                  </td>
                   <td>
-                    {c.covered ? (
+                    {c.covered === null ? (
+                      <span className="sw-chip sw-chip-warn" title={`No rate on file to weigh this ${c.currency} cheque in ${diary.functionalCurrency}`}>
+                        not measurable
+                      </span>
+                    ) : c.covered ? (
                       <span className="sw-chip sw-chip-ok">covered</span>
                     ) : (
                       <>
                         <span className="sw-chip sw-chip-bad">short</span>
                         <span className="block text-[0.6875rem] sw-num">
-                          <Figure minor={`-${c.shortfallMinor}`} currency={c.currency} />
+                          <Figure minor={`-${c.shortfallMinor}`} currency={diary.functionalCurrency} />
                         </span>
                       </>
                     )}
@@ -649,9 +750,11 @@ function GoingOut({ diary, onOpen, selected }: {
               <tr>
                 <th scope="row" colSpan={3} style={{ textAlign: "end" }}>Committed</th>
                 <td className="sw-num" data-testid="diary-out-total">
-                  <Figure minor={diary.issuedMinor} zero="zero" colour={false} />
+                  <Figure minor={diary.issuedMinor} currency={diary.functionalCurrency} zero="zero" colour={false} />
                 </td>
-                <td className="sw-num"><Figure minor={diary.bankMinor} zero="zero" colour={false} /></td>
+                <td className="sw-num">
+                  <Figure minor={diary.bankMinor} currency={diary.functionalCurrency} zero="zero" colour={false} />
+                </td>
                 <td>in the bank</td>
               </tr>
             </tfoot>
@@ -660,21 +763,32 @@ function GoingOut({ diary, onOpen, selected }: {
       )}
       <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }}>
         Cover is measured against the bank alone. The{" "}
-        <Figure minor={diary.receivedMinor} zero="zero" colour={false} /> of customers&rsquo; cheques due in the same
-        window is shown beside this and deliberately not counted here: a business that meets its own cheques out of
-        cheques it has been handed is one dishonour away from dishonouring its own.
+        <Figure minor={diary.receivedMinor} currency={diary.functionalCurrency} zero="zero" colour={false} /> of
+        customers&rsquo; cheques due in the same window is shown beside this and deliberately not counted here: a
+        business that meets its own cheques out of cheques it has been handed is one dishonour away from dishonouring
+        its own.
         {diary.firstShortDay && (
           <> On <strong>{diary.firstShortDay}</strong> the commitments pass the balance.</>
         )}
       </p>
+      <p className="sw-sub px-3 pb-2" data-testid="diary-basis">{diary.basis}</p>
+      {diary.untranslated.length > 0 && (
+        <p className="sw-sub px-3 pb-2 max-w-[70ch]" data-testid="diary-untranslated">
+          Left out of both:{" "}
+          {diary.untranslated
+            .map((u) => `${u.number} (${fmtMinor(u.amountMinor, u.currency)}) — ${u.reason}`)
+            .join("; ")}.
+        </p>
+      )}
     </Panel>
   );
 }
 
 /* ------------------------------------------------------------- the register */
 
-function RegisterTable({ title, register, onOpen, selected }: {
-  title: string; register: DirectionRegister; onOpen: (id: string) => void; selected: string | null;
+function RegisterTable({ title, register, book, onOpen, selected }: {
+  title: string; register: DirectionRegister; book: string;
+  onOpen: (id: string) => void; selected: string | null;
 }) {
   // Live paper first — it is what somebody can still act on — then the settled
   // history underneath it, in the same table so the counts always add up.
@@ -716,7 +830,7 @@ function RegisterTable({ title, register, onOpen, selected }: {
                     {c.dueOn}
                     {c.outstanding && c.daysToDue < 0 && <span className="sw-chip sw-chip-warn ml-1.5">past due</span>}
                   </td>
-                  <td className="sw-num"><Figure minor={c.amountMinor} currency={c.currency} colour={false} /></td>
+                  <td className="sw-num"><Face minor={c.amountMinor} currency={c.currency} book={book} /></td>
                   <td>
                     <span className={`sw-chip ${TONE[c.status]}`} data-testid={`state-${c.number}`}>{SAYS[c.status]}</span>
                     {c.bounceCount > 0 && c.status !== "bounced" && (
@@ -785,6 +899,9 @@ function ChequePanel({ detail, busy, onAct }: {
   onAct: (action: string, body: Record<string, unknown>, said: string) => void;
 }) {
   const c = detail.cheque;
+  /* The entity's own book currency, as the subledger reads it. The panel used
+   * to state the literal "AED" here, which was only ever right by accident. */
+  const book = detail.functionalCurrency;
   const [on, setOn] = React.useState(today);
   const [reason, setReason] = React.useState("");
   const [fxRate, setFxRate] = React.useState("");
@@ -795,7 +912,7 @@ function ChequePanel({ detail, busy, onAct }: {
   /* A rate is asked for once the cheque is foreign and at least one of the
    * steps still open to it would post. Asking on every foreign cheque would
    * demand one to bank a cheque, which posts nothing. */
-  const ratePossiblyNeeded = allowed.some((to) => needsRate(c, to));
+  const ratePossiblyNeeded = allowed.some((to) => needsRate(c, to, book));
 
   /**
    * Why a step is unavailable, in the words the server would use. Returning the
@@ -808,8 +925,8 @@ function ChequePanel({ detail, busy, onAct }: {
         `so this is not a step it can take.`;
     }
     if (to === "bounced" && !reason.trim()) return "A bounce needs the reason the bank gave.";
-    if (needsRate(c, to) && rate === null) {
-      return `Cheque ${c.number} is in ${c.currency}, so this entry needs the rate to ${BOOK_CURRENCY} on ${on}. ` +
+    if (needsRate(c, to, book) && rate === null) {
+      return `Cheque ${c.number} is in ${c.currency}, so this entry needs the rate to ${book} on ${on}. ` +
         `The rate is not held on the cheque — a cheque moves on several different days and a rate belongs to one.`;
     }
     return undefined;
@@ -822,7 +939,7 @@ function ChequePanel({ detail, busy, onAct }: {
       {
         on,
         ...(reason.trim() ? { reason: reason.trim() } : {}),
-        ...(needsRate(c, to) && rate !== null ? { fxRate: rate } : {}),
+        ...(needsRate(c, to, book) && rate !== null ? { fxRate: rate } : {}),
       },
       said,
     );
@@ -847,7 +964,7 @@ function ChequePanel({ detail, busy, onAct }: {
               <th scope="row" style={{ fontWeight: 400 }}>Amount</th>
               <td className="sw-num">
                 <Figure minor={c.amountMinor} currency={c.currency} colour={false} />
-                {c.currency.toUpperCase() !== BOOK_CURRENCY && (
+                {c.currency.toUpperCase() !== book.toUpperCase() && (
                   <span className="sw-code"> {c.currency}</span>
                 )}
               </td>
@@ -931,7 +1048,7 @@ function ChequePanel({ detail, busy, onAct }: {
             />
           </Field>
           {ratePossiblyNeeded && (
-            <Field label={`Rate — one ${c.currency} in ${BOOK_CURRENCY}`}>
+            <Field label={`Rate — one ${c.currency} in ${book}`}>
               <input
                 className={`sw-input sw-cell-num ${fxRate.trim() && rate === null ? "sw-cell-invalid" : ""}`}
                 inputMode="decimal"
@@ -980,7 +1097,7 @@ function ChequePanel({ detail, busy, onAct }: {
           ) : ratePossiblyNeeded && rate === null ? (
             <>
               Cheque {c.number} is in {c.currency}. Every step here that moves money writes its entry in{" "}
-              {BOOK_CURRENCY}, so it needs the rate on the day above; the cheque itself stays in {c.currency}, which is
+              {book}, so it needs the rate on the day above; the cheque itself stays in {c.currency}, which is
               what it is worth to whoever is holding it. Banking it is the exception and needs no rate, because that
               step posts nothing.
             </>
@@ -995,8 +1112,10 @@ function ChequePanel({ detail, busy, onAct }: {
 
 /* ------------------------------------------------------------- the form */
 
-function RecordCheque({ busy, onRecord }: {
+function RecordCheque({ busy, book, onRecord }: {
   busy: boolean;
+  /** The entity's own book currency, from the register — never a literal here. */
+  book: string;
   onRecord: (cheque: Record<string, unknown>) => void;
 }) {
   const [f, setF] = React.useState({
@@ -1007,7 +1126,7 @@ function RecordCheque({ busy, onRecord }: {
     writtenOn: today(),
     dueOn: "",
     amount: "",
-    currency: BOOK_CURRENCY,
+    currency: book,
     fxRate: "",
     settlesId: "",
     bankAccount: "1010",
@@ -1015,7 +1134,7 @@ function RecordCheque({ busy, onRecord }: {
   const set = (k: keyof typeof f, v: string) => setF((x) => ({ ...x, [k]: v }));
 
   const currency = f.currency.trim().toUpperCase();
-  const foreign = isCurrencyCode(currency) && currency !== BOOK_CURRENCY;
+  const foreign = isCurrencyCode(currency) && currency !== book.toUpperCase();
   /* Parsed at the cheque's own exponent, not at two decimals. A Kuwaiti cheque
    * for 250 dinars is 250,000 fils and a dirham cheque for 250 is 25,000 —
    * reading both as "250 at two places" is wrong by a factor of ten for the
@@ -1029,7 +1148,7 @@ function RecordCheque({ busy, onRecord }: {
     !f.counterparty.trim() ? (f.direction === "RECEIVED" ? "Who wrote it?" : "Who is it written to?") :
     !isCurrencyCode(currency) ? "A currency is a three-letter code, such as AED or SAR." :
     amount === null || amount <= 0n ? "How much is it for?" :
-    foreign && rate === null ? `A cheque in ${currency} needs its rate to ${BOOK_CURRENCY} on the day it changed hands — the ledger is kept in ${BOOK_CURRENCY}, and the cheque stays in ${currency}.` :
+    foreign && rate === null ? `A cheque in ${currency} needs its rate to ${book} on the day it changed hands — the ledger is kept in ${book}, and the cheque stays in ${currency}.` :
     !f.writtenOn ? "When was it written?" :
     !f.dueOn ? "What date does it carry? That date is the whole point of a post-dated cheque." :
     f.dueOn < f.writtenOn ? "A cheque cannot fall due before it is written — check which way round the dates went in." :
@@ -1078,7 +1197,7 @@ function RecordCheque({ busy, onRecord }: {
             className="sw-input sw-code"
             value={f.currency}
             onChange={(e) => set("currency", e.target.value.toUpperCase())}
-            placeholder={BOOK_CURRENCY}
+            placeholder={book}
             data-testid="cheque-currency"
           />
         </Field>
@@ -1086,7 +1205,7 @@ function RecordCheque({ busy, onRecord }: {
           <input className="sw-input sw-cell-num" inputMode="decimal" value={f.amount} onChange={(e) => set("amount", e.target.value)} placeholder="105,000.00" />
         </Field>
         {foreign && (
-          <Field label={`Rate — one ${currency} in ${BOOK_CURRENCY}`}>
+          <Field label={`Rate — one ${currency} in ${book}`}>
             <input
               className={`sw-input sw-cell-num ${f.fxRate.trim() && rate === null ? "sw-cell-invalid" : ""}`}
               inputMode="decimal"
@@ -1148,7 +1267,7 @@ function RecordCheque({ busy, onRecord }: {
             )}
             {" "}· presentable from {f.dueOn} ({fmtMinor(amount, currency)} due that day)
             {foreign && (
-              <> · each line carries {currency} at {f.fxRate.trim()}, and the ledger holds its {BOOK_CURRENCY} value</>
+              <> · each line carries {currency} at {f.fxRate.trim()}, and the ledger holds its {book} value</>
             )}
           </span>
         )}

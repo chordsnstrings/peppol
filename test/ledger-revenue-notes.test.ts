@@ -125,4 +125,16 @@ d("the contract balances note — IFRS 15.116-118", () => {
     expect(n.notDerivable.join(" ")).toContain("corrects to a target");
     expect(n.notDerivable.join(" ")).toContain("15.118");
   });
+
+  /*
+   * The screen prints this list as the module writes it. A disclosure that says
+   * why a figure is absent is a disclosure; a row silently left out reads as a
+   * nil, which is a different and untrue statement.
+   */
+  it("says which of 15.116 it cannot answer, so the screen can print the reason", async () => {
+    const n = await contractBalancesNote({ ...S, from: "2026-01-01", to: "2026-12-31" });
+    expect(n.notDerivable).toHaveLength(2);
+    expect(n.notDerivable.join(" ")).toContain("15.116(b)");
+    expect(n.notDerivable.every((r) => r.trim().length > 0)).toBe(true);
+  });
 });

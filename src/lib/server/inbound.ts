@@ -2,12 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "./prisma";
 import { getRecord, putRecord } from "./store";
 import { getGateway, isSimulatedTransmission } from "@/lib/gateway/registry";
-import { SIMULATED_SEND_NOTE } from "@/lib/gateway/disclosure";
+import {
+  FETCH_UNSUPPORTED,
+  RECEIPT_NOT_TRANSMITTED,
+  RECEIPT_SEND_FAILED,
+  SIMULATED_ARRIVAL_NOTE,
+  SIMULATED_SEND_NOTE,
+} from "@/lib/gateway/disclosure";
 import { PINT_AE } from "@/lib/gateway/port";
 import type { GatewayEvent, InboundDocument, ReceiptDecision } from "@/lib/gateway/port";
 import { isWellFormedPeppolId } from "@/lib/domain/peppol";
 import { parseMoneyToMinor } from "@/lib/domain/money";
-import type { AppNotification, Entity, InboundDoc } from "@/lib/domain/types";
+import type { AppNotification, Entity, InboundDecision, InboundDoc } from "@/lib/domain/types";
 
 /**
  * Corner 4: receiving.
@@ -33,58 +39,36 @@ import type { AppNotification, Entity, InboundDoc } from "@/lib/domain/types";
  * legal obligation they cannot see.
  */
 
-/**
- * What may be said about a document the simulator produced rather than the
- * network delivered. `SIMULATED_SEND_NOTE` covers a send; an arrival needs its
- * own sentence because "nothing was transmitted" answers the wrong question
- * when the thing in front of the reader claims to be an invoice from a
- * supplier. The claim being corrected here is that a supplier sent it.
+/*
+ * The sentences this module writes onto a record live in
+ * `@/lib/gateway/disclosure` with everything else the product is allowed to say
+ * about a simulated gateway, so that the sending half and the receiving half
+ * cannot drift apart. They are re-exported here because the callers that quote
+ * them have always imported them from this module.
  */
-export const SIMULATED_ARRIVAL_NOTE =
-  "This document was produced by this deployment's simulated gateway driver. Nothing arrived from the Peppol network and no supplier sent it.";
-
-/** Said when the driver is real but has no channel for an answer back to the supplier. */
-export const RECEIPT_NOT_TRANSMITTED =
-  "This deployment's gateway driver has no channel for sending a decision back to the supplier, so the decision is recorded here only. The supplier has not been told.";
-
-/** Said when the channel exists and the gateway refused the answer. */
-export const RECEIPT_SEND_FAILED =
-  "The gateway did not accept the decision, so the supplier has not been told. The decision is recorded here; send it again once the gateway is reachable.";
-
-/** Said when a driver cannot be asked for post at all. */
-export const FETCH_UNSUPPORTED =
-  "This deployment's gateway driver cannot be asked for inbound documents. Documents it receives arrive over its webhook instead.";
+export { FETCH_UNSUPPORTED, RECEIPT_NOT_TRANSMITTED, RECEIPT_SEND_FAILED, SIMULATED_ARRIVAL_NOTE };
 
 /**
- * The recipient's answer, as it stands on the record.
+ * The recipient's answer, under the name this module has always exported it by.
  *
- * `transmitted` is the only field that claims anything about the outside world,
- * and it is false unless a live driver accepted the receipt. A simulated
- * decision still records `receiptRef`, exactly as a simulated send records a
- * MOCK- gateway reference on its Transmission row: the reference is real as an
- * identifier and worthless as evidence, and `simulated` is what says so.
+ * The shape itself is `InboundDecision` in the domain types, beside the record
+ * it hangs off: the inbox screen reads it, and a decision the screen cannot
+ * describe is a decision the recipient cannot see.
  */
-export interface InboundDecisionRecord {
-  outcome: ReceiptDecision;
-  /** The recipient's own words. Required for a rejection — it is why. */
-  reason?: string;
-  decidedAt: string;
-  decidedBy: string;
-  transmitted: boolean;
-  simulated: boolean;
-  receiptRef?: string;
-  /** What the screen is allowed to say about the transmission, or nothing when it went. */
-  note?: string;
-}
+export type InboundDecisionRecord = InboundDecision;
 
 /**
  * The stored shape of an arrival.
  *
- * `InboundDoc` in the domain types is what the inbox screen already reads and
- * is unchanged; everything a receiving corner needs beyond it is added here and
- * persists as extra JSON on the same record. The fields below are all
- * server-owned — see the note in the handoff about pinning them in the store
- * route's sanitizer, which currently lets a tenant write this store freely.
+ * `InboundDoc` carries every field the receiver writes; what this adds is which
+ * of them a document delivered through corner 4 always has. A row stored before
+ * the receiving half existed has none of the four, which is why they are
+ * optional on the domain type and required here — code holding an
+ * `InboundRecord` is holding something this module wrote.
+ *
+ * All four are server-owned — see the note in the handoff about pinning them in
+ * the store route's sanitizer, which currently lets a tenant write this store
+ * freely.
  */
 export interface InboundRecord extends InboundDoc {
   /** The gateway's reference for the DELIVERY (not for any Transmission of ours). */
@@ -93,21 +77,6 @@ export interface InboundRecord extends InboundDoc {
   docTypeId: string;
   /** True when the driver that delivered this invents its own outcomes. */
   simulated: boolean;
-  /** One line per failed check; the reason `status` is HAS_ISSUES. */
-  issues?: string[];
-  /** The document exactly as it arrived — the evidence of what was received. */
-  xml?: string;
-  xmlSha256?: string;
-  /**
-   * What this deployment may say about how the document got here, written the
-   * moment it arrived and kept on the row. Stored rather than re-derived for
-   * the same reason `simulated` travels on the event instead of being worked
-   * out later: a deployment that goes live next month must still describe last
-   * month's sample as the sample it was, and the screen must not have its own
-   * copy of the sentence to drift from.
-   */
-  note?: string;
-  decision?: InboundDecisionRecord;
 }
 
 /* ------------------------------------------------------------------ */
@@ -581,8 +550,14 @@ export async function recordInboundDecision(
   const updated: InboundRecord = {
     ...record,
     // `buyerAction` is what the existing screen and the shell's badge count read.
-    // DISPUTED is the nearest thing the domain type has to a rejection; see the
-    // handoff note asking for a REJECTED member on InboundDoc.
+    //
+    // `InboundDoc.buyerAction` now HAS a REJECTED member, and this line should
+    // be writing it: a rejection is an answer the supplier is given, a dispute
+    // is a conversation still open with them. It still writes DISPUTED because
+    // two things outside this module name the old set and have to move in the
+    // same commit — the `BUYER_ACTIONS` allow-list in the store route, which
+    // silently discards any value not in it, and the receiving tests that
+    // assert DISPUTED today.
     buyerAction: input.outcome === "REJECTED" ? "DISPUTED" : "ACKNOWLEDGED",
     decision,
   };

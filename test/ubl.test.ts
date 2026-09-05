@@ -314,6 +314,62 @@ describe("buildTDD", () => {
       `<TotalTaxAED>${(convertMinorAtRate(inv.totals.vatMinor, AED_PEG.rateToAED)! / 100).toFixed(2)}</TotalTaxAED>`,
     );
   });
+
+  it("reports the same AED tax as the UBL at a rate a float rounds the other way", () => {
+    // The dollar peg hides this: 3.6725 against these amounts lands clear of a
+    // half fils, so a conversion made through a float agrees with an exact one
+    // and the divergence only shows up in production. 1.80 of tax at 1.025 is
+    // 1.845 — 1.85 rounded half away from zero, and 184.49999999999997 in
+    // binary, which `Math.round(minor * Number(rate))` reported as 1.84.
+    //
+    // The two legs are two statements of one supply to one authority. A fils
+    // between them is a discrepancy in the FTA's own records, on every document
+    // whose product happens to land on a half.
+    const fx: FxInfo = { rateToAED: "1.025", source: "CBUAE", rateDate: "2026-07-01" };
+    const inv = standardInvoice({ currency: "EUR", fx, lines: [line({ qty: 1, unitPriceMinor: 3_600 })] });
+    expect(inv.totals.vatMinor).toBe(180);
+    expect(Math.round(inv.totals.vatMinor * Number(fx.rateToAED))).toBe(184);
+
+    const ubl = generateUBL(inv);
+    const tdd = buildTDD(inv, ubl);
+    expect(ubl).toContain('<cbc:TaxAmount currencyID="AED">1.85</cbc:TaxAmount>');
+    expect(tdd).toContain("<TotalTaxAED>1.85</TotalTaxAED>");
+    expect(tdd).toContain("<TaxAmountAED>1.85</TaxAmountAED>");
+    // And the payable, the other figure that lands on a half here: 37.80 at
+    // 1.025 is 38.745, so 38.75 exactly and 38.74 through the float.
+    expect(tdd).toContain("<TotalPayableAED>38.75</TotalPayableAED>");
+    expect(tdd).not.toContain("38.74");
+    expect(tdd).not.toContain("1.84<");
+  });
+
+  it("states no AED figure for a document with no rate to convert at", () => {
+    // It converted at an implied 1, which filed the euro figure with the FTA
+    // under an AED label. A zero-rated export is the document that reaches this
+    // case: AE-0500 stops one that charges tax from being sent with no rate at
+    // all, and a document that charges none still has a taxable amount nobody
+    // can state in dirhams.
+    const inv = standardInvoice({
+      currency: "EUR",
+      lines: [
+        line({ qty: 1, unitPriceMinor: 3_600, taxProfileCode: "ZERO_EXPORT", exemptionReason: "Export outside the GCC" }),
+      ],
+    });
+    const tdd = buildTDD(inv, generateUBL(inv));
+    expect(tdd).not.toContain("AEDConversionRate");
+    expect(tdd).not.toContain("TotalTaxableAED");
+    expect(tdd).not.toContain("36.00");
+    // Nought is the one amount that survives a missing rate, because nought
+    // converts to nought at every rate.
+    expect(tdd).toContain("<TotalTaxAED>0.00</TotalTaxAED>");
+    expect(nestingErrors(tdd)).toEqual([]);
+  });
+
+  it("states an AED document's own figures, converting nothing", () => {
+    const tdd = buildTDD(standardInvoice(), generateUBL(standardInvoice()));
+    expect(tdd).toContain("<TotalTaxAED>50.00</TotalTaxAED>");
+    expect(tdd).toContain("<TotalPayableAED>1050.00</TotalPayableAED>");
+    expect(tdd).not.toContain("AEDConversionRate");
+  });
 });
 
 /**

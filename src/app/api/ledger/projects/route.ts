@@ -77,6 +77,8 @@ export async function POST(req: Request) {
       startsOn?: string;
       endsOn?: string | null;
       budgetMinor?: string | number;
+      /** Why the budget moved. `updateProject` requires it when it does. */
+      reason?: string;
       status?: string;
     };
     if (!b.entityId) return json({ error: "entityId is required." }, 400);
@@ -114,7 +116,11 @@ export async function POST(req: Request) {
           project: await updateProject({
             orgId, entityId: b.entityId, code: b.code, name: b.name,
             customerName: b.customerName, endsOn: b.endsOn,
-            budgetMinor: b.budgetMinor, status: b.status,
+            budgetMinor: b.budgetMinor, reason: b.reason,
+            // Whoever is signed in, never a value the request supplies: a
+            // revision is only worth keeping if it names the real person.
+            revisedBy: userId,
+            status: b.status,
           }),
         });
 

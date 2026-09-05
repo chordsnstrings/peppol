@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { post, reverse, LedgerError } from "@/lib/server/ledger/post";
-import { generalLedger } from "@/lib/server/ledger/reports";
+import { generalLedger, trialBalance } from "@/lib/server/ledger/reports";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 
 const db = new PrismaClient();
@@ -12,18 +12,22 @@ const ENT = "t-ent-gl";
 const CASH = "1010";
 const S = { orgId: ORG, entityId: ENT, accountCode: CASH };
 
-async function wipe() {
+/** The trial balance is read against books of its own, so neither suite's postings reach the other's figures. */
+const TB_ORG = "t-org-tb";
+const TB_ENT = "t-ent-tb";
+
+async function wipe(org: string) {
   await db.$transaction([
     db.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
-    db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${ORG}')`),
-    db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "AccountBalance" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "Account" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "AccountingPeriod" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${ORG}'`),
-    db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalLineDimension" WHERE "lineId" IN (SELECT id FROM "JournalLine" WHERE "orgId" = '${org}')`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalLine" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "JournalEntry" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "AccountBalance" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Account" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "AccountingPeriod" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${org}'`),
+    db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${org}'`),
   ]);
 }
 
@@ -48,7 +52,7 @@ const on = (l: { date: Date }) => l.date.toISOString().slice(0, 10);
  */
 d("general ledger detail", () => {
   beforeAll(async () => {
-    await wipe();
+    await wipe(ORG);
     await openFiscalYear({ orgId: ORG, entityId: ENT, label: "2026", startsOn: "2026-01-01" });
     await openBooks({ orgId: ORG, entityId: ENT });
 
@@ -62,7 +66,7 @@ d("general ledger detail", () => {
       await P(date, `Receipt ${date}`, [{ account: CASH, debit: 200_000 }, { account: "4000", credit: 200_000 }]);
     }
   });
-  afterAll(async () => { await wipe(); await db.$disconnect(); });
+  afterAll(async () => { await wipe(ORG); });
 
   it("closes at the account's balance, not at the last line of the page", async () => {
     // The defect: the closing figure was the running total of however many
@@ -146,5 +150,113 @@ d("general ledger detail", () => {
     expect(gl.closingMinor).toBe(650_000n);
     expect(gl.lines.at(-1)!.runningMinor).toBe(650_000n);
     expect(gl.lines.filter((l) => l.status === "reversed")).toHaveLength(1);
+  });
+});
+
+/**
+ * The trial balance, read against its own books.
+ *
+ *   January   Dr 1010  400,000   Cr 3000  400,000   capital in
+ *   February  Dr 6900  150,000   Cr 1010  150,000   rent paid
+ *   March     Dr 1010  600,000   Cr 4000  600,000   a sale banked
+ *
+ * Three months, four accounts, and no two figures the same, so a row that came
+ * out of the wrong account or the wrong period cannot pass by coincidence. The
+ * report sums the period anchors up to the month asked for, which is what makes
+ * January's answer a different answer from March's rather than the same one
+ * read twice.
+ */
+d("the trial balance", () => {
+  const T = { orgId: TB_ORG, entityId: TB_ENT };
+  const at = (periodLabel: string) => trialBalance({ ...T, periodLabel });
+  const row = (tb: Awaited<ReturnType<typeof trialBalance>>, code: string) => tb.rows.find((r) => r.code === code);
+
+  beforeAll(async () => {
+    await wipe(TB_ORG);
+    await openFiscalYear({ ...T, label: "2026", startsOn: "2026-01-01" });
+    await openBooks(T);
+    await post({
+      ...T, entryDate: "2026-01-20", source: "manual", memo: "Owner capital",
+      lines: [{ account: "1010", debit: 400_000 }, { account: "3000", credit: 400_000 }],
+    });
+    await post({
+      ...T, entryDate: "2026-02-10", source: "manual", memo: "Rent",
+      lines: [{ account: "6900", debit: 150_000 }, { account: "1010", credit: 150_000 }],
+    });
+    await post({
+      ...T, entryDate: "2026-03-12", source: "invoice", memo: "Sale banked",
+      lines: [
+        { account: "1010", debit: 600_000 },
+        { account: "4000", credit: 600_000, taxCode: "ZERO_OTHER", taxEmirate: "DU" },
+      ],
+    });
+  });
+  afterAll(async () => { await wipe(TB_ORG); await db.$disconnect(); });
+
+  it("carries each account's balance signed, debit-positive, summing to nought", async () => {
+    const tb = await at("2026-03");
+    expect(row(tb, "1010")!.balanceMinor).toBe(850_000n);
+    expect(row(tb, "6900")!.balanceMinor).toBe(150_000n);
+    // Credits are negative. Parentheses are how a numeral shows that on a
+    // screen; in the ledger it is a minus sign, and it is what makes the set
+    // add up.
+    expect(row(tb, "3000")!.balanceMinor).toBe(-400_000n);
+    expect(row(tb, "4000")!.balanceMinor).toBe(-600_000n);
+
+    expect(tb.rows.reduce((a, r) => a + r.balanceMinor, 0n)).toBe(0n);
+    expect(tb.totalDebitMinor).toBe(1_000_000n);
+    expect(tb.totalCreditMinor).toBe(1_000_000n);
+    expect(tb.differenceMinor).toBe(0n);
+    expect(tb.balanced).toBe(true);
+    expect(tb.currency).toBe("AED");
+    expect(tb.periodLabel).toBe("2026-03");
+  });
+
+  it("adds up the movements behind each balance as well as the balance", async () => {
+    const tb = await at("2026-03");
+    const cash = row(tb, "1010")!;
+    // 400,000 in and 600,000 in, against 150,000 out — three postings in three
+    // different months, on one line.
+    expect(cash.debitMinor).toBe(1_000_000n);
+    expect(cash.creditMinor).toBe(150_000n);
+    expect(cash.debitMinor - cash.creditMinor).toBe(cash.balanceMinor);
+    expect(cash.name).toBe("Bank — current account");
+    expect(cash.type).toBe("ASSET");
+  });
+
+  it("is cumulative to the month asked for, and stops there", async () => {
+    const january = await at("2026-01");
+    expect(january.rows.map((r) => r.code)).toEqual(["1010", "3000"]);
+    expect(row(january, "1010")!.balanceMinor).toBe(400_000n);
+    expect(january.balanced).toBe(true);
+
+    // February carries January with it: 3000 is on the February trial balance
+    // although nothing touched it in February, because a balance sheet account
+    // holds what it held. Reading only the month's own anchors would drop it
+    // and the trial balance would not tie.
+    const february = await at("2026-02");
+    expect(february.rows.map((r) => r.code)).toEqual(["1010", "3000", "6900"]);
+    expect(row(february, "1010")!.balanceMinor).toBe(250_000n);
+    expect(row(february, "3000")!.balanceMinor).toBe(-400_000n);
+    expect(february.balanced).toBe(true);
+
+    // And March's sale is in none of them.
+    expect(row(january, "4000")).toBeUndefined();
+    expect(row(february, "4000")).toBeUndefined();
+  });
+
+  it("leaves out an account nothing has moved on", async () => {
+    const tb = await at("2026-03");
+    // 1100 is in every chart this product opens and nothing has been posted to
+    // it here. A trial balance listing every account in the chart at nil is a
+    // page somebody has to read past to find the four lines that matter.
+    expect(row(tb, "1100")).toBeUndefined();
+    expect(tb.rows).toHaveLength(4);
+  });
+
+  it("refuses books that were never opened, and a month that does not exist", async () => {
+    await expect(trialBalance({ orgId: TB_ORG, entityId: "t-ent-tb-nobody", periodLabel: "2026-01" }))
+      .rejects.toThrow(/No ledger has been opened/i);
+    await expect(at("2099-01")).rejects.toThrow(/No accounting period/i);
   });
 });

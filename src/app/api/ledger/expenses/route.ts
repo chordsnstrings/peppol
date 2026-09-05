@@ -6,7 +6,7 @@ import { prisma } from "@/lib/server/prisma";
 import { ledgerJson } from "@/lib/server/ledger/serialize";
 import { LedgerError } from "@/lib/server/ledger/post";
 import {
-  createClaim, addLine, removeLine, updateClaim,
+  createClaim, addLine, updateLine, removeLine, updateClaim,
   submitClaim, approveClaim, rejectClaim, reopenClaim, postClaim, payClaim,
   claimList, claimDetail,
   type ClaimStatus, type NewClaim, type NewClaimLine,
@@ -57,7 +57,9 @@ export async function POST(req: Request) {
     await assertSameOrigin(req);
     const { orgId, userId } = await requireSession();
     const b = (await req.json().catch(() => ({}))) as {
-      action?: "create" | "addLine" | "removeLine" | "update" | "submit" | "approve" | "reject" | "reopen" | "post" | "pay";
+      action?:
+        | "create" | "addLine" | "updateLine" | "removeLine" | "update"
+        | "submit" | "approve" | "reject" | "reopen" | "post" | "pay";
       entityId?: string;
       claimId?: string;
       lineId?: string;
@@ -105,6 +107,14 @@ export async function POST(req: Request) {
       case "addLine": {
         if (!b.claimId || !b.line) return json({ error: "Which claim, and which expense?" }, 400);
         const line = await addLine({ orgId, claimId: b.claimId, line: b.line });
+        return json(ledgerJson({ line: { id: line.id } }));
+      }
+
+      case "updateLine": {
+        if (!b.claimId || !b.lineId || !b.line) {
+          return json({ error: "Which claim, which line, and what does the receipt now say?" }, 400);
+        }
+        const line = await updateLine({ orgId, claimId: b.claimId, lineId: b.lineId, line: b.line });
         return json(ledgerJson({ line: { id: line.id } }));
       }
 

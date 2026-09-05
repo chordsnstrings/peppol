@@ -455,6 +455,30 @@ export async function recordFiling(opts: {
     );
   }
 
+  /*
+   * Who filed it, refused rather than defaulted.
+   *
+   * The table's `TaxFiling_filed_check` constraint holds
+   * `(filedOn IS NULL) = (filedBy IS NULL)`, and `filedOn` is never null on
+   * this path — it falls back to `asOf`. So a caller that omits the filer was
+   * getting a raw constraint violation out of the driver instead of one of the
+   * sentences this module writes everywhere else.
+   *
+   * There is nothing to default it to. A filer is a person, and naming
+   * whoever happened to be holding the session is precisely the inference the
+   * column exists to replace, which is why the route takes it from the session
+   * itself rather than from the request body. This is the last check because
+   * it is the least interesting thing wrong with a call that also has a bad
+   * period or a bad date, and those should be what the caller hears about.
+   */
+  const filedBy = opts.filedBy?.trim() || null;
+  if (!filedBy) {
+    throw new LedgerError(
+      `Recording the ${period.label} return as filed needs the person who filed it. A filing carrying a date ` +
+        `and nobody's name is not a record of anything.`,
+    );
+  }
+
   const row = await prisma.taxFiling.create({
     data: {
       orgId: opts.orgId,
@@ -469,7 +493,7 @@ export async function recordFiling(opts: {
         opts.netVatMinor === undefined || opts.netVatMinor === null || opts.netVatMinor === ""
           ? null
           : BigInt(opts.netVatMinor),
-      filedBy: opts.filedBy ?? null,
+      filedBy,
       notes: opts.notes?.trim() || null,
     },
   });

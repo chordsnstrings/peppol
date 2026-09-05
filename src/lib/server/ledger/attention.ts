@@ -3,7 +3,7 @@ import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { receivablesAgeing } from "./ar";
 import { payablesAgeing } from "./ap";
-import { reconcile } from "./bank";
+import { reconciliationSummary } from "./bank";
 import {
   vatReturn,
   registrationThreshold,
@@ -15,7 +15,7 @@ import {
 import { lastCompletedPeriod } from "./tax-periods";
 import { templateStatus } from "./recurring";
 import { assetRegister } from "./assets";
-import { claimList } from "./expenses";
+import { claimSummary } from "./expenses";
 import { grniReport } from "./procurement";
 import { trialBalance } from "./reports";
 // Neither of these is read by a check on this list. They are here because the
@@ -220,7 +220,15 @@ export interface SharedReads {
   trialBalance(periodLabel: string): Promise<Awaited<ReturnType<typeof trialBalance>>>;
   receivables(asOf: Date): Promise<Awaited<ReturnType<typeof receivablesAgeing>>>;
   payables(asOf: Date): Promise<Awaited<ReturnType<typeof payablesAgeing>>>;
-  reconcile(accountCode: string, asOf: Date): Promise<Awaited<ReturnType<typeof reconcile>>>;
+  /**
+   * The reconciliation figures for one bank account, and none of its items.
+   *
+   * Both callers of this ask how many statement lines are unexplained and how
+   * old the oldest is, which the figures answer exactly; the itemised statement
+   * lists the oldest two hundred of each kind, so counting its rows caps the
+   * answer at the page size and reports the cap as a total.
+   */
+  reconciliation(accountCode: string, asOf: Date): Promise<Awaited<ReturnType<typeof reconciliationSummary>>>;
   /** The last tax period that has ended, on the registration's own stagger. */
   vatPeriod(asOf: Date): Promise<Awaited<ReturnType<typeof lastCompletedPeriod>>>;
   vatReturn(from: string, to: string): Promise<Awaited<ReturnType<typeof vatReturn>>>;
@@ -251,8 +259,8 @@ export function sharedReads(scope: { orgId: string; entityId: string }): SharedR
     trialBalance: (periodLabel) => once(`trial-balance:${periodLabel}`, () => trialBalance({ ...scope, periodLabel })),
     receivables: (asOf) => once(`receivables:${at(asOf)}`, () => receivablesAgeing({ ...scope, asOf })),
     payables: (asOf) => once(`payables:${at(asOf)}`, () => payablesAgeing({ ...scope, asOf })),
-    reconcile: (accountCode, asOf) =>
-      once(`bank:${accountCode}:${at(asOf)}`, () => reconcile({ ...scope, accountCode, asOf })),
+    reconciliation: (accountCode, asOf) =>
+      once(`bank:${accountCode}:${at(asOf)}`, () => reconciliationSummary({ ...scope, accountCode, asOf })),
     vatPeriod: (asOf) => once(`vat-period:${at(asOf)}`, () => lastCompletedPeriod({ ...scope, regime: "VAT", asOf })),
     vatReturn: (from, to) => once(`vat-return:${from}:${to}`, () => vatReturn({ ...scope, from, to })),
     templates: (month) => once(`recurring:${month}`, () => templateStatus({ ...scope, asOf: month })),
@@ -406,26 +414,41 @@ const unreconciledBank: Check = {
       orderBy: { code: "asc" },
     });
 
-    const statements = await Promise.all(accounts.map((a) => reads.reconcile(a.code, asOf)));
+    // The figures, not the statement. Counting the rows of a reconciliation
+    // counted the two hundred it itemises rather than the lines there are, so
+    // an account with four hundred unexplained lines said two hundred — a page
+    // size presented to a bookkeeper as a total.
+    const statements = await Promise.all(accounts.map((a) => reads.reconciliation(a.code, asOf)));
 
-    const lines = statements.flatMap((s) => s.unmatchedBank);
-    if (lines.length === 0) return null;
+    const unmatched = statements.reduce((a, s) => a + s.unmatchedBankCount, 0);
+    if (unmatched === 0) return null;
 
     const net = statements.reduce((a, s) => a + BigInt(s.unrecordedInBankMinor), 0n);
-    const oldest = lines.reduce((a, l) => (l.postedOn < a ? l.postedOn : a), lines[0].postedOn);
-    const age = daysBetween(new Date(oldest), asOf);
+    // The date and its age travel together, because the age is only meaningful
+    // for the account the date came from. A count above nil always has a date
+    // behind it — both come out of the same filter — but it is still read as
+    // one that may be absent, since a sentence about "the oldest" of nothing
+    // would be worse than no sentence.
+    const oldest = statements.reduce<{ on: string; age: number } | null>((a, s) => {
+      const on = s.oldestUnmatchedBankOn;
+      if (on === null || (a !== null && a.on <= on)) return a;
+      return { on, age: daysBetween(new Date(on), asOf) };
+    }, null);
 
     return {
       key: "bank_unmatched",
-      severity: age > TERM_DAYS ? "soon" : "note",
+      severity: oldest !== null && oldest.age > TERM_DAYS ? "soon" : "note",
       title: "Bank lines have no entry behind them",
       detail:
-        `${plural(lines.length, "statement line", "statement lines")} on ` +
-        `${plural(accounts.length, "account", "accounts")} ${lines.length === 1 ? "has" : "have"} not been ` +
+        `${plural(unmatched, "statement line", "statement lines")} on ` +
+        `${plural(accounts.length, "account", "accounts")} ${unmatched === 1 ? "has" : "have"} not been ` +
         `matched to anything in the ledger, ` +
-        `a net ${money(net, currency)}. The oldest has been sitting since ${oldest}, ` +
-        `${plural(age, "day", "days")} ago. Until they are matched or posted, the cash balance is a guess.`,
-      count: lines.length,
+        `a net ${money(net, currency)}.` +
+        (oldest === null
+          ? ""
+          : ` The oldest has been sitting since ${oldest.on}, ${plural(oldest.age, "day", "days")} ago.`) +
+        ` Until they are matched or posted, the cash balance is a guess.`,
+      count: unmatched,
       amountMinor: net.toString(),
       href: "/accounting/bank",
     };
@@ -661,12 +684,17 @@ const claimsAwaitingApproval: Check = {
   key: "claims_unapproved",
   label: "Expense claims",
   async run({ orgId, entityId, currency }) {
-    // The claim list has no as-at filter, so this row is always "now" while the
-    // rest of the page can be read back in time. Re-deriving the totals here
-    // with a date on them would give a second answer to "what is unapproved",
-    // and two answers is worse than one that says which day it is about.
-    const list = await claimList({ orgId, entityId });
-    const { awaitingApprovalCount, awaitingApprovalMinor } = list.summary;
+    // The claim summary has no as-at filter, so this row is always "now" while
+    // the rest of the page can be read back in time. Re-deriving the totals
+    // here with a date on them would give a second answer to "what is
+    // unapproved", and two answers is worse than one that says which day it is
+    // about.
+    //
+    // The summary rather than the list: `claimList` loads every claim the
+    // business has ever filed, with every line on every one of them, to hand
+    // back the same two figures computed off the open claims alone. This row
+    // reads two figures and shows no claims.
+    const { awaitingApprovalCount, awaitingApprovalMinor } = await claimSummary({ orgId, entityId });
     if (awaitingApprovalCount === 0) return null;
 
     return {

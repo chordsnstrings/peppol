@@ -88,13 +88,41 @@ export interface NewDeliveryNote {
 /* ------------------------------------------------------------- what is owed */
 
 /**
- * How much of each order line is still to go, across every note that is not
- * cancelled.
+ * How much has gone out against each of a set of order lines, across every note
+ * that is not cancelled.
  *
  * A draft note counts. It is a commitment somebody has made on paper, and
  * leaving it out means two people can each raise a draft for the last of the
  * stock and both be told it is available.
+ *
+ * Exported because the order itself has to be able to ask. `updateOrder` in
+ * sales-orders.ts will not let a line be cut below what has already been
+ * despatched, and this is the only place that quantity is held — the order line
+ * carries what has been invoiced and nothing about what has left the warehouse.
  */
+export async function deliveredByOrderLine(opts: {
+  orgId: string; orderLineIds: string[];
+}): Promise<Map<string, bigint>> {
+  const by = new Map<string, bigint>();
+  if (opts.orderLineIds.length === 0) return by;
+
+  const delivered = await prisma.deliveryNoteLine.findMany({
+    where: {
+      orgId: opts.orgId,
+      orderLineId: { in: opts.orderLineIds },
+      note: { status: { not: "cancelled" } },
+    },
+    select: { orderLineId: true, quantityMilli: true },
+  });
+
+  for (const d of delivered) {
+    if (!d.orderLineId) continue;
+    by.set(d.orderLineId, (by.get(d.orderLineId) ?? 0n) + d.quantityMilli);
+  }
+  return by;
+}
+
+/** How much of each order line is still to go, note by note, for one order. */
 export async function outstandingOnOrder(opts: { orgId: string; entityId: string; orderId: string }) {
   const order = await prisma.salesOrder.findFirst({
     // Scoped to the entity as well as the organisation, like every other read
@@ -106,20 +134,7 @@ export async function outstandingOnOrder(opts: { orgId: string; entityId: string
   });
   if (!order) throw new LedgerError("There is no such order.");
 
-  const delivered = await prisma.deliveryNoteLine.findMany({
-    where: {
-      orgId: opts.orgId,
-      orderLineId: { in: order.lines.map((l) => l.id) },
-      note: { status: { not: "cancelled" } },
-    },
-    select: { orderLineId: true, quantityMilli: true },
-  });
-
-  const by = new Map<string, bigint>();
-  for (const d of delivered) {
-    if (!d.orderLineId) continue;
-    by.set(d.orderLineId, (by.get(d.orderLineId) ?? 0n) + d.quantityMilli);
-  }
+  const by = await deliveredByOrderLine({ orgId: opts.orgId, orderLineIds: order.lines.map((l) => l.id) });
 
   return {
     orderId: order.id,

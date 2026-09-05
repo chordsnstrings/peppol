@@ -432,6 +432,29 @@ export interface FixitItem {
   resolvedAt?: string;
 }
 
+/**
+ * The recipient's answer to a document a supplier sent them.
+ *
+ * `transmitted` is the only field here that claims anything about the outside
+ * world, and it is false unless a live gateway driver accepted the receipt. A
+ * decision a simulator "sent" still records `receiptRef`, exactly as a
+ * simulated send records a MOCK- reference against the transmission: the
+ * reference is real as an identifier and worthless as evidence, and `simulated`
+ * is what says so.
+ */
+export interface InboundDecision {
+  outcome: "ACCEPTED" | "REJECTED";
+  /** The recipient's own words. Required for a rejection — it is why. */
+  reason?: string;
+  decidedAt: string;
+  decidedBy: string;
+  transmitted: boolean;
+  simulated: boolean;
+  receiptRef?: string;
+  /** What may be said about the transmission, or nothing where it went. */
+  note?: string;
+}
+
 export interface InboundDoc {
   id: string;
   orgId: string;
@@ -441,9 +464,53 @@ export interface InboundDoc {
   totalMinor: number;
   currency: string;
   status: "VALID" | "HAS_ISSUES";
-  buyerAction: "NONE" | "ACKNOWLEDGED" | "EXPORTED" | "DISPUTED";
+  /**
+   * What the recipient has done about it.
+   *
+   * REJECTED and DISPUTED are not the same answer and must not share a member.
+   * A rejection is final and is sent back over the network: the document is
+   * refused, and the supplier's remedy is to issue a corrected one. A dispute
+   * is a conversation still open about a document that stands — the quantity is
+   * wrong, the purchase order is missing — and it settles in an email, not in a
+   * receipt. Recording one as the other misstates whether the supplier is owed
+   * an answer or a correction.
+   */
+  buyerAction: "NONE" | "ACKNOWLEDGED" | "EXPORTED" | "DISPUTED" | "REJECTED";
   receivedAt: string;
   invoice?: Partial<Invoice>;
+
+  /*
+   * What the corner-4 receiver writes onto the same record.
+   *
+   * Every one of them is optional, because a row stored before the receiving
+   * half existed carries none of them — and because the screen has to render
+   * such a row rather than fail on it. The receiver's own `InboundRecord` makes
+   * the four it always writes required; they are declared here so that the
+   * inbox, which reads this type, can see what the server actually persisted
+   * instead of reaching for the server module to find out.
+   */
+
+  /** The gateway's reference for the DELIVERY, not for any transmission of ours. */
+  gatewayRef?: string;
+  receiverParticipantId?: string;
+  docTypeId?: string;
+  /** True when the driver that delivered this invents its own outcomes. */
+  simulated?: boolean;
+  /** One line per failed check; the reason `status` is HAS_ISSUES. */
+  issues?: string[];
+  /** The document exactly as it arrived — the evidence of what was received. */
+  xml?: string;
+  xmlSha256?: string;
+  /**
+   * What this deployment may say about how the document got here, written the
+   * moment it arrived and kept on the row. Stored rather than re-derived for
+   * the same reason `simulated` travels on the event instead of being worked
+   * out later: a deployment that goes live next month must still describe last
+   * month's sample as the sample it was, and no screen may hold its own copy of
+   * the sentence to drift from.
+   */
+  note?: string;
+  decision?: InboundDecision;
 }
 
 export interface AppNotification {

@@ -131,6 +131,7 @@ type AssetRow = {
   costMinor: bigint; residualMinor: bigint; accumulatedMinor: bigint;
   usefulLifeMonths: number; ratePercent: unknown;
   acquiredOn: Date; depreciatedTo: string | null; status: string; disposedOn: Date | null;
+  proceedsMinor: bigint | null;
   basisFrom: Date | null;
   assetAccount: string; accumAccount: string; expenseAccount: string;
 };
@@ -495,6 +496,11 @@ export async function assetRegister(opts: {
           return {
             ...a,
             status: disposedLater ? "active" : a.status,
+            // A disposal that had not happened yet has no date and no proceeds
+            // at this date either. Carrying them onto a row shown as active
+            // would date a sale into a year that had not seen it.
+            disposedOn: disposedLater ? null : a.disposedOn,
+            proceedsMinor: disposedLater ? null : a.proceedsMinor,
             accumulatedMinor: accumulatedAt({ ...a, ratePercent: a.ratePercent === null ? null : Number(a.ratePercent) }, asOf),
           } as AssetRow;
         });
@@ -549,6 +555,13 @@ export async function assetRegister(opts: {
       netBookValueMinor: (a.costMinor - a.accumulatedMinor).toString(),
       depreciatedTo: a.depreciatedTo,
       status: a.status,
+      // What happened to a disposed one. Without these the register says only
+      // that the asset is gone: a reader cannot tell whether it went last month
+      // or three years ago, nor what it fetched, and the entry that would tell
+      // them has already taken the cost and the depreciation off this row.
+      // Both are null for an asset still on the books.
+      disposedOn: a.disposedOn ? a.disposedOn.toISOString().slice(0, 10) : null,
+      proceedsMinor: a.proceedsMinor === null ? null : a.proceedsMinor.toString(),
     })),
     totals: {
       costMinor: registerCost.toString(),

@@ -12,6 +12,7 @@ import {
   stageForDays, statementOfAccount, creditControlRegister,
   documentIdBatches, ID_CHUNK, MAX_LEDGER_MOVEMENTS,
 } from "@/lib/server/ledger/credit-control";
+import { sharedReads, type SharedReads } from "@/lib/server/ledger/attention";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
 const db = new PrismaClient();
@@ -849,5 +850,68 @@ d("credit control", () => {
     const standing = await creditStanding({ ...S, partyKey: "C-DEEP", asOf: ASOF });
     expect(standing.exposure.ledgerMinor).toBe("306500");
     expect(standing.exposure.totalMinor).toBe("411500");
+  });
+
+  /* ------------------------------------------- sharing the page's own reads */
+
+  /**
+   * The dunning plan nets the receivables control account to find who is late.
+   * So does the attention list, and on the notification centre both run against
+   * the same books at the same date in one request — three full reads of 1100
+   * where the answer to all three is one netting. The plan can be handed the
+   * page's shared reads instead; what it must not do is answer differently for
+   * having been.
+   */
+  it("gives the same plan from the page's ageing as it does reading for itself", async () => {
+    const real = sharedReads(S);
+    const asked: string[] = [];
+    const reads: SharedReads = {
+      ...real,
+      receivables(asOf) {
+        asked.push(asOf.toISOString().slice(0, 10));
+        return real.receivables(asOf);
+      },
+    };
+
+    const alone = await dunningPlan({ ...S, asOf: ASOF });
+    const shared = await dunningPlan({ ...S, asOf: ASOF, reads });
+
+    // Netted once for the whole plan, however many customers are on it, and
+    // asked at all — which it would not be if the plan had gone to the control
+    // account on its own account.
+    expect(asked).toEqual([ASOF]);
+
+    // The journal reference of the entry that opened an item is the one thing
+    // the ageing does not carry, so an item taken from it names the document
+    // and not the journal. Nothing that passes shared reads reads that field —
+    // the notification centre's row reports the totals and the rung — and the
+    // credit-control screen, which does show it, reads on its own account.
+    const same = (p: typeof alone) =>
+      p.rows.map((r) => ({ ...r, items: r.items.map(({ reference, ...rest }) => rest) }));
+    expect(same(shared)).toEqual(same(alone));
+    expect(shared.totalPastDueMinor).toBe(alone.totalPastDueMinor);
+    expect(shared.currency).toBe(alone.currency);
+    expect(shared.rows.map((r) => r.code)).toEqual(alone.rows.map((r) => r.code));
+
+    // Both routes reach the same documents, and reading for itself is still
+    // the route that knows which journal raised each one.
+    expect(alone.rows[0].items.every((i) => i.reference.length > 0)).toBe(true);
+    expect(shared.rows[0].items.map((i) => i.number)).toEqual(alone.rows[0].items.map((i) => i.number));
+  });
+
+  it("takes its open items from the ageing it is handed, not from a second netting", async () => {
+    const real = sharedReads(S);
+    const reads: SharedReads = {
+      ...real,
+      // The same report with nothing open on it. If the plan were still netting
+      // 1100 for itself, the customers below would be just as late as they are
+      // in every test above and this would change nothing.
+      async receivables(asOf) {
+        return { ...(await real.receivables(asOf)), open: [] };
+      },
+    };
+
+    expect((await dunningPlan({ ...S, asOf: ASOF })).rows.length).toBeGreaterThan(0);
+    expect((await dunningPlan({ ...S, asOf: ASOF, reads })).rows).toEqual([]);
   });
 });

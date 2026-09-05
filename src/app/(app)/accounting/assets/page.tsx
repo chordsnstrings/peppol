@@ -18,6 +18,11 @@ interface Asset {
   assetAccount: string; accumAccount: string;
   costMinor: string; residualMinor: string; accumulatedMinor: string;
   netBookValueMinor: string; depreciatedTo: string | null; status: string;
+  /* What happened to a disposed one, and null on everything still held. The
+   * disposal entry takes the cost and the depreciation off the ledger, so
+   * without these the row is a status chip and nothing else — the register
+   * could not say when the asset went or what it fetched. */
+  disposedOn: string | null; proceedsMinor: string | null;
 }
 interface Register {
   assets: Asset[];
@@ -235,8 +240,23 @@ export default function AssetsPage() {
                               <span className="block text-[0.6875rem]" style={{ color: "var(--sw-fg-muted)" }}>to {a.depreciatedTo}</span>
                             )}
                           </td>
-                          <td className="sw-num"><Figure minor={a.netBookValueMinor} /></td>
-                          <td><StatusChip status={a.status} /></td>
+                          <td className="sw-num">
+                            <Figure minor={a.netBookValueMinor} />
+                            {/* Beside the book value it was carried at, which
+                                is what makes the gain or the loss readable
+                                without opening the entry. */}
+                            {a.proceedsMinor !== null && (
+                              <span className="block text-[0.6875rem]" style={{ color: "var(--sw-fg-muted)" }}>
+                                proceeds <Figure minor={a.proceedsMinor} zero="zero" colour={false} />
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            <StatusChip status={a.status} />
+                            {a.disposedOn && (
+                              <span className="block text-[0.6875rem]" style={{ color: "var(--sw-fg-muted)" }}>on {a.disposedOn}</span>
+                            )}
+                          </td>
                           <td>
                             {/* Only an active asset. `disposeAsset` refuses a
                                 second disposal outright — the cost and the

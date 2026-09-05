@@ -81,16 +81,39 @@ export default function PayrollPage() {
     );
   };
 
+  /**
+   * A supplementary run is a SECOND journal for a month already posted, raised
+   * for payslips that reached draft after the first one. "Posted 2026-08 as
+   * PR-00019" is true of it and still misleads: the operator reads a reference
+   * for the month and goes looking for the month's whole cost in an entry that
+   * holds only the late payslips. So the sentence says which of the two it is,
+   * and how many payslips this one carries.
+   */
+  const supplement = (r: { supplementary?: boolean; payslips?: number }, what: string) =>
+    r.supplementary
+      ? ` This is a further journal for ${period}, ${what} ${r.payslips ?? 0} payslip${r.payslips === 1 ? "" : "s"} that came after the month's run — not the month's total.`
+      : "";
+
   const postRun = async () => {
-    const r = await act<{ reference: string; alreadyPosted: boolean; netMinor: string }>("post", { action: "post", period });
+    const r = await act<{ reference: string; alreadyPosted: boolean; supplementary: boolean; payslips: number; netMinor: string }>(
+      "post", { action: "post", period },
+    );
     if (!r) return;
-    setMsg(r.alreadyPosted ? `${period} was already posted as ${r.reference}.` : `Posted ${period} as ${r.reference}.`);
+    setMsg(
+      (r.alreadyPosted ? `${period} was already posted as ${r.reference}.` : `Posted ${period} as ${r.reference}.`) +
+        supplement(r, "covering"),
+    );
   };
 
   const pay = async () => {
-    const r = await act<{ reference: string; alreadyPaid: boolean; paidMinor: string }>("pay", { action: "pay", period });
+    const r = await act<{ reference: string; alreadyPaid: boolean; supplementary: boolean; payslips: number; paidMinor: string }>(
+      "pay", { action: "pay", period },
+    );
     if (!r) return;
-    setMsg(r.alreadyPaid ? `${period} was already paid as ${r.reference}.` : `Paid ${period} as ${r.reference}.`);
+    setMsg(
+      (r.alreadyPaid ? `${period} was already paid as ${r.reference}.` : `Paid ${period} as ${r.reference}.`) +
+        supplement(r, "settling"),
+    );
   };
 
   const buildSif = async () => {

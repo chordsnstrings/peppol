@@ -5,7 +5,7 @@ import {
   returnGoods, outstandingOnOrder, deliveredNotInvoiced, deliveryRegister, fmtQty,
 } from "@/lib/server/ledger/deliveries";
 import { addItem, receive } from "@/lib/server/ledger/inventory";
-import { createOrder, sendOrder, acceptOrder, invoiceOrder } from "@/lib/server/ledger/sales-orders";
+import { createOrder, sendOrder, acceptOrder, invoiceOrder, updateOrder } from "@/lib/server/ledger/sales-orders";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance } from "@/lib/server/ledger/reports";
 import { ledgerBalances } from "@/lib/server/ledger/balances";
@@ -171,6 +171,37 @@ d("delivery notes", () => {
     })).rejects.toThrow(/has 0 still to go/);
   });
 
+  /*
+   * The order cannot be cut below what has gone.
+   *
+   * `updateOrder` compared a new quantity against the invoiced quantity alone,
+   * so an order line could be reduced under the despatched quantity and the
+   * delivery note left quoting goods its own order no longer carried. Sixty
+   * have left here and nothing has been billed, so the delivered quantity is
+   * the only thing holding the line up.
+   */
+  it("refuses to cut an order line below what has already been delivered", async () => {
+    await expect(updateOrder({
+      orgId: ORG, entityId: ENT, orderId,
+      patch: { lines: [{ id: orderLineId, description: "Widget", sku: "WIDGET", quantityMilli: 30_000n, unitPriceMinor: 2_500n }] },
+    })).rejects.toThrow(/has already had 60 delivered.*cannot be cut to 30.*return note/s);
+  });
+
+  it("refuses to take a delivered line off the order altogether", async () => {
+    await expect(updateOrder({
+      orgId: ORG, entityId: ENT, orderId, patch: { lines: [] },
+    })).rejects.toThrow(/has already had 60 delivered.*taken off the order.*return note/s);
+  });
+
+  it("allows a cut to exactly what has gone out", async () => {
+    const r = await updateOrder({
+      orgId: ORG, entityId: ENT, orderId,
+      patch: { lines: [{ id: orderLineId, description: "Widget", sku: "WIDGET", quantityMilli: 60_000n, unitPriceMinor: 2_500n }] },
+    });
+    expect(r.lines[0].quantityMilli).toBe(60_000n);
+    expect((await outstandingOnOrder({ ...S, orderId })).lines[0].outstandingMilli).toBe(0n);
+  });
+
   it("lists everything delivered and not yet invoiced, at the order price", async () => {
     const r = await deliveredNotInvoiced({ ...S, asOf: "2026-03-31" });
     // Sixty at 25.00 is 1,500.00; it cost 600.00.
@@ -189,6 +220,21 @@ d("delivery notes", () => {
     expect(r.rows[0].number).toBe("DN-2");
     expect(r.rows[0].uninvoicedMilli).toBe(20_000n);
     expect(r.totals.valueMinor).toBe(50_000n);
+  });
+
+  /*
+   * Both facts, and which of them binds. Forty are billed and sixty have gone,
+   * so a cut to fifty clears the invoice and not the lorry — and a refusal that
+   * named only the invoice would send the reader for a credit note when what
+   * they need is a return.
+   */
+  it("names both quantities and says which one is binding", async () => {
+    await expect(updateOrder({
+      orgId: ORG, entityId: ENT, orderId,
+      patch: { lines: [{ id: orderLineId, description: "Widget", sku: "WIDGET", quantityMilli: 50_000n, unitPriceMinor: 2_500n }] },
+    })).rejects.toThrow(
+      /invoiced for 40 and has had 60 delivered, and the delivered quantity is the binding one/,
+    );
   });
 
   it("empties once the whole order is invoiced", async () => {

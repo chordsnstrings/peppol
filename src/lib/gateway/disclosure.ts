@@ -8,9 +8,15 @@
  * rather than a warning: what a person remembers is "delivered & reported", not
  * the single parenthesis that said otherwise.
  *
- * The strings live in one place so the send pipeline, the API routes and the
- * browser quote the same words, and so that changing what the product claims is
- * a one-file change somebody can review.
+ * The receiving half is here for the same reason and reads the same way: a
+ * document the simulator delivered was sent by nobody, and a decision it
+ * "transmitted" reached nobody. What differs is only which claim is being
+ * corrected, which is why an arrival gets its own sentence rather than the
+ * send's.
+ *
+ * The strings live in one place so the send pipeline, the receiver, the API
+ * routes and the browser quote the same words, and so that changing what the
+ * product claims is a one-file change somebody can review.
  *
  * This module must stay free of Node imports and of process.env: client
  * components import it, and registry.ts (which reads the environment and pulls
@@ -65,3 +71,29 @@ export const EVIDENCE_STATEMENT = {
   TRANSMITTED:
     "This document was submitted through a live gateway driver. The exchange and reporting outcomes below are the ones the gateway reported back.",
 } as const;
+
+/* --------------------------------------------------------------- receiving */
+
+/**
+ * What may be said about a document the simulator produced rather than the
+ * network delivered.
+ *
+ * `SIMULATED_SEND_NOTE` above covers a send, and it is the wrong sentence for
+ * an arrival: "nothing was transmitted" answers a question nobody asked when
+ * the thing in front of the reader claims to be an invoice from a supplier. The
+ * claim being corrected here is that a supplier sent it.
+ */
+export const SIMULATED_ARRIVAL_NOTE =
+  "This document was produced by this deployment's simulated gateway driver. Nothing arrived from the Peppol network and no supplier sent it.";
+
+/** Said when the driver is real but has no channel for an answer back to the supplier. */
+export const RECEIPT_NOT_TRANSMITTED =
+  "This deployment's gateway driver has no channel for sending a decision back to the supplier, so the decision is recorded here only. The supplier has not been told.";
+
+/** Said when the channel exists and the gateway refused the answer. */
+export const RECEIPT_SEND_FAILED =
+  "The gateway did not accept the decision, so the supplier has not been told. The decision is recorded here; send it again once the gateway is reachable.";
+
+/** Said when a driver cannot be asked for post at all. */
+export const FETCH_UNSUPPORTED =
+  "This deployment's gateway driver cannot be asked for inbound documents. Documents it receives arrive over its webhook instead.";

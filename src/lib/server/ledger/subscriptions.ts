@@ -1,8 +1,10 @@
 import { prisma } from "@/lib/server/prisma";
+import { putRecord } from "@/lib/server/store";
 import { LedgerError } from "./post";
 import { postInvoice } from "./ar";
+import { invoiceCreditGate } from "./credit-control";
 import { computeTotals } from "@/lib/domain/tax";
-import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
+import type { FxInfo, Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 import { TAX_PROFILES } from "@/lib/domain/tax";
 
 /**
@@ -315,7 +317,11 @@ export async function dueSubscriptions(opts: {
     if (periods === 0) continue;
 
     const lines = invoiceLines(readLines(t.lines, t.code), t.code);
-    const totals = computeTotals(lines);
+    // Priced in the currency the template bills in, which is what the figure
+    // below is denominated in. No rate is read here: this is what a period
+    // costs, not a document, and the AED conversion belongs to the invoice that
+    // states it on its own supply date.
+    const totals = computeTotals(lines, { currency: t.currency });
     due.push({
       code: t.code,
       customerName: t.customerName,
@@ -329,11 +335,112 @@ export async function dueSubscriptions(opts: {
   return { asOf: iso(asOf), due, totalMinor: due.reduce((a, d) => a + d.totalMinor, 0n) };
 }
 
+/**
+ * The rate a document raised on a date converts to AED at.
+ *
+ * A template carries a currency and no rate, and that is not an omission: it is
+ * written once and billed for years, so a rate captured when it was set up is
+ * the wrong one by the second period. Article 69 of Federal Decree-Law 8/2017
+ * fixes the conversion at the date of supply and each period is a supply of its
+ * own, so the rate is read per invoice from the entity's own rate file, taking
+ * the latest one recorded on or before the day that period fell due. It is the
+ * same lookup `approvals.ts` and `trade-finance.ts` make, against the same
+ * table, for the same reason — a rate nobody recorded is not a rate.
+ *
+ * Undefined where the document is already in dirhams, where the book is not
+ * kept in dirhams (`FxRate.rate` is a rate to the FUNCTIONAL currency, and
+ * `fx.rateToAED` is a rate to AED — they are only the same rate while those two
+ * are the same currency), and where no rate is on file. The invoice then states
+ * no AED tax and `validateInvoice` refuses to send it — AE-0500 — rather than
+ * this module inventing a rate to fill the field with.
+ */
+async function documentRate(
+  scope: { orgId: string; entityId: string },
+  currency: string,
+  on: Date,
+): Promise<FxInfo | undefined> {
+  if (currency === "AED") return undefined;
+  const book = await prisma.book.findFirst({
+    where: { orgId: scope.orgId, entityId: scope.entityId, kind: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  if ((book?.functionalCurrency ?? "AED") !== "AED") return undefined;
+
+  const row = await prisma.fxRate.findFirst({
+    where: { orgId: scope.orgId, entityId: scope.entityId, currency, rateDate: { lte: on } },
+    orderBy: { rateDate: "desc" },
+  });
+  if (!row) return undefined;
+  return {
+    // Decimal(20,10), rendered as the decimal it is rather than through a
+    // Number, so 3.6725 stays 3.6725 all the way onto the face of the document.
+    rateToAED: row.rate.toFixed(),
+    // The rate file records where each rate came from, and only the CBUAE feed
+    // may be printed as the CBUAE rate — everything else was typed by somebody.
+    source: row.source === "CBUAE" ? "CBUAE" : "MANUAL",
+    rateDate: iso(row.rateDate),
+  };
+}
+
+/**
+ * Say, where somebody will see it, that a standing arrangement stopped billing.
+ *
+ * `issueDue` hands the refusal back to whoever called it, and on a scheduled run
+ * that is a worker whose output nobody reads until they have already gone
+ * looking. So the refusal is also written to the workspace's own notifications,
+ * which is where the send pipeline and the dunning worker put the things a
+ * person has to act on.
+ *
+ * Written once per period, not once per run: the id is derived from the
+ * template and the scheduled date — the same pair the issue rows are keyed on —
+ * and an existing notice is left exactly as it is. A hold that stands for a
+ * month would otherwise file thirty notices and un-read the one somebody had
+ * already dealt with.
+ */
+async function reportRefusal(
+  orgId: string,
+  t: { id: string; code: string },
+  period: RefusedPeriod,
+): Promise<void> {
+  const id = `sub-credit-refused-${t.id}-${period.scheduledOn}`;
+  const already = await prisma.record.findUnique({ where: { store_id: { store: "notifications", id } } });
+  if (already) return;
+
+  await putRecord(orgId, "notifications", {
+    id,
+    orgId,
+    type: "subscription.credit_refused",
+    title: `${t.code} did not invoice ${period.customerName}`,
+    body:
+      `The invoice for ${period.scheduledOn} was not raised. ${period.headline} The period is still due, and ` +
+      `nothing after it was billed either — release the account and the next run raises all of it.`,
+    href: "/accounting/credit-control",
+    tone: "warning" as const,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/** A period a credit refusal stopped, and the sentence that says why. */
+export interface RefusedPeriod {
+  scheduledOn: string;
+  customerName: string;
+  /** The whole answer, already carrying the exposure, the limit and the grounds. */
+  headline: string;
+  /** Each ground separately, so a screen can show which one blocks on its own. */
+  reasons: string[];
+  /** The permission somebody needs to let this sale through anyway. */
+  overridePermission: string;
+}
+
 export interface IssueResult {
   code: string;
   raised: { invoiceId: string; number: string; scheduledOn: string; totalMinor: bigint; reference: string }[];
   alreadyRaised: string[];
+  /** Periods credit control refused, which is where the run stopped. */
+  refused: RefusedPeriod[];
   nextOn: string;
+  /** What happened, in a sentence, where a run did something other than bill. */
+  note?: string;
 }
 
 /**
@@ -344,6 +451,24 @@ export interface IssueResult {
  * other. A period already raised is reported rather than raised again — the
  * unique index would refuse it anyway, and catching it here means a run that
  * was interrupted halfway can simply be run again.
+ *
+ * **Credit control.** A subscription is the one sale nobody is present for. The
+ * gate on the invoice screen catches a person about to finalise a document; a
+ * standing arrangement has no such moment, so a customer put on hold in March
+ * went on being invoiced every month until somebody noticed — and by then the
+ * ledger held exactly the debt the hold was placed to prevent. Every period goes
+ * through the same `invoiceCreditGate` the screen uses, before anything is
+ * written.
+ *
+ * A refusal STOPS the run rather than skipping the period. The supply is still
+ * owed, so the period stays due at `nextOn` and is raised by the next run once
+ * the account is released. Stepping over it would forgive a month's billing
+ * without saying so, and a credit control that quietly loses revenue is worse
+ * than the exposure it was put there to stop.
+ *
+ * And a refusal on an unattended run has to be seen. It comes back in `refused`
+ * for whoever called, and it is written to the workspace's notifications for
+ * the nights when nobody did.
  */
 export async function issueDue(opts: {
   orgId: string;
@@ -359,10 +484,10 @@ export async function issueDue(opts: {
 
   const asOf = opts.asOf ? asDate(opts.asOf, "The run date") : new Date();
   const lines = invoiceLines(readLines(t.lines, t.code), t.code);
-  const totals = computeTotals(lines);
 
   const raised: IssueResult["raised"] = [];
   const alreadyRaised: string[] = [];
+  const refused: RefusedPeriod[] = [];
   let scheduled = t.nextOn;
   let count = t.issuedCount;
 
@@ -377,10 +502,18 @@ export async function issueDue(opts: {
       continue;
     }
 
-    count++;
     const invoiceId = `${t.id}-${iso(scheduled)}`;
-    const number = `${t.code}-${String(count).padStart(4, "0")}`;
+    // The number is not consumed until the gate below has let the period
+    // through, so a refusal does not leave a hole in the sequence.
+    const number = `${t.code}-${String(count + 1).padStart(4, "0")}`;
     const dueDate = new Date(scheduled.getTime() + t.paymentTerms * 86_400_000);
+    // Totalled per period rather than once for the run. Every period bills the
+    // same lines at the same prices, so the document-currency figures never
+    // move — but the AED figures Article 59(1)(k) requires are converted at the
+    // rate in force on the day that period fell due, and three months of
+    // catch-up are three supplies at three rates.
+    const fx = await documentRate(opts, t.currency, scheduled);
+    const totals = computeTotals(lines, { currency: t.currency, fx });
 
     const invoice: Invoice = {
       id: invoiceId,
@@ -393,6 +526,12 @@ export async function issueDue(opts: {
       supplyDate: iso(scheduled),
       dueDate: iso(dueDate),
       currency: t.currency,
+      // On the document as well as in its totals. The printed invoice and the
+      // UBL both derive the conversion from the rate the document itself
+      // carries — `aedTaxTotals` reads `fx`, not the stored figures — so an
+      // invoice with the AED tax in its totals and no rate on its face would
+      // state nothing to the buyer or to the FTA.
+      ...(fx ? { fx } : {}),
       customerId: t.customerCode ?? undefined,
       buyer: { nameEn: t.customerName, trn: t.customerTrn ?? undefined },
       seller: { nameEn: "" },
@@ -406,6 +545,34 @@ export async function issueDue(opts: {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     } as unknown as Invoice;
+
+    // The check, before the document exists anywhere. Refusing after the upsert
+    // would leave a document in the store that the books know nothing about,
+    // and the whole value of gating a standing arrangement is that the sale is
+    // stopped rather than recorded and regretted.
+    const gate = await invoiceCreditGate({
+      orgId: opts.orgId,
+      entityId: opts.entityId,
+      invoice,
+      // The run's date, not the period's. A catch-up run for March is deciding
+      // today whether to bill for March, and the customer's standing today is
+      // what that decision turns on.
+      asOf,
+    });
+    if (!gate.allowed) {
+      const stopped: RefusedPeriod = {
+        scheduledOn: iso(scheduled),
+        customerName: gate.name,
+        headline: gate.headline,
+        reasons: gate.reasons.filter((r) => r.blocking).map((r) => r.message),
+        overridePermission: gate.overridePermission,
+      };
+      refused.push(stopped);
+      await reportRefusal(opts.orgId, t, stopped);
+      break;
+    }
+
+    count++;
 
     // The document first, then the posting. An invoice that reached the ledger
     // without reaching the store would be a receivable with nothing behind it.
@@ -447,7 +614,20 @@ export async function issueDue(opts: {
     },
   });
 
-  return { code: t.code, raised, alreadyRaised, nextOn: iso(scheduled) };
+  return {
+    code: t.code,
+    raised,
+    alreadyRaised,
+    refused,
+    nextOn: iso(scheduled),
+    ...(refused.length
+      ? {
+          note:
+            `${t.code} stopped at ${refused[0].scheduledOn}: ${refused[0].headline} That period is still due and ` +
+            `nothing after it was billed either, so releasing the account and running this again bills the lot.`,
+        }
+      : {}),
+  };
 }
 
 /** Every subscription due as at a date, raised in one pass. */
@@ -457,10 +637,24 @@ export async function issueAllDue(opts: {
   const { due } = await dueSubscriptions(opts);
   const results: IssueResult[] = [];
   for (const d of due) results.push(await issueDue({ ...opts, code: d.code }));
+  // One customer's refusal must not stop another customer's billing, so the
+  // loop above does not break — `issueDue` reports a refusal instead of
+  // throwing, and the refusals are gathered here so a sweep that raised nothing
+  // says why at the top rather than only inside the per-subscription detail.
+  const refused = results.flatMap((r) => r.refused.map((p) => ({ code: r.code, ...p })));
   return {
     results,
     invoicesRaised: results.reduce((a, r) => a + r.raised.length, 0),
     totalMinor: results.reduce((a, r) => a + r.raised.reduce((b, x) => b + x.totalMinor, 0n), 0n),
+    refused,
+    ...(refused.length
+      ? {
+          note:
+            `${refused.length} subscription${refused.length === 1 ? "" : "s"} did not invoice: credit control ` +
+            `refused the sale. Every period stopped that way is still due, and is raised by the next run once the ` +
+            `account is released.`,
+        }
+      : {}),
   };
 }
 
@@ -501,7 +695,7 @@ export async function subscriptionRegister(opts: { orgId: string; entityId: stri
 
   const rows = templates.map((t) => {
     const lines = invoiceLines(readLines(t.lines, t.code), t.code);
-    const totals = computeTotals(lines);
+    const totals = computeTotals(lines, { currency: t.currency });
     return {
       code: t.code,
       customerName: t.customerName,

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
 import { LedgerError } from "./post";
 import { receivablesAgeing } from "./ar";
+import type { SharedReads } from "./attention";
 import { attributeDocument, partyIndex } from "./counterparties";
 import { listOrders, orderDetail } from "./sales-orders";
 import { fmtMinor } from "@/lib/ledger/format";
@@ -218,13 +219,22 @@ interface DocFacts {
   due: Date | null;
   reference: string;
   outstanding: bigint;
-  opened: boolean;
+  /**
+   * Whether an invoice line has opened this item yet, while it is being netted.
+   * Only the netting reads it — it decides which line's date, terms and memo
+   * win — so items that arrive already netted leave it off rather than assert
+   * something they were not told.
+   */
+  opened?: boolean;
 }
 
 interface SalesLedger {
   movements: Movement[];
   docs: Map<string, DocFacts>;
 }
+
+/** The open items alone, however they were netted. */
+type OpenItems = Pick<SalesLedger, "docs">;
 
 /**
  * Every movement on the receivables control account up to a date, netted into
@@ -339,18 +349,28 @@ async function salesLedger(opts: {
     }
   }
 
-  /*
-   * Whose each open item is, read from the document store in chunks.
-   *
-   * Every open item is one id in an `in (…)`, one bind parameter each, and
-   * PostgreSQL refuses past 65,535 of them — so written in one go this query
-   * stops working, not slowly but at all, on exactly the businesses with the
-   * longest sales history and therefore the most reason to be checking credit.
-   */
-  const idx = partyIndex(opts.parties);
+  await attributeDocuments(opts.orgId, docs, opts.parties);
+
+  return { movements, docs };
+}
+
+/**
+ * Whose each open item is, read from the document store in chunks.
+ *
+ * Every open item is one id in an `in (…)`, one bind parameter each, and
+ * PostgreSQL refuses past 65,535 of them — so written in one go this query
+ * stops working, not slowly but at all, on exactly the businesses with the
+ * longest sales history and therefore the most reason to be checking credit.
+ *
+ * It stands apart from the read above because the items can arrive two ways —
+ * netted here, or netted by the receivables ageing — and whose an item is must
+ * not be answered differently depending on which way they came.
+ */
+async function attributeDocuments(orgId: string, docs: Map<string, DocFacts>, parties: Counterparty[]) {
+  const idx = partyIndex(parties);
   for (const batch of documentIdBatches([...docs.keys()])) {
     const stored = await prisma.record.findMany({
-      where: { orgId: opts.orgId, store: "invoices", id: { in: batch } },
+      where: { orgId, store: "invoices", id: { in: batch } },
     });
     for (const row of stored) {
       const doc = docs.get(row.id);
@@ -362,8 +382,59 @@ async function salesLedger(opts: {
       if (inv.number) doc.number = inv.number.trim();
     }
   }
+}
 
-  return { movements, docs };
+/**
+ * The same open items, taken from the receivables ageing instead of read off
+ * the control account a second time.
+ *
+ * `receivablesAgeing` nets the same lines on the same account by the same key —
+ * `settlesId ?? entry.settlesId ?? sourceId`, line first — which is why
+ * `customerStatement` below can tie its own items against it. So the items it
+ * returns are the items `salesLedger` would net, and where that ageing has
+ * already been read for something else on the same page, reading every
+ * movement on 1100 again to reach them buys nothing. On the notification
+ * centre it was the third full read of that account in one request.
+ *
+ * What the ageing does not carry is the journal reference of the entry that
+ * opened each item, so an item taken this way names the document and not the
+ * journal. Only the dunning plan takes this route, only the notification
+ * centre asks it to, and that row reports the totals and the rung — no caller
+ * that shows an item's reference passes shared reads.
+ *
+ * `MAX_LEDGER_MOVEMENTS` does not guard this route, and does not need to. The
+ * ageing is the report the trial balance backs and it is read whole on the same
+ * page regardless, so a book too large for one of them was never going to be
+ * saved by a ceiling on the other.
+ */
+async function agedOpenItems(opts: {
+  orgId: string;
+  asOf: Date;
+  parties: Counterparty[];
+  reads: SharedReads;
+}): Promise<{ docs: Map<string, DocFacts> }> {
+  const ageing = await opts.reads.receivables(opts.asOf);
+
+  const docs = new Map<string, DocFacts>();
+  for (const item of ageing.open) {
+    docs.set(item.sourceId, {
+      key: item.sourceId,
+      partyId: null,
+      number: "",
+      description: item.memo,
+      date: day(item.date),
+      // Null where the document carried no terms of its own, and kept null:
+      // that absence is what makes `openItemsOf` fall back to the customer's
+      // terms, and a date invented here would age an invoice against terms
+      // nobody agreed to.
+      due: item.dueDate === null ? null : day(item.dueDate),
+      reference: "",
+      outstanding: BigInt(item.outstandingMinor),
+    });
+  }
+
+  await attributeDocuments(opts.orgId, docs, opts.parties);
+  return { docs };
 }
 
 export interface OpenItem {
@@ -379,7 +450,7 @@ export interface OpenItem {
   daysOverdue: number;
 }
 
-function openItemsOf(ledger: SalesLedger, party: Counterparty, asOf: Date): OpenItem[] {
+function openItemsOf(ledger: OpenItems, party: Counterparty, asOf: Date): OpenItem[] {
   const out: OpenItem[] = [];
   for (const doc of ledger.docs.values()) {
     if (doc.partyId !== party.id || doc.outstanding === 0n) continue;
@@ -815,7 +886,7 @@ export interface CreditStanding {
 interface Context {
   asOf: Date;
   currency: string;
-  ledger: SalesLedger;
+  ledger: OpenItems;
   limits: Map<string, { limitMinor: bigint; effectiveFrom: Date; basis: string; setBy: string | null }[]>;
   holds: Map<string, CreditHold>;
   committed: Map<string, { orders: CommittedOrder[]; totalMinor: bigint; foreign: Exposure["excludedForeignOrders"] }>;
@@ -833,13 +904,23 @@ async function context(opts: {
   entityId: string;
   asOf: Date;
   parties: Counterparty[];
+  /**
+   * The reads this shares with whatever else is on the page. Left out, the
+   * open items are netted here from the control account — which is right for
+   * the credit-control screen, where this is the only thing being read. Where
+   * one is passed the ageing behind it answers the same question, and see
+   * `agedOpenItems` for what that costs and what it does not.
+   */
+  reads?: SharedReads;
 }): Promise<Context> {
   const keys = opts.parties.map(partyKeyOf);
   const scope = { orgId: opts.orgId, entityId: opts.entityId };
   const currency = await functionalCurrency(opts.orgId, opts.entityId);
 
   const [ledger, limitRows, holdRows, noticeRows, committed] = await Promise.all([
-    salesLedger({ ...scope, to: opts.asOf, parties: opts.parties }),
+    opts.reads
+      ? agedOpenItems({ orgId: opts.orgId, asOf: opts.asOf, parties: opts.parties, reads: opts.reads })
+      : salesLedger({ ...scope, to: opts.asOf, parties: opts.parties }),
     prisma.creditLimit.findMany({ where: { ...scope, partyKey: { in: keys } } }),
     prisma.creditHold.findMany({ where: { ...scope, partyKey: { in: keys }, releasedOn: null } }),
     prisma.dunningNotice.findMany({
@@ -1549,6 +1630,14 @@ export async function dunningPlan(opts: {
   entityId: string;
   asOf?: Date | string;
   cooloffDays?: number;
+  /**
+   * The reads this list shares with whatever else is on the page. Left out it
+   * reads the receivables control account itself, which is what the
+   * credit-control screen wants — there this list is the only thing being read.
+   * The notification centre passes its own, because there the same account has
+   * already been netted at the same date for the attention list.
+   */
+  reads?: SharedReads;
 }) {
   const asOf = asDate(opts.asOf ?? new Date(), "The as-at date");
   const cooloff = opts.cooloffDays ?? DEFAULT_COOLOFF_DAYS;
@@ -1564,7 +1653,10 @@ export async function dunningPlan(opts: {
     return { asOf: iso(asOf), cooloffDays: cooloff, rows: [], totalPastDueMinor: "0", currency: await functionalCurrency(opts.orgId, opts.entityId), note: NEVER_SENDS };
   }
 
-  const ctx = await context({ orgId: opts.orgId, entityId: opts.entityId, asOf, parties });
+  const ctx = await context({
+    orgId: opts.orgId, entityId: opts.entityId, asOf, parties,
+    ...(opts.reads ? { reads: opts.reads } : {}),
+  });
   const rows: DunningRow[] = [];
 
   for (const party of parties) {

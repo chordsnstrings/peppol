@@ -39,7 +39,10 @@ export async function POST(req: Request) {
       period?: string;
       assetCode?: string;
       disposedOn?: string;
-      proceedsMinor?: number;
+      /* The wire format for money, which is a decimal string of minor units —
+       * `disposeAsset` takes any of the three and the disposal panel sends the
+       * string, so declaring a number here described a body nothing posts. */
+      proceedsMinor?: number | bigint | string;
       proceedsAccount?: string;
     };
     if (!b.entityId) return json({ error: "entityId required" }, 400);

@@ -57,7 +57,15 @@ export default function FixitPage() {
         try {
           await sendInvoice(inv, currentEntity);
           toast.success("Sent", { description: `${inv.number} is on its way.` });
-        } catch {
+        } catch (e) {
+          /* The invoice screen is where every one of these is dealt with — a
+           * blocking issue is corrected there and a credit refusal is overridden
+           * there — so that is still where this goes. But the reason travels
+           * with it: a refusal that carries no validation issues came from the
+           * pipeline rather than the document, and arriving on a valid-looking
+           * invoice with no explanation is how somebody presses Send again. */
+          const issues = (e as { issues?: unknown }).issues;
+          if (!issues && e instanceof Error) toast.error("Not sent", { description: e.message });
           router.push(`/invoices/${item.ref}`);
         }
       } else {

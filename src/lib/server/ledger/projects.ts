@@ -83,6 +83,20 @@ export interface ProjectRecord {
   status: ProjectStatus;
 }
 
+/** One recorded change to what a job was quoted at. */
+export interface BudgetRevision {
+  id: string;
+  /** What it was, and what it became — both, so the row reads on its own. */
+  priorMinor: string;
+  budgetMinor: string;
+  /** budget − prior. Negative is a budget that was cut. */
+  movementMinor: string;
+  reason: string;
+  revisedBy: string | null;
+  /** The instant it was recorded, in full: two revisions can share a day. */
+  revisedAt: string;
+}
+
 export interface ProjectProfitability {
   code: string;
   name: string;
@@ -114,6 +128,16 @@ export interface ProjectProfitability {
   overBudget: boolean;
   /** How far over, or "0". */
   overBudgetByMinor: string;
+  /**
+   * Every recorded revision to the budget, most recent first.
+   *
+   * An empty list is not proof that the figure has never moved. The history
+   * begins when `ProjectBudgetRevision` began — before that a revision
+   * overwrote one column and left nothing behind — so a job set up earlier may
+   * carry a budget that was changed and cannot say so. The screen prints that
+   * caveat rather than presenting an empty list as "never revised".
+   */
+  budgetRevisions: BudgetRevision[];
   /** The dimensional read this came from ties to the real profit and loss. */
   reconciles: boolean;
   differenceMinor: string;
@@ -311,6 +335,7 @@ const bps = (numerator: bigint, denominator: bigint): bigint | null =>
 const str = (v: bigint | null) => (v === null ? null : v.toString());
 
 type Row = {
+  id: string;
   code: string;
   name: string;
   customerName: string | null;
@@ -442,6 +467,26 @@ export async function createProject(opts: {
  * every posting already tagged to this job points at the dimension value by
  * code, so renaming it would leave that cost pointing at nothing and the job
  * would appear to have cost nothing at all. Raise a new project instead.
+ *
+ * ── Revising the budget ────────────────────────────────────────────────────
+ *
+ * The budget was one column, and a revision overwrote it. That is not a small
+ * loss: the budget is what every percentage on the job is measured against, so
+ * an overspend disappeared the moment somebody raised the number, and nothing
+ * anywhere said who had raised it or why. Scope does move and budgets do get
+ * revised — refusing the change would only push it into a spreadsheet beside
+ * the ledger — so the change is allowed and the figure it replaces is kept.
+ *
+ * A revision therefore takes a reason, and it is required rather than
+ * encouraged: the database's own CHECK refuses a blank one, and a revision
+ * nobody has to justify is the thing the table exists to prevent. The reason is
+ * asked for here, before the write, so the refusal names the project rather
+ * than a constraint.
+ *
+ * The write is conditional on the budget still being what was read. Two people
+ * revising at once would otherwise both record the same prior figure, and the
+ * history would then say the budget went from A to B and from A to C when what
+ * really happened was A to B to C.
  */
 export async function updateProject(opts: {
   orgId: string;
@@ -451,6 +496,10 @@ export async function updateProject(opts: {
   customerName?: string | null;
   endsOn?: string | Date | null;
   budgetMinor?: number | bigint | string;
+  /** Why the budget moved. Required when it does, and kept with the revision. */
+  reason?: string;
+  /** Who moved it. Whoever is signed in — never a value the browser supplies. */
+  revisedBy?: string;
   status?: string;
 }): Promise<ProjectRecord> {
   const code = projectCode(opts.code);
@@ -473,23 +522,101 @@ export async function updateProject(opts: {
     );
   }
 
+  const revised = budgetMinor !== project.budgetMinor;
+  const reason = (opts.reason ?? "").trim();
+  if (revised && !reason) {
+    throw new LedgerError(
+      `Changing the budget on ${code} needs a reason. The budget is what every percentage on this job is measured ` +
+        `against, so a figure that moves with nothing said about why makes an overspend disappear instead of ` +
+        `explaining it — a variation agreed, a rate renegotiated, scope added. Whatever it was, write it down.`,
+    );
+  }
+
   // The report reads its labels from the dimension value, so a renamed project
   // has to be renamed on both halves or the screen keeps the old name.
   if (name !== project.name) {
     await addValue({ orgId: opts.orgId, dimensionCode: PROJECT_DIMENSION, code, name });
   }
 
-  const updated = await prisma.project.update({
-    where: { orgId_entityId_code: { orgId: opts.orgId, entityId: opts.entityId, code } },
-    data: {
-      name,
-      customerName: opts.customerName === undefined ? project.customerName : opts.customerName?.trim() || null,
-      endsOn,
-      budgetMinor,
-      status,
-    },
+  const data = {
+    name,
+    customerName: opts.customerName === undefined ? project.customerName : opts.customerName?.trim() || null,
+    endsOn,
+    budgetMinor,
+    status,
+  };
+
+  // The change and the record of it are one write. A revision row without the
+  // change would be a history of something that did not happen, and the change
+  // without the row is the loss this whole table exists to stop.
+  const updated = await prisma.$transaction(async (tx) => {
+    if (!revised) {
+      return tx.project.update({
+        where: { orgId_entityId_code: { orgId: opts.orgId, entityId: opts.entityId, code } },
+        data,
+      });
+    }
+
+    const moved = await tx.project.updateMany({
+      where: { orgId: opts.orgId, entityId: opts.entityId, code, budgetMinor: project.budgetMinor },
+      data,
+    });
+    if (moved.count !== 1) {
+      throw new LedgerError(
+        `The budget on ${code} was changed by somebody else while this revision was in flight, so it has not been ` +
+          `applied. Reload the job and decide again against the figure it now carries.`,
+      );
+    }
+
+    await tx.projectBudgetRevision.create({
+      data: {
+        orgId: opts.orgId,
+        projectId: project.id,
+        priorMinor: project.budgetMinor,
+        budgetMinor,
+        reason,
+        revisedBy: opts.revisedBy?.trim() || null,
+      },
+    });
+
+    return tx.project.findUniqueOrThrow({
+      where: { orgId_entityId_code: { orgId: opts.orgId, entityId: opts.entityId, code } },
+    });
   });
   return toRecord(updated);
+}
+
+/**
+ * What a job has been quoted at, over time, most recent first.
+ *
+ * Scoped through the project rather than by id: a revision belongs to one job
+ * in one entity, and reading it by project id alone would let a caller holding
+ * an id from another entity read its budget history.
+ */
+export async function budgetHistory(opts: {
+  orgId: string; entityId: string; code: string;
+}): Promise<BudgetRevision[]> {
+  const project = await findProject(opts.orgId, opts.entityId, projectCode(opts.code));
+  return revisionsOf(opts.orgId, project.id);
+}
+
+async function revisionsOf(orgId: string, projectId: string): Promise<BudgetRevision[]> {
+  const rows = await prisma.projectBudgetRevision.findMany({
+    where: { orgId, projectId },
+    // The id breaks a tie, so two revisions recorded in the same millisecond
+    // still come back in one fixed order rather than in whichever order the
+    // database happened to return them this time.
+    orderBy: [{ revisedAt: "desc" }, { id: "desc" }],
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    priorMinor: r.priorMinor.toString(),
+    budgetMinor: r.budgetMinor.toString(),
+    movementMinor: (r.budgetMinor - r.priorMinor).toString(),
+    reason: r.reason,
+    revisedBy: r.revisedBy,
+    revisedAt: r.revisedAt.toISOString(),
+  }));
 }
 
 /**
@@ -627,6 +754,7 @@ export async function projectProfitability(opts: {
     percentOfBudgetBps: str(bps(cost, budget)),
     overBudget: over,
     overBudgetByMinor: (over ? cost - budget : 0n).toString(),
+    budgetRevisions: await revisionsOf(opts.orgId, project.id),
     reconciles: pl.reconciles,
     differenceMinor: pl.differenceMinor,
   };

@@ -12,6 +12,9 @@ import { recordExchange } from "@/lib/server/billing";
 import { isOrgWritable } from "@/lib/server/org-status";
 import { isEntitled } from "@/lib/server/subscription";
 import { isFlagOn } from "@/lib/server/flags";
+import { invoiceCreditGate, overrideNarrative, type InvoiceCreditGate } from "@/lib/server/ledger/credit-control";
+import { requirePermission, PermissionError } from "@/lib/server/ledger/permissions";
+import { fmtMinor } from "@/lib/ledger/format";
 import type { AppNotification, Entity, Invoice, InvoiceEvent } from "@/lib/domain/types";
 
 export interface SendOutcome {
@@ -32,6 +35,53 @@ export interface SendOutcome {
 }
 
 /**
+ * What the caller knows that the pipeline cannot work out for itself.
+ *
+ * Only the credit gate reads either of these, and both are optional because
+ * most callers have neither: an API key authenticates a workspace and names
+ * nobody, and no caller sends over a credit refusal unless a person asked for
+ * it in those words.
+ */
+export interface SendOptions {
+  /** The signed-in person, as a permission check would name them. */
+  actorId?: string | null;
+  /** Send over a credit refusal, on a reason that goes onto the invoice's timeline. */
+  creditOverrideReason?: string | null;
+}
+
+/**
+ * A credit refusal, written for a caller that has no panel to draw the gate in.
+ *
+ * The finalisation route hands the whole gate back and the invoice screen draws
+ * it — a verdict, the four figures the argument is actually about, and every
+ * ground separately. None of the other doors into this pipeline has that panel:
+ * a bulk send, the fix-it queue, the recurring runner and an API client all get
+ * one string. "Credit refused" on its own is what sends the salesperson to
+ * accounts and accounts back to the salesperson, and the second time that
+ * happens somebody invoices from a spreadsheet instead — so the figures and the
+ * name of the grant that can let it through travel in the sentence.
+ */
+function creditRefusal(gate: InvoiceCreditGate): string {
+  const money = (v: string | null) =>
+    v === null ? "an amount this check could not read" : `${gate.currency} ${fmtMinor(v, gate.currency, { zero: "zero" })}`;
+  // Only where the check actually ran. An unresolved customer or an entity with
+  // no receivables account produces no exposure and no limit, and printing a
+  // row of nils there would read as "they owe nothing" rather than "not asked".
+  const standing =
+    gate.exposureMinor === null
+      ? ""
+      : ` ${gate.name} carries ${money(gate.exposureMinor)} against ` +
+        (gate.creditLimitMinor === null ? "no limit assessed" : `a limit of ${money(gate.creditLimitMinor)}`) +
+        `, and ${gate.documentNumber} would take them to ${money(gate.wouldBeMinor)}.`;
+  return (
+    `${gate.documentNumber} was not sent. ${gate.headline}${standing} ` +
+    `Whoever holds "${gate.overridePermission}" can finalise it anyway from the invoice, on a reason that goes ` +
+    `onto its timeline — which is deliberately not the grant that raises one, so the person who raised this ` +
+    `cannot clear their own refusal.`
+  );
+}
+
+/**
  * Send pipeline (spec §3.2, §7): validate → generate PINT AE UBL + Tax Data
  * Document → submit the exchange leg (to the buyer's ASP / C3) and the reporting
  * leg (TDD to the FTA / C5) through the gateway → record the transmission and
@@ -40,7 +90,7 @@ export interface SendOutcome {
  * Shared by the session send route and the public API so both behave identically.
  * `orgId` must be the authoritative tenant id (session or authenticated API key).
  */
-export async function runSendPipeline(orgId: string, invoiceId: string): Promise<SendOutcome> {
+export async function runSendPipeline(orgId: string, invoiceId: string, opts: SendOptions = {}): Promise<SendOutcome> {
   if (await isFlagOn("sending_paused")) {
     return { ok: false, status: 503, error: "Sending is temporarily paused platform-wide. Please try again shortly." };
   }
@@ -61,6 +111,15 @@ export async function runSendPipeline(orgId: string, invoiceId: string): Promise
   if (invoice.docType === "PROFORMA") {
     return { ok: false, status: 422, error: "Proforma invoices aren't transmitted. Convert it to a tax invoice first." };
   }
+  /* A cancelled document was abandoned, and transmitting one would put it in
+   * the buyer's hands and in front of the FTA after the business decided not to
+   * issue it. The finalisation route refuses the same transition in the same
+   * words. It also matters to the credit gate below: cancelling is a move a
+   * client may make on its own record, so without this a refused draft could be
+   * cancelled and then sent, arriving here in a state the gate does not read. */
+  if (invoice.lifecycleStatus === "CANCELLED") {
+    return { ok: false, status: 422, error: `${invoice.number || "This document"} was cancelled, so it isn't sent.` };
+  }
   const entity = await getRecord<Entity>(orgId, "entities", invoice.entityId);
   if (!entity) return { ok: false, status: 400, error: "Entity not found" };
 
@@ -79,11 +138,6 @@ export async function runSendPipeline(orgId: string, invoiceId: string): Promise
     return { ok: false, status: 503, error: LIVE_ENTITY_ON_SIMULATOR, simulated };
   }
 
-  const validation = validateInvoice(invoice);
-  if (!validation.canSend) {
-    return { ok: false, status: 422, error: "Invoice has blocking issues", issues: validation.issues };
-  }
-
   const now = new Date().toISOString();
   const event = async (type: string, detail: string, actor: string, tone: InvoiceEvent["tone"]) => {
     const ev: InvoiceEvent = { id: randomUUID(), invoiceId: invoice.id, type, detail, actor, at: new Date().toISOString(), tone };
@@ -92,6 +146,81 @@ export async function runSendPipeline(orgId: string, invoiceId: string): Promise
   const notify = async (n: Omit<AppNotification, "id" | "orgId" | "createdAt">) => {
     await putRecord(orgId, "notifications", { id: randomUUID(), orgId, createdAt: now, ...n });
   };
+
+  /* The credit gate, at the last door out.
+   *
+   * It binds at finalisation on the invoice screen, which is the moment the
+   * business commits — but five other paths send without ever finalising
+   * through it: bulk send from the list, create-and-send, the fix-it queue, the
+   * recurring runner and the public API. A control on one door out of six is
+   * not a control, so it binds here as well, in the pipeline all six pass
+   * through, rather than six times over in the screens.
+   *
+   * Only for a document still in draft, and that is the whole of the agreement
+   * with the screen. Sending a draft finalises it — it is locked and taken to
+   * SENT below — so this is the same commitment point reached by a different
+   * door. A document already READY has been through the gate on the route that
+   * finalised it, and its answer, including an override somebody put their name
+   * to, is already on its timeline; asking again would refuse the same sale
+   * twice and leave the second refusal somewhere with no way to override it.
+   */
+  if (invoice.lifecycleStatus === "DRAFT") {
+    const reason = (opts.creditOverrideReason ?? "").trim();
+    const gate = await invoiceCreditGate({
+      orgId,
+      entityId: invoice.entityId,
+      invoice,
+      override: reason ? { reason, actorId: opts.actorId ?? null } : null,
+    });
+
+    if (gate.overrode) {
+      /* Letting a refusal through is the same power as releasing a hold and
+       * deliberately not the power that raises the invoice, so it is checked
+       * rather than taken on the caller's word. An API key authenticates a
+       * workspace and names nobody, and an override nobody can be held to is
+       * not an override — so a caller with no actor is refused on the credit
+       * grounds, with the permission sentence added rather than substituted:
+       * the reason the sale is stopped is still the customer, not the login. */
+      let denial: string | null = null;
+      if (!opts.actorId) {
+        denial =
+          `An override has to be somebody's. This request authenticated a workspace rather than a person, so ` +
+          `there is nobody to hold "${gate.overridePermission}".`;
+      } else {
+        try {
+          await requirePermission({
+            orgId,
+            userId: opts.actorId,
+            entityId: invoice.entityId,
+            permission: gate.overridePermission,
+          });
+        } catch (e) {
+          if (!(e instanceof PermissionError)) throw e;
+          denial = e.message;
+        }
+      }
+      if (denial) return { ok: false, status: 403, error: `${denial} ${creditRefusal(gate)}` };
+    }
+
+    if (!gate.allowed) return { ok: false, status: 409, error: creditRefusal(gate) };
+
+    /* Written before anything is submitted, so a failure between the two leaves
+     * a recorded override and an unsent draft rather than a transmitted invoice
+     * nobody can see was overridden — the same order the finalisation route
+     * writes them in, and for the same reason. The narrative carries the limit,
+     * the exposure and the grounds rather than the words "credit override",
+     * because the check will answer differently by the time anybody reads it
+     * back and "over their limit" without the figures is not weighable. */
+    if (gate.overrode) {
+      const actor = opts.actorId!; // Never null: an override naming nobody was refused above.
+      await event("credit_override", overrideNarrative(gate, actor), actor, "warning");
+    }
+  }
+
+  const validation = validateInvoice(invoice);
+  if (!validation.canSend) {
+    return { ok: false, status: 422, error: "Invoice has blocking issues", issues: validation.issues };
+  }
 
   // Build the compliant documents.
   const ubl = generateUBL(invoice);

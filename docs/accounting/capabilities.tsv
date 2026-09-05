@@ -14,6 +14,18 @@
 # Checks are deliberately not counted as capabilities. An assertion is how a
 # capability is held, not another capability.
 #
+# The three lists are joined rather than concatenated: `--gaps` reports the
+# endpoints no page, component or hook appears to reach, and the operations
+# nothing outside their own module names. Counting them separately is how this
+# product came to hold a complete, tested, routed sales and purchase ledger
+# that no screen called — eight capabilities added to the count and to nothing
+# else. `--check` ratchets on both figures, so they may fall and may not rise.
+#
+operation	allowance	ratePercent
+operation	allowance	normaliseRates
+operation	allowance	provisionMatrix
+operation	allowance	allowanceView
+operation	allowance	raiseAllowance
 operation	analytics	ledgerAnalytics
 operation	ap	postBill
 operation	ap	postSupplierPayment
@@ -23,11 +35,13 @@ operation	approvals	listRules
 operation	approvals	deactivateRule
 operation	approvals	rulesFor
 operation	approvals	approvalState
+operation	approvals	subjectFacts
 operation	approvals	decide
 operation	approvals	withdraw
 operation	approvals	assertApproved
 operation	approvals	pendingFor
 operation	ar	postInvoice
+operation	ar	postCustomerReceipt
 operation	ar	postReceipt
 operation	ar	receivablesAgeing
 operation	asset-revaluation	unimpairedCarrying
@@ -47,6 +61,7 @@ operation	attachments	listAttachments
 operation	attachments	getAttachment
 operation	attachments	removeAttachment
 operation	attachments	attachmentCountsFor
+operation	attention	sharedReads
 operation	attention	attentionList
 operation	audit	auditTrail
 operation	audit	provenanceSummary
@@ -65,6 +80,7 @@ operation	bank	suggestMatches
 operation	bank	confirmMatch
 operation	bank	unmatch
 operation	bank	postFromBankLine
+operation	bank	reconciliationSummary
 operation	bank	reconcile
 operation	borrowings	nanoFromAnnualBps
 operation	borrowings	annualBpsFromNano
@@ -90,6 +106,8 @@ operation	budget	setBudget
 operation	budget	copyScenario
 operation	budget	budgetVsActual
 operation	budget	budgetSummary
+operation	cash	cashCodes
+operation	cash	cashCodesFrom
 operation	cashflow-direct	lineFor
 operation	cashflow-direct	directCashFlow
 operation	cashflow	cashFlowStatement
@@ -138,6 +156,7 @@ operation	counterparties	placeOnHold
 operation	counterparties	releaseHold
 operation	counterparties	checkCreditBeforeSale
 operation	counterparties	listCounterparties
+operation	credit-control	documentIdBatches
 operation	credit-control	partyKeyOf
 operation	credit-control	setCreditLimit
 operation	credit-control	creditLimitHistory
@@ -146,6 +165,8 @@ operation	credit-control	releaseCreditHold
 operation	credit-control	creditHoldHistory
 operation	credit-control	creditStanding
 operation	credit-control	creditCheck
+operation	credit-control	invoiceCreditGate
+operation	credit-control	overrideNarrative
 operation	credit-control	stageForDays
 operation	credit-control	dunningPlan
 operation	credit-control	dunningLetter
@@ -163,6 +184,7 @@ operation	deferred-tax	position
 operation	deferred-tax	postDeferredTax
 operation	deferred-tax	deferredTaxNote
 operation	deliveries	fmtQty
+operation	deliveries	deliveredByOrderLine
 operation	deliveries	outstandingOnOrder
 operation	deliveries	createDeliveryNote
 operation	deliveries	dispatchNote
@@ -185,6 +207,7 @@ operation	equity	equityAndNotes
 operation	expenses	totalsOf
 operation	expenses	createClaim
 operation	expenses	addLine
+operation	expenses	updateLine
 operation	expenses	removeLine
 operation	expenses	updateClaim
 operation	expenses	submitClaim
@@ -193,6 +216,7 @@ operation	expenses	rejectClaim
 operation	expenses	reopenClaim
 operation	expenses	postClaim
 operation	expenses	payClaim
+operation	expenses	claimSummary
 operation	expenses	claimList
 operation	expenses	claimDetail
 operation	exports	exportLedger
@@ -271,6 +295,7 @@ operation	layouts	seedStarterLayouts
 operation	leases	presentValue
 operation	leases	periodRateBps
 operation	leases	buildSchedule
+operation	leases	currentPortionOf
 operation	leases	termMonths
 operation	leases	exemptionOf
 operation	leases	addLease
@@ -279,6 +304,7 @@ operation	leases	leaseSchedule
 operation	leases	runLeasePeriod
 operation	leases	payLease
 operation	leases	positionAt
+operation	leases	reclassifyCurrentPortion
 operation	leases	leaseRegister
 operation	leave	leaveEntitlement
 operation	leave	leaveBalance
@@ -316,6 +342,7 @@ operation	payment-runs	cancelRun
 operation	payment-runs	bankFile
 operation	payment-runs	runList
 operation	payment-runs	runDetail
+operation	payroll	pensionContribution
 operation	payroll	gratuityEntitlement
 operation	payroll	gratuityAccrual
 operation	payroll	addEmployee
@@ -350,6 +377,7 @@ operation	pricing	partyKeyOf
 operation	pricing	createPriceList
 operation	pricing	setPrices
 operation	pricing	closePrice
+operation	pricing	closePriceList
 operation	pricing	assignPriceList
 operation	pricing	unassignPriceList
 operation	pricing	resolvePrice
@@ -369,6 +397,7 @@ operation	procurement	orderList
 operation	procurement	orderDetail
 operation	projects	createProject
 operation	projects	updateProject
+operation	projects	budgetHistory
 operation	projects	closeProject
 operation	projects	listProjects
 operation	projects	projectProfitability
@@ -403,12 +432,14 @@ operation	recurring	runRecurring
 operation	recurring	templateStatus
 operation	related-parties	inPeriod
 operation	related-parties	declareRelatedParty
+operation	related-parties	assessNotRelated
 operation	related-parties	endRelationship
 operation	related-parties	declareCompensation
 operation	related-parties	attest
 operation	related-parties	relatedPartyNote
 operation	reports	trialBalance
 operation	reports	generalLedger
+operation	revaluation	classify
 operation	revaluation	setRate
 operation	revaluation	ratesOnFile
 operation	revaluation	revaluationPreview
@@ -424,6 +455,8 @@ operation	revenue	cancelContract
 operation	revenue	positionOf
 operation	revenue	runRecognition
 operation	revenue	runRecognitionAll
+operation	revenue	contractBalancesNote
+operation	revenue	remainingObligations
 operation	revenue	contractRegister
 operation	revenue	contractDetail
 operation	sales-orders	lineNet
@@ -444,6 +477,7 @@ operation	segments	segmentTrend
 operation	serialize	ledgerJson
 operation	setup	openFiscalYear
 operation	setup	openBooks
+operation	statements	classifyChart
 operation	statements	balances
 operation	statements	removeYearEndClose
 operation	statements	profitAndLoss
@@ -457,6 +491,15 @@ operation	subscriptions	dueSubscriptions
 operation	subscriptions	issueDue
 operation	subscriptions	issueAllDue
 operation	subscriptions	subscriptionRegister
+operation	tax-periods	dueDateFor
+operation	tax-periods	taxPeriodFor
+operation	tax-periods	taxPeriodsBetween
+operation	tax-periods	getRegistration
+operation	tax-periods	recordRegistration
+operation	tax-periods	recordFiling
+operation	tax-periods	filingFor
+operation	tax-periods	lastCompletedPeriod
+operation	tax-periods	outstandingReturns
 operation	timesheets	valueOf
 operation	timesheets	asHours
 operation	timesheets	recordTime
@@ -484,6 +527,12 @@ operation	vat-schemes	marginSchemeSupply
 operation	vat-schemes	designatedZoneTreatment
 operation	vat-schemes	designatedZoneMatrix
 operation	vat	vatReturn
+operation	vat	correctionsToFiledPeriods
+operation	vat	registrationThreshold
+operation	write-offs	writeOffsView
+operation	write-offs	writeOffReceivable
+operation	write-offs	adjustWriteOffVat
+operation	write-offs	reverseWriteOff
 endpoint	/api/account/export	GET	/api/account/export
 endpoint	/api/account/reset	POST	/api/account/reset
 endpoint	/api/admin/abuse	GET	/api/admin/abuse
@@ -518,8 +567,12 @@ endpoint	/api/billing/plan	GET	/api/billing/plan
 endpoint	/api/billing/plan	PUT	/api/billing/plan
 endpoint	/api/billing/subscription	GET	/api/billing/subscription
 endpoint	/api/cron/subscriptions	POST	/api/cron/subscriptions
+endpoint	/api/cron/tenant-work	POST	/api/cron/tenant-work
 endpoint	/api/gateway/health	GET	/api/gateway/health
 endpoint	/api/gateway/webhook	POST	/api/gateway/webhook
+endpoint	/api/inbound/[id]/decision	POST	/api/inbound/[id]/decision
+endpoint	/api/inbound/[id]/export	POST	/api/inbound/[id]/export
+endpoint	/api/inbound/poll	POST	/api/inbound/poll
 endpoint	/api/integrations/[provider]/authorize	GET	/api/integrations/[provider]/authorize
 endpoint	/api/integrations/[provider]/callback	GET	/api/integrations/[provider]/callback
 endpoint	/api/integrations/[provider]/disconnect	POST	/api/integrations/[provider]/disconnect
@@ -534,6 +587,8 @@ endpoint	/api/invoices/[id]/whatsapp	POST	/api/invoices/[id]/whatsapp
 endpoint	/api/ledger/accounts/[code]	GET	/api/ledger/accounts/[code]
 endpoint	/api/ledger/accounts	GET	/api/ledger/accounts
 endpoint	/api/ledger/accounts	POST	/api/ledger/accounts
+endpoint	/api/ledger/allowance	GET	/api/ledger/allowance
+endpoint	/api/ledger/allowance	POST	/api/ledger/allowance
 endpoint	/api/ledger/analytics	GET	/api/ledger/analytics
 endpoint	/api/ledger/ap/ageing	GET	/api/ledger/ap/ageing
 endpoint	/api/ledger/ap/post	POST	/api/ledger/ap/post
@@ -551,8 +606,11 @@ endpoint	/api/ledger/assets	add	/api/ledger/assets
 endpoint	/api/ledger/assets	depreciate	/api/ledger/assets
 endpoint	/api/ledger/assets	dispose	/api/ledger/assets
 endpoint	/api/ledger/assets	GET	/api/ledger/assets
+endpoint	/api/ledger/attachments	JOURNAL_ENTRY	/api/ledger/attachments
+endpoint	/api/ledger/attachments	EXPENSE_CLAIM	/api/ledger/attachments
+endpoint	/api/ledger/attachments	ASSET	/api/ledger/attachments
+endpoint	/api/ledger/attachments	BANK_LINE	/api/ledger/attachments
 endpoint	/api/ledger/attachments	GET	/api/ledger/attachments
-endpoint	/api/ledger/attachments	POST	/api/ledger/attachments
 endpoint	/api/ledger/attachments	DELETE	/api/ledger/attachments
 endpoint	/api/ledger/attention	GET	/api/ledger/attention
 endpoint	/api/ledger/bank	import	/api/ledger/bank
@@ -603,6 +661,8 @@ endpoint	/api/ledger/counterparties	restore	/api/ledger/counterparties
 endpoint	/api/ledger/counterparties	hold	/api/ledger/counterparties
 endpoint	/api/ledger/counterparties	release	/api/ledger/counterparties
 endpoint	/api/ledger/counterparties	GET	/api/ledger/counterparties
+endpoint	/api/ledger/credit-control/invoice	GET	/api/ledger/credit-control/invoice
+endpoint	/api/ledger/credit-control/invoice	POST	/api/ledger/credit-control/invoice
 endpoint	/api/ledger/credit-control	standing	/api/ledger/credit-control
 endpoint	/api/ledger/credit-control	check	/api/ledger/credit-control
 endpoint	/api/ledger/credit-control	statement	/api/ledger/credit-control
@@ -630,6 +690,7 @@ endpoint	/api/ledger/dimensions	GET	/api/ledger/dimensions
 endpoint	/api/ledger/equity	GET	/api/ledger/equity
 endpoint	/api/ledger/expenses	create	/api/ledger/expenses
 endpoint	/api/ledger/expenses	addLine	/api/ledger/expenses
+endpoint	/api/ledger/expenses	updateLine	/api/ledger/expenses
 endpoint	/api/ledger/expenses	removeLine	/api/ledger/expenses
 endpoint	/api/ledger/expenses	update	/api/ledger/expenses
 endpoint	/api/ledger/expenses	submit	/api/ledger/expenses
@@ -716,6 +777,7 @@ endpoint	/api/ledger/petty-cash	GET	/api/ledger/petty-cash
 endpoint	/api/ledger/pricing	createList	/api/ledger/pricing
 endpoint	/api/ledger/pricing	setPrices	/api/ledger/pricing
 endpoint	/api/ledger/pricing	closePrice	/api/ledger/pricing
+endpoint	/api/ledger/pricing	closeList	/api/ledger/pricing
 endpoint	/api/ledger/pricing	assign	/api/ledger/pricing
 endpoint	/api/ledger/pricing	unassign	/api/ledger/pricing
 endpoint	/api/ledger/pricing	quote	/api/ledger/pricing
@@ -749,6 +811,7 @@ endpoint	/api/ledger/recurring	due	/api/ledger/recurring
 endpoint	/api/ledger/recurring	run	/api/ledger/recurring
 endpoint	/api/ledger/recurring	GET	/api/ledger/recurring
 endpoint	/api/ledger/related-parties	declare	/api/ledger/related-parties
+endpoint	/api/ledger/related-parties	assess	/api/ledger/related-parties
 endpoint	/api/ledger/related-parties	end	/api/ledger/related-parties
 endpoint	/api/ledger/related-parties	compensation	/api/ledger/related-parties
 endpoint	/api/ledger/related-parties	attest	/api/ledger/related-parties
@@ -792,6 +855,8 @@ endpoint	/api/ledger/subscriptions	end	/api/ledger/subscriptions
 endpoint	/api/ledger/subscriptions	issue	/api/ledger/subscriptions
 endpoint	/api/ledger/subscriptions	issueAll	/api/ledger/subscriptions
 endpoint	/api/ledger/subscriptions	GET	/api/ledger/subscriptions
+endpoint	/api/ledger/tax-periods	GET	/api/ledger/tax-periods
+endpoint	/api/ledger/tax-periods	POST	/api/ledger/tax-periods
 endpoint	/api/ledger/timesheets	record	/api/ledger/timesheets
 endpoint	/api/ledger/timesheets	approve	/api/ledger/timesheets
 endpoint	/api/ledger/timesheets	writeOff	/api/ledger/timesheets
@@ -809,6 +874,10 @@ endpoint	/api/ledger/vat-schemes	register	/api/ledger/vat-schemes
 endpoint	/api/ledger/vat-schemes	assess	/api/ledger/vat-schemes
 endpoint	/api/ledger/vat-schemes	dispose	/api/ledger/vat-schemes
 endpoint	/api/ledger/vat-schemes	GET	/api/ledger/vat-schemes
+endpoint	/api/ledger/write-offs	writeOff	/api/ledger/write-offs
+endpoint	/api/ledger/write-offs	adjustVat	/api/ledger/write-offs
+endpoint	/api/ledger/write-offs	reverse	/api/ledger/write-offs
+endpoint	/api/ledger/write-offs	GET	/api/ledger/write-offs
 endpoint	/api/mcp	initialize	/api/mcp
 endpoint	/api/mcp	ping	/api/mcp
 endpoint	/api/meta	GET	/api/meta
@@ -837,6 +906,7 @@ endpoint	/api/whatsapp/connect	POST	/api/whatsapp/connect
 endpoint	/api/whatsapp/disconnect	POST	/api/whatsapp/disconnect
 screen	ui	/accounting/accounts/[code]
 screen	ui	/accounting/accounts
+screen	ui	/accounting/allowance
 screen	ui	/accounting/analytics
 screen	ui	/accounting/approvals
 screen	ui	/accounting/asset-revaluation
@@ -902,6 +972,7 @@ screen	ui	/accounting/trade-finance
 screen	ui	/accounting/trial-balance
 screen	ui	/accounting/vat
 screen	ui	/accounting/vat-schemes
+screen	ui	/accounting/write-offs
 screen	ui	/accounting/year-end
 screen	ui	/customers
 screen	ui	/dashboard
@@ -1199,3 +1270,22 @@ rule	database	TradeFacility_window_check
 rule	database	TradeFacility_closed_check
 rule	database	TradeFacilityEvent_kind_check
 rule	database	TradeFacilityEvent_amount_check
+rule	database	ReceivableWriteOff_amount_check
+rule	database	ReceivableWriteOff_vat_check
+rule	database	ReceivableWriteOff_reason_check
+rule	database	ReceivableWriteOff_order_check
+rule	database	ReceivableWriteOff_vat_notified_check
+rule	database	ReceivableWriteOff_vat_six_months_check
+rule	database	PartyAssessment_by_check
+rule	database	TaxRegistration_regime_check
+rule	database	TaxRegistration_frequency_check
+rule	database	TaxRegistration_stagger_check
+rule	database	TaxRegistration_window_check
+rule	database	TaxFiling_window_check
+rule	database	TaxFiling_due_check
+rule	database	TaxFiling_filed_check
+rule	database	Employee_pension_scheme_check
+rule	database	Payslip_pension_check
+rule	database	Payslip_gratuity_or_pension_check
+rule	database	ProjectBudgetRevision_moved_check
+rule	database	ProjectBudgetRevision_reason_check

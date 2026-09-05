@@ -59,26 +59,53 @@ export async function trialBalance(opts: {
     select: { id: true },
   });
 
-  const balances = await prisma.accountBalance.findMany({
+  /*
+   * The anchors added up by the database rather than by this process.
+   *
+   * The arithmetic is a sum per account over every period up to this one, and
+   * it used to be done here: every anchor row for every one of those periods
+   * was pulled across the wire with its account joined on to it — the same
+   * account repeated once per period — and added up in a loop. A chart of two
+   * hundred accounts over three years of monthly periods is seven thousand
+   * rows and seven thousand copies of two hundred accounts, to produce two
+   * hundred. `groupBy` returns the two hundred.
+   *
+   * The signs are untouched by the change, because nothing here derives them:
+   * `closingMinor` is already signed debit-positive on the anchor, and summing
+   * signed anchors is what makes a balanced ledger come to 0n across the rows.
+   */
+  const totals = await prisma.accountBalance.groupBy({
+    by: ["accountId"],
     where: { bookId: book.id, periodId: { in: upto.map((p) => p.id) }, currency: book.functionalCurrency },
-    include: { account: true },
+    _sum: { debitMinor: true, creditMinor: true, closingMinor: true },
   });
 
-  const byAccount = new Map<string, TrialBalanceRow>();
-  for (const b of balances) {
-    const r = byAccount.get(b.accountId) ?? {
-      accountId: b.accountId, code: b.account.code, name: b.account.name, nameAr: b.account.nameAr,
-      type: b.account.type, debitMinor: 0n, creditMinor: 0n, balanceMinor: 0n,
-    };
-    r.debitMinor += b.debitMinor;
-    r.creditMinor += b.creditMinor;
-    r.balanceMinor += b.closingMinor;
-    byAccount.set(b.accountId, r);
-  }
+  const accounts = await prisma.account.findMany({
+    where: { id: { in: totals.map((t) => t.accountId) } },
+    select: { id: true, code: true, name: true, nameAr: true, type: true },
+  });
+  const byId = new Map(accounts.map((a) => [a.id, a]));
 
-  const rows = [...byAccount.values()]
-    .filter((r) => r.debitMinor !== 0n || r.creditMinor !== 0n)
-    .sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const rows: TrialBalanceRow[] = [];
+  for (const t of totals) {
+    // A grouped read hands back ids where a joined one handed back rows, and an
+    // anchor cannot exist without its account — the relation is required and
+    // the database holds it — so this only stands where the types cannot see
+    // what the schema guarantees.
+    const account = byId.get(t.accountId);
+    if (!account) continue;
+    const debitMinor = t._sum.debitMinor ?? 0n;
+    const creditMinor = t._sum.creditMinor ?? 0n;
+    // An account that moved in none of these periods is not on the trial
+    // balance, which is the rule the summed rows applied.
+    if (debitMinor === 0n && creditMinor === 0n) continue;
+    rows.push({
+      accountId: t.accountId,
+      code: account.code, name: account.name, nameAr: account.nameAr, type: account.type,
+      debitMinor, creditMinor, balanceMinor: t._sum.closingMinor ?? 0n,
+    });
+  }
+  rows.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
 
   // Present each account on its natural side.
   let totalDebit = 0n, totalCredit = 0n;

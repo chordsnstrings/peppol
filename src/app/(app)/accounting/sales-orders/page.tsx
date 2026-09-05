@@ -30,6 +30,8 @@ interface DetailLine {
   id: string; lineNo: number; description: string; sku: string | null; accountCode: string | null;
   quantityMilli: string; unitPriceMinor: string; discountBps: number; taxCode: string; ratePercent: number;
   netMinor: string; invoicedMilli: string; invoicedNetMinor: string;
+  /** Despatched on a delivery note that has not been cancelled — a floor on the quantity. */
+  deliveredMilli: string;
   remainingMilli: string; remainingNetMinor: string;
 }
 interface Detail {
@@ -462,7 +464,8 @@ function DetailPanel({ open, busy, act, onDone }: {
       <div className="sw-scroll">
         <table className="sw-table">
           <caption className="sr-only">
-            The lines of {open.number}: what was quoted, what has been invoiced and what is left
+            The lines of {open.number}: what was quoted, what has left the warehouse, what has been invoiced and
+            what is left to bill
           </caption>
           <thead>
             <tr>
@@ -474,6 +477,9 @@ function DetailPanel({ open, busy, act, onDone }: {
               <th className="sw-num" style={{ width: "5rem" }}>Discount</th>
               <th style={{ width: "7rem" }}>Tax</th>
               <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Net</th>
+              <th className="sw-num" style={{ width: "5.5rem" }} title="Despatched on a delivery note that has not been cancelled">
+                Delivered
+              </th>
               <th className="sw-num" style={{ width: "5.5rem" }}>Invoiced</th>
               <th className="sw-num" style={{ width: "5.5rem" }}>Left</th>
             </tr>
@@ -489,6 +495,7 @@ function DetailPanel({ open, busy, act, onDone }: {
                 <td className="sw-num">{l.discountBps === 0 ? <span className="sw-zero">–</span> : pct(l.discountBps)}</td>
                 <td className="sw-code">{l.taxCode} <span className="sw-sub">{l.ratePercent}%</span></td>
                 <td className="sw-num"><Figure minor={l.netMinor} currency={open.currency} colour={false} /></td>
+                <td className="sw-num" data-testid={`delivered-${l.lineNo}`}>{fromMilli(l.deliveredMilli)}</td>
                 <td className="sw-num">{fromMilli(l.invoicedMilli)}</td>
                 <td className="sw-num">{fromMilli(l.remainingMilli)}</td>
               </tr>
@@ -498,7 +505,7 @@ function DetailPanel({ open, busy, act, onDone }: {
             <tr>
               <th scope="row" colSpan={7} style={{ textAlign: "end" }}>Net of discount</th>
               <td className="sw-num" data-testid="detail-net"><Figure minor={open.totals.netMinor} zero="zero" colour={false} /></td>
-              <td className="sw-num" colSpan={2} />
+              <td className="sw-num" colSpan={3} />
             </tr>
             {open.totals.taxes.map((t) => (
               <tr key={t.taxCode}>
@@ -506,18 +513,18 @@ function DetailPanel({ open, busy, act, onDone }: {
                   {t.label} on <Figure minor={t.netMinor} currency={open.currency} zero="zero" colour={false} />
                 </th>
                 <td className="sw-num"><Figure minor={t.vatMinor} currency={open.currency} zero="zero" colour={false} /></td>
-                <td className="sw-num" colSpan={2} />
+                <td className="sw-num" colSpan={3} />
               </tr>
             ))}
             <tr>
               <th scope="row" colSpan={7} style={{ textAlign: "end" }}>Gross</th>
               <td className="sw-num" data-testid="detail-gross"><Figure minor={open.totals.grossMinor} zero="zero" colour={false} /></td>
-              <td className="sw-num" colSpan={2} />
+              <td className="sw-num" colSpan={3} />
             </tr>
             <tr>
               <th scope="row" colSpan={7} style={{ textAlign: "end", fontWeight: 400 }}>Still to invoice, net</th>
               <td className="sw-num" data-testid="detail-remaining"><Figure minor={open.remaining.netMinor} zero="zero" colour={false} /></td>
-              <td className="sw-num" colSpan={2} />
+              <td className="sw-num" colSpan={3} />
             </tr>
           </tfoot>
         </table>

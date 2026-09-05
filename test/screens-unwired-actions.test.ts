@@ -39,14 +39,21 @@ const read = (path: string) => {
  * Both shapes the routes are written in are matched — the `switch` over
  * `b.action` and the `if (b.action === …)` chain — because which one a route
  * uses is a style choice and this is not a check about style.
+ *
+ * Capitals are in the character class for the same reason. It used to read
+ * `[a-z_]+`, which silently passed over every camelCase verb a route accepts —
+ * `addLine` and `removeLine` on the expenses route among them — so the routes
+ * with the most surface were the ones this check saw least of. A verb skipped
+ * by the extractor cannot be reported as unwired, and an extractor that finds
+ * nothing is indistinguishable from a screen that wires everything.
  */
 function actionsOf(routePath: string): string[] {
   const source = read(routePath);
   const post = source.slice(source.indexOf("export async function POST"));
   expect(post.length).toBeGreaterThan(0);
   const found = new Set<string>();
-  for (const m of post.matchAll(/case "([a-z_]+)":/g)) found.add(m[1]);
-  for (const m of post.matchAll(/b\.action === "([a-z_]+)"/g)) found.add(m[1]);
+  for (const m of post.matchAll(/case "([A-Za-z_]+)":/g)) found.add(m[1]);
+  for (const m of post.matchAll(/b\.action === "([A-Za-z_]+)"/g)) found.add(m[1]);
   return [...found].sort();
 }
 
@@ -93,6 +100,14 @@ const SCREENS: { route: string; screen: string; what: string }[] = [
     screen: "src/app/(app)/accounting/recurring/page.tsx",
     what: "the recurring screen governs its templates",
   },
+  {
+    // The route the widened pattern above was blind to. Ten verbs, three of
+    // them camelCase, and the two that build a claim — `addLine` and
+    // `removeLine` — are the ones an employee uses on every claim they file.
+    route: "src/app/api/ledger/expenses/route.ts",
+    screen: "src/app/(app)/accounting/expenses/page.tsx",
+    what: "the expenses screen builds, submits and settles a claim",
+  },
 ];
 
 describe("every routed write is reachable from the screen that owns it", () => {
@@ -107,6 +122,15 @@ describe("every routed write is reachable from the screen that owns it", () => {
       expect(missing, `${screen} sends nothing for ${missing.join(", ")}`).toEqual([]);
     });
   }
+
+  it("sees the camelCase verbs a route accepts, not only the lower-case ones", () => {
+    // The extractor's own coverage, asserted rather than assumed: an extractor
+    // that returns an empty set passes every check below in silence, so what a
+    // regression here looks like is a green run.
+    const actions = actionsOf("src/app/api/ledger/expenses/route.ts");
+    expect(actions).toContain("addLine");
+    expect(actions).toContain("removeLine");
+  });
 
   it("names a reason for every verb a screen is excused from sending", () => {
     for (const [route, excuses] of Object.entries(EXCUSED)) {

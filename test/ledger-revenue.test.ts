@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import {
   allocate, createContract, modifyContract, recordBilling, satisfyObligation,
   setProgress, cancelContract, runRecognition, runRecognitionAll,
-  contractRegister, contractDetail, positionOf,
+  contractRegister, contractDetail, positionOf, contractBalancesNote,
   CONTRACT_ASSET_ACCOUNT, CONTRACT_LIABILITY_ACCOUNT,
 } from "@/lib/server/ledger/revenue";
 import { reverse } from "@/lib/server/ledger/post";
@@ -169,6 +169,40 @@ d("recognising revenue against a contract", () => {
     const by = await linesOf(r.entryId!);
     expect(by["4100"]).toBe(-200_000n);                    // half of the 400,000 support
     expect(by[CONTRACT_LIABILITY_ACCOUNT]).toBe(200_000n);
+  });
+
+  /*
+   * The IFRS 15.116 note, drawn over a period rather than at a date.
+   *
+   * It has to come from the postings. A contract carries `recognisedMinor` as
+   * current state, so nothing on the register can say what February closed at
+   * once March has been run — but the entries are dated, and these are the same
+   * two accounts the balance sheet carries.
+   */
+  it("draws the contract balances at both ends of a period, and the movement between", async () => {
+    const feb = await contractBalancesNote({ ...S, from: "2026-02-01", to: "2026-02-28" });
+    // Billed in full in January and nothing delivered: the whole price deferred.
+    expect(feb.openingLiabilityMinor).toBe(1_000_000n);
+    // The licence was satisfied on 10 February, releasing 600,000 of it.
+    expect(feb.closingLiabilityMinor).toBe(400_000n);
+    expect(feb.liabilityMovementMinor).toBe(-600_000n);
+    expect(feb.openingAssetMinor).toBe(0n);
+    expect(feb.closingAssetMinor).toBe(0n);
+    expect(feb.from).toBe("2026-02-01");
+    expect(feb.to).toBe("2026-02-28");
+
+    // A liability is a credit balance in the ledger and a positive obligation
+    // on the face of a note. Taken to the last posted date the closing figure
+    // is the account's own balance, negated — which is what says the note is
+    // read from the ledger and not from the register.
+    const toDate = await contractBalancesNote({ ...S, from: "2026-01-01", to: "2026-03-31" });
+    expect(toDate.closingLiabilityMinor).toBe(-(await held(CONTRACT_LIABILITY_ACCOUNT)));
+
+    // The month before it: nothing on either account until the first run.
+    const jan = await contractBalancesNote({ ...S, from: "2026-01-01", to: "2026-01-31" });
+    expect(jan.openingLiabilityMinor).toBe(0n);
+    expect(jan.closingLiabilityMinor).toBe(1_000_000n);
+    expect(jan.liabilityMovementMinor).toBe(1_000_000n);
   });
 
   it("posts a negative catch-up when a measure of progress is revised down", async () => {

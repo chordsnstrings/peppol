@@ -110,12 +110,18 @@ export async function POST(req: Request) {
         })));
 
       case "spend":
-        if (!b.fundId || !b.description || b.amountMinor === undefined) {
-          return json({ error: "Which fund, what was bought, and how much?" }, 400);
+        // The date is asked for rather than defaulted to today. A receipt has a
+        // date printed on it, and it is often not the day it is keyed — the
+        // custodian empties their wallet on Sunday — so inventing one here
+        // would put the spend in the wrong week, and at a month end in the
+        // wrong month. `recordSpend` refuses a movement with no date for the
+        // same reason; this says so before the round trip.
+        if (!b.fundId || !b.description || b.amountMinor === undefined || !b.movedOn) {
+          return json({ error: "Which fund, what was bought, how much, and on what date?" }, 400);
         }
         return json(ledgerJson(await recordSpend({
           orgId, entityId: b.entityId, fundId: b.fundId,
-          movedOn: b.movedOn ?? new Date(),
+          movedOn: b.movedOn,
           description: b.description,
           amountMinor: b.amountMinor,
           accountCode: b.accountCode,

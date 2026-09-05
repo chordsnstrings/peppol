@@ -9,7 +9,7 @@ import { importStatement } from "@/lib/server/ledger/bank";
 import { createTemplate } from "@/lib/server/ledger/recurring";
 import { addAsset } from "@/lib/server/ledger/assets";
 import { recordRegistration } from "@/lib/server/ledger/tax-periods";
-import { createClaim, submitClaim } from "@/lib/server/ledger/expenses";
+import { createClaim, submitClaim, approveClaim } from "@/lib/server/ledger/expenses";
 import { createOrder, issueOrder, receiveGoods } from "@/lib/server/ledger/procurement";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
@@ -31,6 +31,21 @@ const FILED = "t-ent-att-filed";
 const GROWING = "t-ent-att-growing";
 /** Close enough to the threshold to be worth telling, and never over it. */
 const NEARLY = "t-ent-att-nearly";
+/** More unexplained bank lines than a reconciliation statement itemises. */
+const CAPPED = "t-ent-att-capped";
+
+/**
+ * How many unexplained statement lines the capped entity carries, and how many
+ * of them a reconciliation would itemise.
+ *
+ * `reconcile()` lists the oldest two hundred lines of each kind and states the
+ * real totals beside them, which is right for a working paper. This check wants
+ * a total, and it used to get one by counting the rows of that list — so an
+ * account with these 250 lines was reported as having 200: the page size,
+ * handed to a bookkeeper as the number of things wrong with their cash.
+ */
+const CAPPED_LINES = 250;
+const RECONCILIATION_PAGE = 200;
 
 /**
  * The whole list is read as at one fixed day. A nag list is a function of the
@@ -171,6 +186,23 @@ d("the attention list", () => {
     });
     await submitClaim({ orgId: ORG, claimId: claim.id });
 
+    // A second claim, already approved. It is a real liability to the employee
+    // and it is not waiting for anybody, so the row about unapproved claims
+    // must not count it — which is the difference between reading the summary
+    // of the open claims and reading every claim ever filed.
+    const settled = await createClaim({
+      orgId: ORG, entityId: ENT,
+      claim: {
+        reference: "EXP-ATT-2", employeeCode: "E-002", employeeName: "Omar Siddiqui", claimedOn: "2026-05-12",
+        lines: [{
+          spentOn: "2026-05-11", description: "Site parking", accountCode: "6400",
+          netMinor: 40_000, vatMinor: 2_000, supplierTrn: "100123456700003", vatRecoverable: true,
+        }],
+      },
+    });
+    await submitClaim({ orgId: ORG, claimId: settled.id });
+    await approveClaim({ orgId: ORG, claimId: settled.id, approverId: "u-att-approver" });
+
     const order = await createOrder({
       orgId: ORG, entityId: ENT,
       order: {
@@ -242,6 +274,23 @@ d("the attention list", () => {
         { account: "4000", credit: 35_000_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
         { account: "2100", credit: 1_750_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
       ],
+    });
+
+    /* ---- more unmatched bank lines than a statement itemises -------------- */
+
+    await openFiscalYear({ orgId: ORG, entityId: CAPPED, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG, entityId: CAPPED });
+    await importStatement({
+      orgId: ORG, entityId: CAPPED, accountCode: "1010", batch: "att-capped",
+      // Every line a different amount and a different description, so that none
+      // of them is a re-import of another and all 250 land. They run from the
+      // 5th of January over fifty days, which puts the oldest well past a month
+      // before the day the list is read at.
+      lines: Array.from({ length: CAPPED_LINES }, (_, i) => ({
+        postedOn: new Date(Date.UTC(2026, 0, 5) + (i % 50) * 86_400_000).toISOString().slice(0, 10),
+        description: `Unexplained credit ${i + 1}`,
+        amountMinor: 1_000 + i,
+      })),
     });
 
     /* ---- a quarter traded and then closed behind itself ------------------- */
@@ -323,6 +372,28 @@ d("the attention list", () => {
     expect(f.amountMinor).toBe("30000");
     expect(f.detail).toMatch(/2026-04-01/);
     // The oldest is 75 days old, which is past a month and no longer a note.
+    expect(f.severity).toBe("soon");
+  });
+
+  it("counts every unmatched bank line, not the page a reconciliation itemises", async () => {
+    // The defect: the count was the length of the statement's own list, which
+    // stops at 200 rows. An account with 250 unexplained lines therefore said
+    // 200 — a page size presented as a total, on the row whose entire job is
+    // telling somebody how much of their cash is unexplained.
+    const f = find((await read(CAPPED)).findings, "bank_unmatched")!;
+    expect(f).toBeDefined();
+    expect(f.count).toBe(CAPPED_LINES);
+    expect(f.count).not.toBe(RECONCILIATION_PAGE);
+    expect(f.detail).toMatch(new RegExp(`${CAPPED_LINES} statement lines`));
+
+    // The net is over all 250 as well: 1,000 through 1,249 minor units.
+    expect(f.amountMinor).toBe("281125");
+
+    // And the oldest is the oldest of the 250, which the figures know without
+    // the list — 161 days before the day this is read at, so past a month and
+    // no longer a note.
+    expect(f.detail).toMatch(/2026-01-05/);
+    expect(f.detail).toMatch(/161 days ago/);
     expect(f.severity).toBe("soon");
   });
 
@@ -417,10 +488,12 @@ d("the attention list", () => {
     expect(f.detail).not.toMatch(/FA-2/);
   });
 
-  it("finds claims sitting on nobody's desk", async () => {
+  it("finds claims sitting on nobody's desk, and only those", async () => {
     const f = find((await read(ENT)).findings, "claims_unapproved")!;
     expect(f).toBeDefined();
     expect(f.severity).toBe("note");
+    // EXP-ATT-1 alone. EXP-ATT-2 is approved and worth 420.00, so a row that
+    // counted every claim rather than the ones still waiting would say two.
     expect(f.count).toBe(1);
     expect(f.amountMinor).toBe("105000");
     expect(f.href).toBe("/accounting/expenses");
@@ -527,11 +600,16 @@ d("the attention list", () => {
   it("puts the checks' reads through the object it is handed rather than round it", async () => {
     const real = sharedReads({ orgId: ORG, entityId: ENT });
     const asked: string[] = [];
+    const banks: string[] = [];
     const reads: SharedReads = {
       ...real,
       receivables(asOf) {
         asked.push(asOf.toISOString().slice(0, 10));
         return real.receivables(asOf);
+      },
+      reconciliation(accountCode, asOf) {
+        banks.push(accountCode);
+        return real.reconciliation(accountCode, asOf);
       },
     };
 
@@ -540,6 +618,11 @@ d("the attention list", () => {
     // would not be if the check went to the database on its own account.
     expect(asked).toEqual([AS_OF]);
     expect(find(list.findings, "ar_overdue")).toBeDefined();
+
+    // The bank check asks for the figures of the one account carrying an
+    // unmatched line, through the same object. It is the figures it asks for
+    // and not the statement, which is what makes its count a count.
+    expect(banks).toEqual(["1010"]);
   });
 
   /* ------------------------------------------------------------ good news */

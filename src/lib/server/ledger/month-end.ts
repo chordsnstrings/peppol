@@ -413,9 +413,14 @@ const bankReconciled: Check = {
     });
     if (!accounts.length) return null;
 
-    const settled = await Promise.allSettled(accounts.map((a) => ctx.reads.reconcile(a.code, ctx.endsOn)));
+    // The figures rather than the statement, and the count is the account's own
+    // rather than the length of a list. A reconciliation itemises the oldest
+    // two hundred lines of each kind, so counting its rows told the checklist
+    // that an account with four hundred unexplained lines had two hundred —
+    // the page size, reported as the number there are.
+    const settled = await Promise.allSettled(accounts.map((a) => ctx.reads.reconciliation(a.code, ctx.endsOn)));
     const unmatched = settled.reduce(
-      (a, r) => a + (r.status === "fulfilled" ? r.value.unmatchedBank.length : 0),
+      (a, r) => a + (r.status === "fulfilled" ? r.value.unmatchedBankCount : 0),
       0,
     );
     if (!unmatched) return null;

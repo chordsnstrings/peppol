@@ -208,9 +208,35 @@ export function ClaimDetail({ claimId, onChanged }: {
     if (r) setMsg(`Took "${line.description}" off ${claim.reference}.`);
   };
 
+  /*
+   * The line being corrected, held by id rather than by index.
+   *
+   * An index goes stale the moment a line above it is removed, and the row it
+   * then points at is a different receipt — which is the worst possible way for
+   * an edit form to be wrong, because it looks like it worked.
+   */
+  const [correcting, setCorrecting] = React.useState<string | null>(null);
+  const correctingLine = correcting ? lines.find((l) => l.id === correcting) ?? null : null;
+
+  /* A claim that stops being editable — submitted from another tab, approved
+   * while this was open — must not leave a form on screen that cannot save. */
+  React.useEffect(() => {
+    if (!editable) setCorrecting(null);
+  }, [editable]);
+
+  const saveLine = async (line: DraftLine) => {
+    if (!correcting) return;
+    const r = await act(`updateLine:${correcting}`, { action: "updateLine", lineId: correcting, line });
+    if (r) {
+      setCorrecting(null);
+      setMsg(`Corrected "${line.description}" on ${claim.reference}.`);
+    }
+  };
+
   /* Which row is mid-removal, so only that row's button says so. -1 from
    * findIndex means none of them, which is not an index. */
   const removingAt = lines.findIndex((l) => busy === `removeLine:${l.id}`);
+  const correctingAt = lines.findIndex((l) => l.id === correcting);
 
   return (
     <>
@@ -344,6 +370,8 @@ export function ClaimDetail({ claimId, onChanged }: {
                 caption={`The receipts on ${claim.reference}`}
                 onRemove={editable ? removeLine : undefined}
                 removingIndex={removingAt === -1 ? null : removingAt}
+                onEdit={editable ? (i) => setCorrecting((c) => (c === lines[i]?.id ? null : lines[i]?.id ?? null)) : undefined}
+                editingIndex={correctingAt === -1 ? null : correctingAt}
               />
             </div>
           )}
@@ -351,12 +379,32 @@ export function ClaimDetail({ claimId, onChanged }: {
 
         {editable ? (
           <div className="mt-4" style={{ borderTop: "1px solid var(--sw-line)", paddingTop: "0.75rem" }}>
-            <div className="sw-label">Add a receipt</div>
-            <p className="sw-sub mt-1 mb-3 max-w-[76ch]">
-              A line is corrected by taking it off and putting it back on: the subledger has no verb that edits a
-              saved line in place, and inventing one here would only look like it did.
-            </p>
-            <ClaimLineFields busy={busy === "addLine"} onAdd={addLine} />
+            {correctingLine ? (
+              <>
+                <div className="sw-label">Correct this receipt</div>
+                <p className="sw-sub mt-1 mb-3 max-w-[76ch]">
+                  {correctingLine.description} — the line is checked again on the way in, so a correction that
+                  breaks a rule is refused here rather than on the approver&rsquo;s desk.
+                </p>
+                <ClaimLineFields
+                  busy={busy === `updateLine:${correctingLine.id}`}
+                  onAdd={saveLine}
+                  initial={correctingLine}
+                  submitLabel="Save the correction"
+                  busyLabel="Saving…"
+                  onCancel={() => setCorrecting(null)}
+                />
+              </>
+            ) : (
+              <>
+                <div className="sw-label">Add a receipt</div>
+                <p className="sw-sub mt-1 mb-3 max-w-[76ch]">
+                  A mistyped line is corrected in place — press Correct on its row. Taking it off and putting it
+                  back on works too, but it loses the order the receipts were entered in.
+                </p>
+                <ClaimLineFields busy={busy === "addLine"} onAdd={addLine} />
+              </>
+            )}
           </div>
         ) : (
           <p className="sw-sub mt-3 max-w-[76ch]">

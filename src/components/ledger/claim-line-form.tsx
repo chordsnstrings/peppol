@@ -3,7 +3,8 @@
 import * as React from "react";
 import { Figure } from "./primitives";
 import { Field } from "./ap-coding";
-import { parseAmount } from "@/lib/ledger/format";
+import { parseAmount, toInput } from "@/lib/ledger/format";
+import { todayISO } from "@/lib/utils";
 
 /**
  * The receipts on an expense claim — the table and the form that adds to it.
@@ -50,10 +51,11 @@ export const CLAIM_ACCOUNTS: [string, string][] = [
   ["6200", "Marketing and advertising"],
 ];
 
-const today = () => new Date().toISOString().slice(0, 10);
-
 const emptyLine = () => ({
-  spentOn: today(),
+  // `todayISO()` and not `new Date().toISOString()`: the second is UTC, so
+  // between midnight and 04:00 in the Gulf it offers yesterday — which can be
+  // in the previous VAT quarter — as the day the money was spent.
+  spentOn: todayISO(),
   description: "",
   accountCode: "6400",
   net: "",
@@ -77,6 +79,8 @@ export function ClaimLinesTable({
   currency = "AED",
   onRemove,
   removingIndex,
+  onEdit,
+  editingIndex,
   caption,
 }: {
   lines: ClaimLineRow[];
@@ -84,8 +88,12 @@ export function ClaimLinesTable({
   /** Omitted where the claim can no longer be changed, which takes the column away with it. */
   onRemove?: (index: number) => void;
   removingIndex?: number | null;
+  /** Likewise. A drafted line that has no id yet cannot be corrected in place. */
+  onEdit?: (index: number) => void;
+  editingIndex?: number | null;
   caption: string;
 }) {
+  const actions = Boolean(onRemove || onEdit);
   const net = lines.reduce((a, l) => a + BigInt(l.netMinor), 0n);
   const vat = lines.reduce((a, l) => a + BigInt(l.vatMinor), 0n);
 
@@ -102,7 +110,11 @@ export function ClaimLinesTable({
             <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Net</th>
             <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>VAT</th>
             <th style={{ width: "11rem" }}>VAT treatment</th>
-            {onRemove && <th style={{ width: "5rem" }}><span className="sr-only">Remove</span></th>}
+            {actions && (
+              <th style={{ width: onEdit ? "9rem" : "5rem" }}>
+                <span className="sr-only">Correct or remove this receipt</span>
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -115,17 +127,32 @@ export function ClaimLinesTable({
               <td className="sw-num"><Figure minor={l.netMinor} currency={currency} colour={false} /></td>
               <td className="sw-num"><Figure minor={l.vatMinor} currency={currency} colour={false} /></td>
               <td className="sw-sub">{vatTreatment(l)}</td>
-              {onRemove && (
+              {actions && (
                 <td>
-                  <button
-                    type="button"
-                    className="sw-btn sw-btn-sm"
-                    disabled={removingIndex === i}
-                    data-testid="remove-claim-line"
-                    onClick={() => onRemove(i)}
-                  >
-                    {removingIndex === i ? "…" : "Remove"}
-                  </button>
+                  <div className="flex gap-1">
+                    {onEdit && l.id && (
+                      <button
+                        type="button"
+                        className="sw-btn sw-btn-sm"
+                        aria-pressed={editingIndex === i}
+                        data-testid="edit-claim-line"
+                        onClick={() => onEdit(i)}
+                      >
+                        {editingIndex === i ? "Editing" : "Correct"}
+                      </button>
+                    )}
+                    {onRemove && (
+                      <button
+                        type="button"
+                        className="sw-btn sw-btn-sm"
+                        disabled={removingIndex === i}
+                        data-testid="remove-claim-line"
+                        onClick={() => onRemove(i)}
+                      >
+                        {removingIndex === i ? "…" : "Remove"}
+                      </button>
+                    )}
+                  </div>
                 </td>
               )}
             </tr>
@@ -138,7 +165,7 @@ export function ClaimLinesTable({
             </th>
             <td className="sw-num"><Figure minor={net} currency={currency} zero="zero" colour={false} /></td>
             <td className="sw-num"><Figure minor={vat} currency={currency} zero="zero" colour={false} /></td>
-            <td colSpan={onRemove ? 2 : 1} />
+            <td colSpan={actions ? 2 : 1} />
           </tr>
         </tfoot>
       </table>
@@ -156,11 +183,52 @@ export function ClaimLinesTable({
 export function ClaimLineFields({
   busy = false,
   onAdd,
+  initial = null,
+  submitLabel = "Add receipt",
+  busyLabel = "Adding…",
+  onCancel,
 }: {
   busy?: boolean;
   onAdd: (line: DraftLine) => void;
+  /**
+   * The saved line being corrected, or null to draft a new one.
+   *
+   * Correcting a receipt is the same act as entering one, under the same rules,
+   * so it is the same form. Keying the whole line again into a second form that
+   * happened to look similar is how the two would drift, and the half that
+   * drifted would be the one only reached after a rejection.
+   */
+  initial?: ClaimLineRow | null;
+  submitLabel?: string;
+  busyLabel?: string;
+  onCancel?: () => void;
 }) {
-  const [line, setLine] = React.useState(emptyLine);
+  const from = React.useCallback(
+    (row: ClaimLineRow) => ({
+      spentOn: row.spentOn,
+      description: row.description,
+      accountCode: row.accountCode,
+      net: toInput(row.netMinor),
+      vat: toInput(row.vatMinor),
+      supplierTrn: row.supplierTrn ?? "",
+      vatRecoverable: row.vatRecoverable,
+      receiptRef: row.receiptRef ?? "",
+    }),
+    [],
+  );
+  const [line, setLine] = React.useState(() => (initial ? from(initial) : emptyLine()));
+
+  /* Re-seed when the row being corrected changes — pressing Correct on a second
+   * row while the first is open must show the second row, not the first. Keyed
+   * on the id rather than the object so a re-render that rebuilds an identical
+   * row does not throw away what the user has typed into it. */
+  const seeded = React.useRef(initial?.id ?? null);
+  React.useEffect(() => {
+    const id = initial?.id ?? null;
+    if (id === seeded.current) return;
+    seeded.current = id;
+    setLine(initial ? from(initial) : emptyLine());
+  }, [initial, from]);
 
   const net = parseAmount(line.net);
   const vat = parseAmount(line.vat) ?? 0n;
@@ -186,6 +254,10 @@ export function ClaimLineFields({
       vatRecoverable: line.vatRecoverable,
       receiptRef: line.receiptRef.trim(),
     });
+    // Correcting a line leaves the form showing what was corrected, because the
+    // row it belongs to is still on screen and blanking it would read as the
+    // edit having been thrown away.
+    if (initial) return;
     // The date and the account carry over to the next receipt; a claim is
     // usually one trip, and re-keying the same day eight times is how a
     // claimant ends up keying it wrong once.
@@ -236,11 +308,16 @@ export function ClaimLineFields({
           className="sw-btn"
           disabled={blocker !== null || busy}
           aria-disabled={blocker !== null || busy || undefined}
-          data-testid="add-claim-line"
+          data-testid={initial ? "save-claim-line" : "add-claim-line"}
           onClick={add}
         >
-          {busy ? "Adding…" : "Add receipt"}
+          {busy ? busyLabel : submitLabel}
         </button>
+        {onCancel && (
+          <button type="button" className="sw-btn sw-btn-sm" onClick={onCancel} data-testid="cancel-claim-line">
+            Leave it as it was
+          </button>
+        )}
         {blocker && <span className="sw-sub" role="status" data-testid="line-blocker">{blocker}</span>}
         {!blocker && !line.vatRecoverable && vat > 0n && (
           <span className="sw-sub">

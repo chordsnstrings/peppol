@@ -299,8 +299,15 @@ export default function InvoiceDetailPage() {
       } else {
         toast.success("Sent, delivered & reported");
       }
-    } catch {
-      toast.error("Can't send", { description: "This invoice has blocking issues." });
+    } catch (e) {
+      /* A refusal carrying no validation issues came from the pipeline rather
+       * than from the document: a credit refusal and a live entity on a
+       * simulated gateway are both that shape, and each arrives as a sentence
+       * written to be read. Printing "blocking issues" over one sends somebody
+       * hunting through a valid invoice for a fault that is not in it. */
+      const issues = (e as { issues?: unknown }).issues;
+      const reason = !issues && e instanceof Error ? e.message : "";
+      toast.error("Can't send", { description: reason || "This invoice has blocking issues." });
     }
     setBusy(false);
     setConfirmSend(false);

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import {
-  createClaim, addLine, removeLine, updateClaim,
+  createClaim, addLine, updateLine, removeLine, updateClaim,
   submitClaim, approveClaim, rejectClaim, reopenClaim,
   postClaim, payClaim, claimList, claimSummary, claimDetail,
   type NewClaimLine,
@@ -284,6 +284,74 @@ d("employee expense claims", () => {
     expect(updated.employeeName).toBe("Layla H.");
 
     await expect(draft([taxi()], { reference: "EXP-EDIT" })).rejects.toThrow(/already in use/i);
+  });
+
+  /*
+   * Correcting a receipt in place.
+   *
+   * Without this verb a mistyped figure meant taking the line off and keying
+   * the whole receipt again — including the TRN, which is what the input tax
+   * rests on.
+   */
+  it("corrects a line on a draft claim, keeping the claim and the line it is on", async () => {
+    const claim = await draft([taxi({ netMinor: 100_000, vatMinor: 5_000 })], { reference: "EXP-FIX" });
+    const lineId = claim.lines[0].id;
+
+    const fixed = await updateLine({
+      orgId: ORG, claimId: claim.id, lineId,
+      line: taxi({ description: "Airport taxi (corrected)", netMinor: 10_000, vatMinor: 500 }),
+    });
+    expect(fixed.id).toBe(lineId);
+    expect(fixed.netMinor).toBe(10_000n);
+    expect(fixed.vatMinor).toBe(500n);
+    expect(fixed.description).toBe("Airport taxi (corrected)");
+    // The recoverable VAT and the TRN behind it survive the correction, which
+    // is the whole reason the verb exists.
+    expect(fixed.vatRecoverable).toBe(true);
+    expect(fixed.supplierTrn).toBe(TRN);
+
+    const detail = await claimDetail({ orgId: ORG, claimId: claim.id });
+    expect(detail.lines).toHaveLength(1);
+    expect(detail.claim.totals.netMinor).toBe(10_000n);
+  });
+
+  it("holds a corrected line to the same rules a new one is held to", async () => {
+    const claim = await draft([taxi()], { reference: "EXP-FIX-BAD" });
+    const lineId = claim.lines[0].id;
+
+    // Article 55 again, on the way back in: recoverable VAT with the TRN taken
+    // off it is refused exactly as `addLine` refuses it.
+    await expect(updateLine({
+      orgId: ORG, claimId: claim.id, lineId, line: taxi({ supplierTrn: null }),
+    })).rejects.toThrow(/names no supplier TRN/i);
+    await expect(updateLine({
+      orgId: ORG, claimId: claim.id, lineId, line: taxi({ netMinor: 0 }),
+    })).rejects.toThrow(/claims nothing/i);
+
+    // And the line is untouched by either refusal.
+    const detail = await claimDetail({ orgId: ORG, claimId: claim.id });
+    expect(detail.lines[0].netMinor).toBe(100_000n);
+    expect(detail.lines[0].supplierTrn).toBe(TRN);
+  });
+
+  it("refuses to correct a line once the claim has left the claimant", async () => {
+    const claim = await draft([taxi()], { reference: "EXP-FIX-SENT" });
+    await submitClaim({ orgId: ORG, claimId: claim.id });
+    await expect(updateLine({
+      orgId: ORG, claimId: claim.id, lineId: claim.lines[0].id, line: taxi({ netMinor: 1 }),
+    })).rejects.toThrow(/Only a draft claim is editable/i);
+
+    // Put it back where it was: the totals further down count what is sitting
+    // with an approver, and this claim is not part of that story.
+    await reopenClaim({ orgId: ORG, claimId: claim.id });
+  });
+
+  it("refuses to correct a line that is not on the claim", async () => {
+    const claim = await draft([taxi()], { reference: "EXP-FIX-MISSING" });
+    const other = await draft([taxi()], { reference: "EXP-FIX-OTHER" });
+    await expect(updateLine({
+      orgId: ORG, claimId: claim.id, lineId: other.lines[0].id, line: taxi(),
+    })).rejects.toThrow(/has no line/i);
   });
 
   it("shows what is waiting for approval and what is owed to staff", async () => {

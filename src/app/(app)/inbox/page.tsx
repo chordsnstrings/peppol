@@ -10,10 +10,13 @@ import { useInbound } from "@/hooks/use-entity-data";
 import { touch } from "@/lib/db/database";
 import { useGatewayMode } from "@/lib/gateway/mode";
 import { LIVE_GATEWAY_SETUP, SIMULATED_LABEL, SIMULATED_SEND_WARNING } from "@/lib/gateway/disclosure";
-/* Type only, so nothing from the server module reaches the browser bundle: the
-   inbox reads `InboundDoc`, and the receiver stores everything a receiving
-   corner needs beyond it on the same row. */
-import type { InboundRecord } from "@/lib/server/inbound";
+/* `InboundDoc` now carries everything the receiver writes onto the row — the
+   gateway reference, the issues, the note, the decision — so this screen reads
+   the domain type and no longer reaches into the server module for a shape.
+   Each of those fields is optional there, which is honest: a row stored before
+   the receiving half existed has none of them, and this screen has to render
+   one of those rather than fail on it. */
+import type { InboundDoc } from "@/lib/domain/types";
 import type { ReceiptDecision } from "@/lib/gateway/port";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
@@ -26,7 +29,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { toast } from "sonner";
 
 interface DecisionResponse {
-  doc?: InboundRecord;
+  doc?: InboundDoc;
   error?: string;
 }
 
@@ -47,7 +50,7 @@ interface PollResponse {
  * decision is amber and says so in the chip rather than only in the small print
  * underneath, which is the half nobody reads.
  */
-function decisionChip(doc: InboundRecord) {
+function decisionChip(doc: InboundDoc) {
   const decision = doc.decision;
   if (!decision) return null;
   const rejected = decision.outcome === "REJECTED";
@@ -61,14 +64,12 @@ function decisionChip(doc: InboundRecord) {
 
 export default function InboxPage() {
   const { currentEntity } = useAppState();
-  const { inbound, loading } = useInbound();
+  const { inbound: docs, loading } = useInbound();
   const gateway = useGatewayMode();
-
-  const docs = inbound as InboundRecord[];
 
   const [checking, setChecking] = React.useState(false);
   /** The document a rejection is being written for, and the words so far. */
-  const [rejecting, setRejecting] = React.useState<InboundRecord | null>(null);
+  const [rejecting, setRejecting] = React.useState<InboundDoc | null>(null);
   const [reason, setReason] = React.useState("");
   /** Which row has a decision in flight, so only its own controls go quiet. */
   const [busyId, setBusyId] = React.useState<string | null>(null);
@@ -125,7 +126,7 @@ export default function InboxPage() {
    * paraphrased here, so there is one sentence about a rejection nobody sent
    * and not two that can drift apart.
    */
-  const decide = async (doc: InboundRecord, outcome: ReceiptDecision, why?: string) => {
+  const decide = async (doc: InboundDoc, outcome: ReceiptDecision, why?: string) => {
     setBusyId(doc.id);
     try {
       const res = await fetch(`/api/inbound/${doc.id}/decision`, {
@@ -152,7 +153,7 @@ export default function InboxPage() {
     }
   };
 
-  const exportDoc = async (doc: InboundRecord) => {
+  const exportDoc = async (doc: InboundDoc) => {
     setBusyId(doc.id);
     try {
       const res = await fetch(`/api/inbound/${doc.id}/export`, { method: "POST", credentials: "same-origin" });
