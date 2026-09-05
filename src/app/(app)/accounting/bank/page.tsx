@@ -16,6 +16,21 @@ interface Statement {
   unmatchedBank: { id: string; postedOn: string; description: string; amountMinor: string }[];
   unmatchedLedger: { id: string; reference: string; entryDate: string; memo: string | null; amountMinor: string }[];
   matched: MatchedPair[];
+  /**
+   * How many items there really are, against the pages of them below.
+   *
+   * The figures cover the whole life of the account; the lists are the oldest
+   * few hundred of each, because an account running for years holds more
+   * matched pairs than anyone will read. The counts are what stop a reader
+   * adding up the rows on screen and wondering why they miss the total.
+   */
+  unmatchedBankCount: number;
+  unmatchedLedgerCount: number;
+  matchedCount: number;
+  oldestUnmatchedBankOn: string | null;
+  itemsSince: string | null;
+  itemLimit: number;
+  itemsNote: string;
 }
 interface MatchedPair {
   bankLineId: string; postedOn: string; description: string; amountMinor: string;
@@ -195,6 +210,7 @@ export default function BankPage() {
                 ? "Reconciled. Every difference between the two records is explained by the items below."
                 : `Out by ${fmtMinor(st.differenceMinor, st.currency, { zero: "zero" })} — something is on one record and not the other, and not accounted for below.`}
           </p>
+          <p className="sw-sub mt-2 max-w-[80ch]" data-testid="rec-items-note">{st.itemsNote}</p>
         </Panel>
       )}
 
@@ -314,6 +330,7 @@ export default function BankPage() {
                 </table>
               </div>
             )}
+            <Showing shown={st.unmatchedBank.length} total={st.unmatchedBankCount} what="statement line" />
           </Panel>
 
           <Panel className="overflow-hidden">
@@ -345,6 +362,7 @@ export default function BankPage() {
                 </table>
               </div>
             )}
+            <Showing shown={st.unmatchedLedger.length} total={st.unmatchedLedgerCount} what="posting" />
             <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }}>
               These are cheques written or transfers in flight — real postings the bank has not seen yet.{" "}
               <Link href={`/accounting/accounts/${account}`} className="sw-link">Open the account</Link>.
@@ -426,6 +444,7 @@ export default function BankPage() {
               </table>
             </div>
           )}
+          <Showing shown={st.matched.length} total={st.matchedCount} what="matched pair" />
           <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }}>
             A match is a statement that two records describe the same event, and unmatching withdraws only that —
             the posting stays exactly as it was. Booking a line to the wrong account is a different mistake:
@@ -510,6 +529,23 @@ function BankRow({ line, busy, docsOpen, onDocs, onPost }: {
         </button>
       </td>
     </tr>
+  );
+}
+
+/**
+ * What a list leaves out.
+ *
+ * Silence here would be the wrong answer twice over: a reader who counts the
+ * rows would get a number the reconciliation above contradicts, and the oldest
+ * uncleared item — the one worth chasing — would look as though it did not
+ * exist. Nothing is said when the list is the whole of it.
+ */
+function Showing({ shown, total, what }: { shown: number; total: number; what: string }) {
+  if (shown >= total) return null;
+  return (
+    <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }} data-testid={`showing-${what.replace(/\s+/g, "-")}`}>
+      Showing the oldest {shown} of {total} {what}s. The figures above cover all {total}.
+    </p>
   );
 }
 

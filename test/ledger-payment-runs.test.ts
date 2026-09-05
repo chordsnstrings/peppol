@@ -622,4 +622,168 @@ d("supplier payment runs", () => {
     // Put the policy back so the tests after this see the fixture they seeded.
     await db.approvalRule.delete({ where: { id: rule.id } });
   });
+
+  it("re-reads the ageing at release, so a bill paid since is not paid again", async () => {
+    // Monday's proposal, Tuesday's cheque, Wednesday's release. Nothing about
+    // paying the bill directly touches the run, so releasing what the proposal
+    // said used to send the supplier the money a second time and leave 2000 in
+    // debit for that document.
+    const twice = await receiveApproved(bill({
+      number: "BILL-TWICE", issueDate: "2026-06-01", dueDate: "2026-06-10",
+      seller: { nameEn: "Deira Cables LLC" },
+    }, [line(80_000, 4_000)]));
+    const alongside = await receiveApproved(bill({
+      number: "BILL-ALONGSIDE", issueDate: "2026-06-01", dueDate: "2026-06-10",
+      seller: { nameEn: "Deira Cables LLC" },
+    }, [line(20_000, 1_000)]));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-06-12", dueBy: "2026-06-12",
+      reference: "PR-TWICE", preparedBy: "farah",
+    });
+    expect(run.items.filter((i) => !i.excluded).map((i) => i.billNumber).sort())
+      .toEqual(["BILL-ALONGSIDE", "BILL-TWICE"]);
+    await approveRun({ orgId: ORG, runId: run.id, approvedBy: "omar" });
+
+    // Paid on its own, between the proposal and the release.
+    await postSupplierPayment({
+      orgId: ORG, entityId: ENT, billId: twice.id, billNumber: twice.number,
+      paymentId: "sp-twice", paidOn: "2026-06-11", bankAmountMinor: 84_000,
+    });
+
+    const released = await releaseRun({ orgId: ORG, runId: run.id, releasedOn: "2026-06-12" });
+    // Only the bill that is still owed left the bank.
+    expect(await linesOfRun(run.id)).toEqual({ "2000": 21_000n, "1010": -21_000n });
+    expect(BigInt(released.totalMinor)).toBe(21_000n);
+
+    // And the difference is reported rather than silently dropped: the run says
+    // what it did not pay, and why, in a sentence somebody can act on.
+    expect(released.restated).toHaveLength(1);
+    expect(released.restated[0].billNumber).toBe("BILL-TWICE");
+    expect(released.restated[0].proposedMinor).toBe("84000");
+    expect(released.restated[0].paidMinor).toBe("0");
+    expect(released.restated[0].reason).toMatch(/settled between this run being proposed and released/i);
+
+    const dropped = released.items.find((i) => i.billNumber === "BILL-TWICE")!;
+    expect(dropped.excluded).toBe(true);
+    expect(dropped.excludeReason).toMatch(/settled between/i);
+
+    // The bill was paid once. The ageing shows nothing left on it and nothing
+    // over-paid, which is what "once" means here.
+    const ageing = await payablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-06-30") });
+    expect(openOf(ageing, "BILL-TWICE")).toBeUndefined();
+    expect(openOf(ageing, "BILL-ALONGSIDE")).toBeUndefined();
+    expect(alongside.number).toBe("BILL-ALONGSIDE");
+  });
+
+  it("pays what is still owed when a bill was only part-settled since", async () => {
+    const part = await receiveApproved(bill({
+      number: "BILL-PART", issueDate: "2026-06-02", dueDate: "2026-06-10",
+      seller: { nameEn: "Jebel Steel LLC" },
+    }, [line(60_000, 3_000)]));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-06-14", dueBy: "2026-06-14",
+      reference: "PR-PART", preparedBy: "farah",
+    });
+    await approveRun({ orgId: ORG, runId: run.id, approvedBy: "omar" });
+
+    await postSupplierPayment({
+      orgId: ORG, entityId: ENT, billId: part.id, billNumber: part.number,
+      paymentId: "sp-part", paidOn: "2026-06-13", bankAmountMinor: 23_000,
+    });
+
+    const released = await releaseRun({ orgId: ORG, runId: run.id, releasedOn: "2026-06-14" });
+    expect(await linesOfRun(run.id)).toEqual({ "2000": 40_000n, "1010": -40_000n });
+    expect(released.restated).toHaveLength(1);
+    expect(released.restated[0].proposedMinor).toBe("63000");
+    expect(released.restated[0].paidMinor).toBe("40000");
+    // Still in the run, at what it really paid, with the reason beside it.
+    const line1 = released.items.find((i) => i.billNumber === "BILL-PART")!;
+    expect(line1.excluded).toBe(false);
+    expect(line1.amountMinor).toBe("40000");
+    expect(line1.excludeReason).toMatch(/part-settled/i);
+
+    const ageing = await payablesAgeing({ orgId: ORG, entityId: ENT, asOf: new Date("2026-06-30") });
+    expect(openOf(ageing, "BILL-PART")).toBeUndefined();
+  });
+
+  it("refuses to release a run whose every bill has been settled since", async () => {
+    const gone = await receiveApproved(bill({
+      number: "BILL-GONE", issueDate: "2026-06-03", dueDate: "2026-06-10",
+      seller: { nameEn: "Sharjah Glass LLC" },
+    }, [line(10_000, 500)]));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-06-16", dueBy: "2026-06-16",
+      reference: "PR-GONE", preparedBy: "farah",
+    });
+    await approveRun({ orgId: ORG, runId: run.id, approvedBy: "omar" });
+    await postSupplierPayment({
+      orgId: ORG, entityId: ENT, billId: gone.id, billNumber: gone.number,
+      paymentId: "sp-gone", paidOn: "2026-06-15", bankAmountMinor: 10_500,
+    });
+
+    await expect(releaseRun({ orgId: ORG, runId: run.id, releasedOn: "2026-06-16" }))
+      .rejects.toThrow(/has been settled since it was proposed/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYMENT_RUN", sourceId: run.id } })).toBe(0);
+  });
+
+  it("sees a payment dated after the run date, which is where the re-read would have missed it", async () => {
+    // A release dated by the run's own date would ask the ageing only up to
+    // that date, and a bill paid the day after the run was proposed would be
+    // invisible to exactly the read that exists to find it.
+    const later = await receiveApproved(bill({
+      number: "BILL-LATER", issueDate: "2026-06-05", dueDate: "2026-06-15",
+      seller: { nameEn: "Ras Al Khaimah Cement LLC" },
+    }, [line(50_000, 2_500)]));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-06-18", dueBy: "2026-06-18",
+      reference: "PR-LATER", preparedBy: "farah",
+    });
+    await approveRun({ orgId: ORG, runId: run.id, approvedBy: "omar" });
+    await postSupplierPayment({
+      orgId: ORG, entityId: ENT, billId: later.id, billNumber: later.number,
+      paymentId: "sp-later", paidOn: "2026-06-20", bankAmountMinor: 52_500,
+    });
+
+    // Released with no date of its own, so it is dated by the run — 18 June,
+    // two days BEFORE the payment.
+    await expect(releaseRun({ orgId: ORG, runId: run.id }))
+      .rejects.toThrow(/has been settled since it was proposed/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYMENT_RUN", sourceId: run.id } })).toBe(0);
+  });
+
+  it("puts a bill on one run, not two, when two are proposed at once", async () => {
+    // The exclusion of an already-claimed bill was an unlocked read: two
+    // proposals built at the same moment each read the claims before the other
+    // had written one, so each found the field clear and each took the bill.
+    // Neither run had posted anything, so the ageing showed the payable wide
+    // open to both, and it would have been paid twice.
+    await receiveApproved(bill({
+      number: "BILL-BOTH", issueDate: "2026-07-01", dueDate: "2026-07-05",
+      seller: { nameEn: "Ajman Timber LLC" },
+    }, [line(30_000, 1_500)]));
+
+    const [a, b] = await Promise.all([
+      proposeRun({ orgId: ORG, entityId: ENT, runDate: "2026-07-08", dueBy: "2026-07-08", preparedBy: "farah" }),
+      proposeRun({ orgId: ORG, entityId: ENT, runDate: "2026-07-08", dueBy: "2026-07-08", preparedBy: "farah" }),
+    ]);
+
+    const claims = [a, b].flatMap((r) =>
+      r.items.filter((i) => !i.excluded && i.billNumber === "BILL-BOTH"),
+    );
+    expect(claims).toHaveLength(1);
+
+    // The one that lost says so, by name, rather than dropping the bill.
+    const refused = [a, b].flatMap((r) =>
+      r.items.filter((i) => i.excluded && i.billNumber === "BILL-BOTH"),
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0].excludeReason).toMatch(/already on payment run PR-2026-07-08/i);
+
+    // And two proposals on one day are two runs, not one collision.
+    expect(a.reference).not.toBe(b.reference);
+  });
 });

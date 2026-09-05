@@ -44,6 +44,11 @@ interface History {
   layers: Layer[];
   assessments: Assessment[];
   movements: Movement[];
+  /** How many movements the item has, listed or not. */
+  movementCount: number;
+  listed: number;
+  /** True where there are older movements this read did not list. */
+  truncated: boolean;
 }
 
 interface Location {
@@ -931,11 +936,29 @@ function ItemRecord({ data }: { data: History }) {
 
       <Panel className="mt-4 overflow-hidden">
         <div className="border-b px-3 py-2" style={{ borderColor: "var(--sw-line)", background: "var(--sw-surface-2)" }}>
-          <span className="sw-label">{item.sku} — how the valuation got here</span>
+          <span className="sw-label">
+            {data.truncated ? `${item.sku} — the latest movements` : `${item.sku} — how the valuation got here`}
+          </span>
         </div>
+        {/* The figures above are the item's as at today. Where the table below
+            is only the recent end of its history it did not produce them, and
+            saying so is the difference between a stock card and a guess. */}
+        {data.truncated && (
+          <p className="sw-sub px-3 py-2" style={{ borderBottom: "1px solid var(--sw-line)" }} role="status" data-testid="stock-card-truncated">
+            The most recent {data.listed} of {data.movementCount} movements are listed, newest at the bottom. The
+            quantity and value above are the item&rsquo;s own as at today and include the{" "}
+            {data.movementCount - data.listed} earlier{" "}
+            {data.movementCount - data.listed === 1 ? "movement" : "movements"} that are not shown — they are not a
+            total of this table.
+          </p>
+        )}
         <div className="sw-scroll">
           <table className="sw-table">
-            <caption className="sr-only">Every movement behind {item.sku}, oldest first</caption>
+            <caption className="sr-only">
+              {data.truncated
+                ? `The most recent ${data.listed} of ${data.movementCount} movements behind ${item.sku}, oldest of those first`
+                : `Every movement behind ${item.sku}, oldest first`}
+            </caption>
             <thead>
               <tr>
                 <th style={{ width: "7rem" }}>Date</th>

@@ -377,6 +377,31 @@ export async function vatReturn(opts: {
   });
   if (!book) throw new LedgerError("No ledger has been opened for this entity.");
 
+  /*
+   * The lines the return can possibly report, and no others.
+   *
+   * This used to read every line posted in the quarter and discard most of
+   * them: the loop below acts on a line's tax code, and the bank, receivables
+   * and payables sides of every invoice and every receipt carry none. On a
+   * ledger of any size that is a whole quarter dragged through the connection
+   * to be thrown away — while `@@index([orgId, taxCode])` sat unused, put on
+   * the table for exactly this read.
+   *
+   * Three kinds of line are kept, and each is one the return would be wrong
+   * without:
+   *
+   *  - anything carrying a tax code, which is every figure on every box;
+   *  - revenue carrying none, because a supply with no treatment is missing
+   *    from the return and the warning that says so is counted from these;
+   *  - anything on 2100 or 1350, because the reconciliation below is only
+   *    worth having if it can see a posting on the control accounts that
+   *    carries no tax code at all. Narrowing to coded lines alone would make
+   *    output tax and account 2100 agree by construction, which is the one
+   *    thing that check exists to disprove.
+   *
+   * An expense with no tax code is genuinely outside the return — the loop
+   * skips it — so it is the one thing not read.
+   */
   const lines = await prisma.journalLine.findMany({
     where: {
       orgId: opts.orgId,
@@ -389,6 +414,11 @@ export async function vatReturn(opts: {
         status: { in: ["posted", "reversed"] },
         entryDate: { gte: from, lte: to },
       },
+      OR: [
+        { taxCode: { not: null } },
+        { account: { type: "INCOME" } },
+        { account: { code: { in: [VAT_OUTPUT_ACCOUNT, VAT_INPUT_ACCOUNT] } } },
+      ],
     },
     include: {
       account: { select: { code: true, type: true } },
@@ -573,10 +603,10 @@ export async function vatReturn(opts: {
   // different way, so a mismatch means a coding gap rather than an arithmetic
   // error — and it is worth surfacing either way.
   const ledgerOutput = lines
-    .filter((l) => l.account.code === "2100")
+    .filter((l) => l.account.code === VAT_OUTPUT_ACCOUNT)
     .reduce((a, l) => a + -l.functionalAmountMinor, 0n);
   const ledgerInput = lines
-    .filter((l) => l.account.code === "1350")
+    .filter((l) => l.account.code === VAT_INPUT_ACCOUNT)
     .reduce((a, l) => a + l.functionalAmountMinor, 0n);
 
   const net = outputVat - inputVat;
@@ -916,3 +946,321 @@ const isAdjustment = (l: { entry: { sourceType: string | null } }) =>
 const rcOutputVat = (l: TaggedLine[]) => byCode(l, "RC_OUTPUT_VAT", true);
 const chargedInputVat = (l: TaggedLine[]) => byCode(l, "INPUT_VAT", false);
 const rcInputVat = (l: TaggedLine[]) => byCode(l, "RC_INPUT_VAT", false);
+
+
+/* ------------------------------------------- the registration threshold --- */
+
+/**
+ * How close the business is to having to register for VAT, and whether it has
+ * already passed the point where it had to.
+ *
+ * Article 13 of Federal Decree-Law 8/2017 makes registration compulsory once
+ * the value of the supplies listed in Article 19 HAS EXCEEDED the mandatory
+ * threshold over the previous 12 months, or where the business expects to
+ * exceed it in the next 30 days. Three things follow from the way that is
+ * written, and each of them shapes what is computed here.
+ *
+ * IT IS A ROLLING WINDOW, not a financial year and not a tax period. Every
+ * other figure in this module is cut to a period the FTA assigned; this one is
+ * measured over the twelve months ending on the day it is asked about, which is
+ * why it cannot be read off a return. A business whose trade is seasonal can be
+ * under the threshold in each of four quarters and well over it across some
+ * twelve consecutive months.
+ *
+ * IT IS EVERY WINDOW, not only today's. The obligation is triggered on the day
+ * a twelve-month window first exceeds the threshold, and a quiet year
+ * afterwards does not undo it — that is what deregistration is for (Article 21),
+ * and deregistering is a different application with different conditions. So
+ * the ledger is walked forward over `REGISTRATION_LOOKBACK_YEARS` and the
+ * first crossing is reported, whether or not the current window is above it.
+ * Reporting only today's window would tell a business that had a large year and
+ * a small one that nothing was required of it, which is the reassuring answer
+ * and the wrong one.
+ *
+ * IT IS ABOUT SUPPLIES, not revenue. What counts:
+ *
+ *  - Taxable supplies made: standard rated, zero rated, the domestic reverse
+ *    charge and the profit margin scheme. A zero-rated supply is a taxable
+ *    supply at a rate of nothing and counts in full.
+ *  - Concerned goods and services received — imports the business accounts for
+ *    itself — which Article 19(2) puts towards the same threshold. A business
+ *    that buys services from abroad can be required to register on those alone.
+ *
+ * And what does not, each of which is said to the reader rather than quietly
+ * folded in:
+ *
+ *  - Exempt and out-of-scope supplies, which are not taxable supplies.
+ *  - Supplies of goods in a designated zone, which Article 51 puts outside the
+ *    State altogether.
+ *  - The value of a supply of capital assets, which Article 20 excludes from
+ *    the calculation. Nothing in the ledger tells the sale of a van from the
+ *    sale of a week's stock, so where a capital asset has been sold through the
+ *    revenue accounts this figure is overstated by it.
+ *  - Supplies of an acquired business, and supplies of related parties where
+ *    the FTA treats the separation as artificial. Neither is in these books.
+ */
+
+/** Article 3 of the Executive Regulation: the mandatory threshold, AED 375,000 in fils. */
+export const MANDATORY_REGISTRATION_THRESHOLD_MINOR = 37_500_000n;
+
+/** And the voluntary threshold, AED 187,500. Registration is a choice above it. */
+export const VOLUNTARY_REGISTRATION_THRESHOLD_MINOR = 18_750_000n;
+
+/**
+ * The days there are to apply once the threshold has been crossed.
+ *
+ * The obligation is to register and the application is how it is discharged:
+ * crossing the threshold in March is not something that can be put right by
+ * applying in the autumn.
+ */
+export const REGISTRATION_APPLICATION_DAYS = 30;
+
+/**
+ * Treatments that are a taxable supply MADE by the business.
+ *
+ * `EXEMPT`, `OUT_OF_SCOPE` and `DESIGNATED_ZONE` are absent on purpose — see
+ * the note above, and `OUTSIDE_THE_BOXES`, which keeps the last two off the
+ * return for the same reason they are kept out of this.
+ */
+const TAXABLE_SUPPLY_CODES = ["STANDARD_5", "ZERO_EXPORT", "ZERO_OTHER", "REVERSE_CHARGE", "MARGIN_SCHEME"];
+
+/**
+ * ...and treatments that are goods or services RECEIVED which the business
+ * accounts for itself. They are told from the supplies above by the side of the
+ * ledger they land on, because `REVERSE_CHARGE` is the same code on both.
+ */
+const CONCERNED_SUPPLY_CODES = ["REVERSE_CHARGE", IMPORT_GOODS_CODE];
+
+/**
+ * How far back a crossing is looked for. Two years, so a business that crossed
+ * during a good year and has been quiet since is still told — and bounded,
+ * because this is read on a dashboard and a business that crossed before that
+ * has a registration question far older than a nag list can help with.
+ */
+export const REGISTRATION_LOOKBACK_YEARS = 2;
+
+export type RegistrationStanding =
+  /** A registration is recorded and in force, so the threshold is not a live question. */
+  | "registered"
+  /**
+   * Registration is required: some twelve-month window inside the lookback
+   * exceeded the threshold, whether or not the current one still does.
+   */
+  | "over_mandatory"
+  /** Within a tenth of it and never over it. Nothing is required, and one month could change that. */
+  | "approaching_mandatory"
+  /** Over the voluntary threshold and under the mandatory one: registering is a choice. */
+  | "over_voluntary"
+  | "below";
+
+export interface RegistrationThreshold {
+  entityId: string;
+  /** The twelve months the current figure covers, both ends inclusive. */
+  from: string;
+  to: string;
+  currency: string;
+  /** True where a registration is recorded and has not been given up. */
+  registered: boolean;
+  trn: string | null;
+  /**
+   * The supplies in the current twelve months, and the goods and services
+   * received in them, both net of credit notes and both as positive values.
+   *
+   * Null for a registered entity: the ledger is not read at all in that case,
+   * because the threshold decides whether to register and that question has
+   * been answered. Null is "not measured", which is a different statement from
+   * a nil and is kept apart from one.
+   */
+  suppliesMinor: string | null;
+  concernedMinor: string | null;
+  /** The two added: the figure Article 19 tests against the threshold. */
+  totalMinor: string | null;
+  mandatoryMinor: string;
+  voluntaryMinor: string;
+  standing: RegistrationStanding;
+  /**
+   * The earliest day inside the lookback on which the twelve months ending
+   * there exceeded the mandatory threshold. Null where no window did.
+   *
+   * It is the earliest day VISIBLE HERE rather than necessarily the day it
+   * happened: a ledger that begins after the crossing, or a crossing older than
+   * `REGISTRATION_LOOKBACK_YEARS`, cannot be shown a day it does not hold.
+   */
+  crossedOn: string | null;
+  /** What the twelve months to `crossedOn` came to. Null where nothing crossed. */
+  crossedTotalMinor: string | null;
+  /** Thirty days after `crossedOn`, which is when the application had to be in. */
+  applyBy: string | null;
+  /**
+   * True where the books are not kept in AED. The thresholds are dirham
+   * figures, so the comparison is then not like for like and says so.
+   */
+  currencyDiffers: boolean;
+}
+
+/**
+ * Midnight UTC on a day, so a window is a window rather than a moment.
+ *
+ * A date that is not one comes back as one that is not either, rather than
+ * throwing here — the caller below turns it into a sentence somebody can read.
+ */
+const dayOf = (v: Date | string): Date => {
+  const on = typeof v === "string" ? v : Number.isNaN(v.getTime()) ? "" : v.toISOString();
+  return new Date(`${on.slice(0, 10)}T00:00:00.000Z`);
+};
+
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+/** The first day of the twelve months ending on `to`, both ends inclusive. */
+const twelveMonthsTo = (to: Date) =>
+  new Date(Date.UTC(to.getUTCFullYear() - 1, to.getUTCMonth(), to.getUTCDate() + 1));
+
+export async function registrationThreshold(opts: {
+  orgId: string;
+  entityId: string;
+  /** Defaults to today. Passing it makes the answer reproducible. */
+  asOf?: Date | string;
+}): Promise<RegistrationThreshold> {
+  const to = dayOf(opts.asOf ?? new Date());
+  if (Number.isNaN(to.getTime())) {
+    throw new LedgerError("The registration threshold needs a valid date to be read as at.");
+  }
+  const from = twelveMonthsTo(to);
+
+  const book = await prisma.book.findFirst({
+    where: { orgId: opts.orgId, entityId: opts.entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  if (!book) throw new LedgerError("No ledger has been opened for this entity.");
+
+  const registration = await getRegistration({ orgId: opts.orgId, entityId: opts.entityId, regime: "VAT" });
+  // A registration given up is not a registration in force. Deregistering does
+  // not put a business outside the threshold — it puts it back on the near side
+  // of it — so the watch applies again from the day it took effect.
+  const registered =
+    registration !== null && (registration.deregisteredOn === null || registration.deregisteredOn > isoDay(to));
+
+  const answer = {
+    entityId: opts.entityId,
+    from: isoDay(from),
+    to: isoDay(to),
+    currency: book.functionalCurrency,
+    registered,
+    trn: registration?.trn ?? null,
+    mandatoryMinor: MANDATORY_REGISTRATION_THRESHOLD_MINOR.toString(),
+    voluntaryMinor: VOLUNTARY_REGISTRATION_THRESHOLD_MINOR.toString(),
+    currencyDiffers: book.functionalCurrency !== "AED",
+  };
+
+  if (registered) {
+    return {
+      ...answer,
+      suppliesMinor: null,
+      concernedMinor: null,
+      totalMinor: null,
+      standing: "registered",
+      crossedOn: null,
+      crossedTotalMinor: null,
+      applyBy: null,
+    };
+  }
+
+  const earliest = new Date(
+    Date.UTC(to.getUTCFullYear() - REGISTRATION_LOOKBACK_YEARS, to.getUTCMonth(), to.getUTCDate() + 1),
+  );
+  const rows = await prisma.journalLine.findMany({
+    where: {
+      orgId: opts.orgId,
+      entry: {
+        entityId: opts.entityId,
+        // Both halves of a reversed pair, exactly as the return reads them: the
+        // original was a supply and the reversal takes it back, and counting
+        // one without the other leaves a cancelled supply on the threshold.
+        status: { in: ["posted", "reversed"] },
+        entryDate: { gte: earliest, lte: to },
+      },
+      // Two shapes of line, told apart by the side of the ledger they are on.
+      // `@@index([orgId, taxCode])` is what makes this a read of the supplies
+      // rather than a read of the ledger.
+      OR: [
+        { taxCode: { in: TAXABLE_SUPPLY_CODES }, account: { type: "INCOME" } },
+        { taxCode: { in: CONCERNED_SUPPLY_CODES }, account: { type: { not: "INCOME" } } },
+      ],
+    },
+    select: {
+      functionalAmountMinor: true,
+      account: { select: { type: true } },
+      entry: { select: { entryDate: true } },
+    },
+  });
+
+  // Revenue is a credit and a cost is a debit, and the threshold is a value of
+  // supplies rather than a movement, so both are counted as positive amounts.
+  let supplies = 0n;
+  let concerned = 0n;
+  const byDay = new Map<string, bigint>();
+  for (const r of rows) {
+    const made = r.account.type === "INCOME";
+    const value = made ? -r.functionalAmountMinor : r.functionalAmountMinor;
+    const on = r.entry.entryDate;
+    if (on >= from) {
+      if (made) supplies += value;
+      else concerned += value;
+    }
+    const key = isoDay(on);
+    byDay.set(key, (byDay.get(key) ?? 0n) + value);
+  }
+  const total = supplies + concerned;
+  const crossing = firstCrossing(byDay);
+
+  const standing: RegistrationStanding =
+    crossing !== null
+      ? "over_mandatory"
+      : total * 10n >= MANDATORY_REGISTRATION_THRESHOLD_MINOR * 9n
+        ? "approaching_mandatory"
+        : total > VOLUNTARY_REGISTRATION_THRESHOLD_MINOR
+          ? "over_voluntary"
+          : "below";
+
+  return {
+    ...answer,
+    suppliesMinor: supplies.toString(),
+    concernedMinor: concerned.toString(),
+    totalMinor: total.toString(),
+    standing,
+    crossedOn: crossing?.on ?? null,
+    crossedTotalMinor: crossing === null ? null : crossing.total.toString(),
+    applyBy:
+      crossing === null
+        ? null
+        : isoDay(new Date(dayOf(crossing.on).getTime() + REGISTRATION_APPLICATION_DAYS * 86_400_000)),
+  };
+}
+
+/**
+ * The first day on which the twelve months ending there went over the
+ * threshold, walking the days that carry a supply.
+ *
+ * Only those days need testing. The window moves with the day it is measured
+ * on, so the total it holds rises only when something is supplied and otherwise
+ * falls as old supplies drop out of the back of it — which means a crossing can
+ * only happen on a day something was supplied.
+ */
+function firstCrossing(byDay: Map<string, bigint>): { on: string; total: bigint } | null {
+  const days = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  // Two pointers over one list: `head` is the day being tested and `tail` drops
+  // the supplies that have fallen out of the twelve months behind it.
+  let running = 0n;
+  let tail = 0;
+  for (let head = 0; head < days.length; head++) {
+    running += days[head][1];
+    const opens = isoDay(twelveMonthsTo(dayOf(days[head][0])));
+    while (tail <= head && days[tail][0] < opens) {
+      running -= days[tail][1];
+      tail++;
+    }
+    if (running > MANDATORY_REGISTRATION_THRESHOLD_MINOR) return { on: days[head][0], total: running };
+  }
+  return null;
+}

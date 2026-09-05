@@ -4,11 +4,18 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
-import { parseAmount, toInput } from "@/lib/ledger/format";
+import { AssetDisposal, type DisposalRequest } from "@/components/ledger/asset-dispose";
+import { fmtMinor, parseAmount, toInput } from "@/lib/ledger/format";
 
 interface Asset {
   code: string; name: string; category: string; acquiredOn: string;
   method: string; usefulLifeMonths: number;
+  /* Where this asset posts. Carried by the register so an intangible on 1560
+   * and a lorry on 1500 can each say which accounts a disposal will touch,
+   * rather than the screen inferring it from the category — an asset can be
+   * routed to the intangible accounts by an explicit override without its
+   * category saying so. */
+  assetAccount: string; accumAccount: string;
   costMinor: string; residualMinor: string; accumulatedMinor: string;
   netBookValueMinor: string; depreciatedTo: string | null; status: string;
 }
@@ -30,6 +37,8 @@ export default function AssetsPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [period, setPeriod] = React.useState(thisMonth);
   const [adding, setAdding] = React.useState(false);
+  /** The asset whose disposal panel is open, by code. One at a time. */
+  const [disposing, setDisposing] = React.useState<string | null>(null);
 
   const act = async (label: string, body: Record<string, unknown>) => {
     setBusy(label); setErr(null); setMsg(null);
@@ -61,6 +70,30 @@ export default function AssetsPage() {
     setSkipped(skipped);
   };
   const [skipped, setSkipped] = React.useState<{ code: string; reason: string }[]>([]);
+
+  /**
+   * Take an asset off the register and out of the ledger.
+   *
+   * The gain or loss the server reports back is repeated in the message rather
+   * than left to be found on the income statement, because it is the one figure
+   * this operation produces that nothing else on the screen shows: the register
+   * loses the row, and 1500 and 1590 both come down, so afterwards there is
+   * nothing here to read the result off.
+   */
+  const dispose = async (asset: Asset, request: DisposalRequest) => {
+    const r = await act("dispose", { action: "dispose", ...request });
+    if (!r) return;
+    setDisposing(null);
+    const result = BigInt(String(r.resultMinor));
+    setMsg(
+      `${asset.code} ${asset.name} disposed of on ${request.disposedOn}, posted as ${String(r.reference)}. ` +
+        (result === 0n
+          ? "The proceeds were the net book value exactly, so nothing went to the income statement."
+          : result > 0n
+            ? `A gain of ${fmtMinor(result)} was credited to 4900.`
+            : `A loss of ${fmtMinor(-result)} was charged to 6900.`),
+    );
+  };
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
 
@@ -181,35 +214,75 @@ export default function AssetsPage() {
                       <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Depreciated</th>
                       <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Net book value</th>
                       <th style={{ width: "7rem" }}>Status</th>
+                      <th style={{ width: "6rem" }}><span className="sr-only">Actions</span></th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.assets.map((a) => (
-                      <tr key={a.code}>
-                        <td className="sw-code">{a.code}</td>
-                        <td className="max-w-0 truncate">{a.name}</td>
-                        <td>{a.acquiredOn}</td>
-                        <td className="hidden md:table-cell" style={{ color: "var(--sw-fg-muted)" }}>
-                          {a.method === "STRAIGHT_LINE" ? "Straight line" : "Reducing balance"}
-                          <span className="sw-sub"> · {a.usefulLifeMonths}m</span>
-                        </td>
-                        <td className="sw-num"><Figure minor={a.costMinor} colour={false} /></td>
-                        <td className="sw-num">
-                          <Figure minor={a.accumulatedMinor} colour={false} />
-                          {a.depreciatedTo && (
-                            <span className="block text-[0.6875rem]" style={{ color: "var(--sw-fg-muted)" }}>to {a.depreciatedTo}</span>
-                          )}
-                        </td>
-                        <td className="sw-num"><Figure minor={a.netBookValueMinor} /></td>
-                        <td><StatusChip status={a.status} /></td>
-                      </tr>
+                      <React.Fragment key={a.code}>
+                        <tr>
+                          <td className="sw-code">{a.code}</td>
+                          <td className="max-w-0 truncate">{a.name}</td>
+                          <td>{a.acquiredOn}</td>
+                          <td className="hidden md:table-cell" style={{ color: "var(--sw-fg-muted)" }}>
+                            {a.method === "STRAIGHT_LINE" ? "Straight line" : "Reducing balance"}
+                            <span className="sw-sub"> · {a.usefulLifeMonths}m</span>
+                          </td>
+                          <td className="sw-num"><Figure minor={a.costMinor} colour={false} /></td>
+                          <td className="sw-num">
+                            <Figure minor={a.accumulatedMinor} colour={false} />
+                            {a.depreciatedTo && (
+                              <span className="block text-[0.6875rem]" style={{ color: "var(--sw-fg-muted)" }}>to {a.depreciatedTo}</span>
+                            )}
+                          </td>
+                          <td className="sw-num"><Figure minor={a.netBookValueMinor} /></td>
+                          <td><StatusChip status={a.status} /></td>
+                          <td>
+                            {/* Only an active asset. `disposeAsset` refuses a
+                                second disposal outright — the cost and the
+                                depreciation have already been taken out, so
+                                doing it again would take them out twice — and
+                                offering the button anyway would be offering a
+                                refusal. */}
+                            {a.status === "active" ? (
+                              <button
+                                type="button"
+                                className="sw-btn sw-btn-sm"
+                                aria-expanded={disposing === a.code}
+                                data-testid="dispose-asset"
+                                onClick={() => setDisposing(disposing === a.code ? null : a.code)}
+                              >
+                                {disposing === a.code ? "Cancel" : "Dispose"}
+                              </button>
+                            ) : (
+                              <span className="sw-sub">—</span>
+                            )}
+                          </td>
+                        </tr>
+                        {disposing === a.code && (
+                          <tr>
+                            <td colSpan={9} style={{ background: "var(--sw-ground)" }}>
+                              <AssetDisposal
+                                entityId={entityId}
+                                asset={a}
+                                busy={busy === "dispose"}
+                                onDispose={(request) => dispose(a, request)}
+                                onCancel={() => setDisposing(null)}
+                              />
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     ))}
                   </tbody>
                 </table>
               </div>
               <p className="sw-sub px-3 py-2" style={{ borderTop: "1px solid var(--sw-line)" }}>
                 Depreciation posts one month at a time and is never recomputed — a change in estimate is
-                prospective, so prior periods stand.{" "}
+                prospective, so prior periods stand. A disposal takes the cost and the depreciation to date back
+                out in one entry and puts whatever the proceeds did not cover to the gain or loss on disposal;
+                what it does not do is charge the months since the last run, so those months land in that gain or
+                loss instead.{" "}
                 <Link href="/accounting/accounts/1590" className="sw-link">Open accumulated depreciation</Link>.
               </p>
             </Panel>

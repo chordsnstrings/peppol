@@ -70,3 +70,54 @@ export function formatMoneyCompact(minor: number, currency = "AED"): string {
 export function formatNumber(n: number, opts: Intl.NumberFormatOptions = {}) {
   return new Intl.NumberFormat("en-AE", opts).format(n);
 }
+
+/**
+ * Divide rounding halves away from zero, in BigInt so the multiplication
+ * happens before the division and no money passes through a float. Rounding
+ * once at the end is what keeps a converted figure within half a minor unit,
+ * and it makes a refund and a sale of the same size round to the same figure.
+ */
+export function divHalfUp(value: bigint, divisor: bigint): bigint {
+  const neg = value < 0n;
+  const abs = neg ? -value : value;
+  const out = (abs * 2n + divisor) / (divisor * 2n);
+  return neg ? -out : out;
+}
+
+/**
+ * An exchange rate as an exact integer and the power of ten it is scaled by,
+ * so "3.6725" is 36725 over 10^4 and never 3.6724999999999999.
+ *
+ * Anything that is not a plain positive decimal comes back undefined rather
+ * than as a silent 1 or 0 — the rate is typed by hand in the editor, and a
+ * half-typed one must stop the conversion, not convert at a made-up rate.
+ */
+function parseRate(raw: string | number): { units: bigint; scale: bigint } | undefined {
+  const text = typeof raw === "number" ? (Number.isFinite(raw) ? String(raw) : "") : raw.trim();
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(text);
+  if (!m) return undefined;
+  const frac = m[2] ?? "";
+  const units = BigInt(m[1] + frac);
+  if (units <= 0n) return undefined;
+  return { units, scale: 10n ** BigInt(frac.length) };
+}
+
+/**
+ * Convert a minor-unit amount at a decimal exchange rate, rounding half away
+ * from zero — the rounding the FTA applies to a converted tax figure.
+ *
+ * Both sides stay in minor units, which is only sound while the two currencies
+ * share an exponent. AED has two decimal places and so does every currency this
+ * product offers (`CURRENCIES` in `./peppol`), so the product of a rate and a
+ * fils amount is a fils amount. A zero-decimal currency such as JPY would need
+ * the exponents to be carried explicitly; none is offered, and this is the
+ * comment that has to be read before one is.
+ *
+ * Undefined where the rate is unusable, so a caller can tell "not converted"
+ * from "converts to nothing" instead of printing a nought it cannot stand behind.
+ */
+export function convertMinorAtRate(minor: number, rate: string | number): number | undefined {
+  const parsed = parseRate(rate);
+  if (!parsed) return undefined;
+  return Number(divHalfUp(BigInt(Math.round(minor)) * parsed.units, parsed.scale));
+}

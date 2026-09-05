@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { postInvoice } from "@/lib/server/ledger/ar";
 import { postBill } from "@/lib/server/ledger/ap";
 import { post, reverse } from "@/lib/server/ledger/post";
-import { vatReturn } from "@/lib/server/ledger/vat";
+import { vatReturn, registrationThreshold } from "@/lib/server/ledger/vat";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { recordFiling, recordRegistration } from "@/lib/server/ledger/tax-periods";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
@@ -515,6 +515,218 @@ d("VAT 201 return", () => {
     expect(plain.warnings.find((x) => /tax period/.test(x))).toBeUndefined();
   });
   /* ------------------------------- Article 10: corrections to filed returns */
+
+  /* ------------------------------------------- what the return actually reads */
+
+  describe("the lines a return reads", () => {
+    /**
+     * A return is grouped by the tax treatment on the line, and most of a
+     * quarter's lines carry none — the bank, receivables and payables sides of
+     * every invoice and every receipt. Those are not read, and the two kinds of
+     * uncoded line that ARE read are the two the return would be wrong without.
+     */
+    const RD = "t-ent-vat-read";
+    const D = { orgId: ORG, entityId: RD };
+
+    beforeAll(async () => {
+      await openFiscalYear({ ...D, label: "2026", startsOn: "2026-01-01" });
+      await openBooks(D);
+
+      // An ordinary sale: AED 1,000 and AED 50 of tax.
+      await post({
+        ...D, entryDate: "2026-01-10", source: "invoice", memo: "Sale",
+        lines: [
+          { account: "1010", debit: 105_000 },
+          { account: "4000", credit: 100_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+          { account: "2100", credit: 5_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+        ],
+      });
+
+      // And AED 30 credited to the output tax account carrying no treatment at
+      // all. 2100 refuses a manual journal, so this arrives the only way it
+      // can: on a posting the ledger accepts as a document.
+      await post({
+        ...D, entryDate: "2026-01-20", source: "invoice", memo: "Tax accrued by hand",
+        lines: [
+          { account: "1010", debit: 3_000 },
+          { account: "2100", credit: 3_000 },
+        ],
+      });
+
+      // An expense with no treatment on it, which is genuinely outside the
+      // return: the grouping has nothing to put it under.
+      await post({
+        ...D, entryDate: "2026-01-25", source: "bill", memo: "Uncoded cost",
+        lines: [
+          { account: "6900", debit: 40_000 },
+          { account: "2000", credit: 40_000 },
+        ],
+      });
+    });
+
+    it("still sees a posting on the tax control account that carries no tax code", async () => {
+      const r = await vatReturn({ ...D, from: "2026-01-01", to: "2026-03-31" });
+
+      // The return can only report what it can group, so the uncoded 30.00 is
+      // on no box — and the reconciliation against 2100 is the only thing that
+      // can say so. A read narrowed to coded lines alone would make the two
+      // agree by construction, which is exactly what this check exists to
+      // disprove.
+      expect(r.totalOutputVatMinor).toBe("5000");
+      expect(r.reconciliation.outputVatPerLedgerMinor).toBe("8000");
+      expect(r.reconciliation.outputMatches).toBe(false);
+      expect(r.warnings.some((w) => /does not match account 2100/.test(w))).toBe(true);
+    });
+
+    it("leaves an expense with no treatment out of the return, as it always did", async () => {
+      const r = await vatReturn({ ...D, from: "2026-01-01", to: "2026-03-31" });
+      expect(box(r, "expenses", "9").amountMinor).toBe("0");
+      expect(r.totalInputVatMinor).toBe("0");
+      expect(r.reconciliation.inputMatches).toBe(true);
+    });
+  });
+
+  /* --------------------------------------------- the registration threshold */
+
+  describe("the registration threshold", () => {
+    /**
+     * Its own entity, with its own two years of books.
+     *
+     * The threshold is measured over a window that moves, so it is a function
+     * of every supply in the ledger and of the day it is asked on. Sharing the
+     * entity above — which is posted to by a dozen tests, several of which post
+     * hundreds of thousands of dirhams — would make every figure below depend
+     * on the order the file happens to run in.
+     */
+    const REG = "t-ent-vat-reg";
+    const R = { orgId: ORG, entityId: REG };
+    /** Every read below is as at a fixed day: the window is the whole answer. */
+    const AS_OF = "2026-06-30";
+
+    /** A sale carrying tax, posted the way an invoice posts one. */
+    const sale = (entryDate: string, net: number, vat: number, code = "STANDARD_5", account = "4000") =>
+      post({
+        ...R, entryDate, source: "invoice", memo: `Sale ${entryDate}`,
+        lines: [
+          { account: "1010", debit: net + vat },
+          { account, credit: net, taxCode: code, taxEmirate: "DU" },
+          ...(vat === 0 ? [] : [{ account: "2100", credit: vat, taxCode: "OUTPUT_VAT", taxEmirate: "DU" }]),
+        ],
+      });
+
+    beforeAll(async () => {
+      await openFiscalYear({ ...R, label: "2025", startsOn: "2025-01-01" });
+      await openFiscalYear({ ...R, label: "2026", startsOn: "2026-01-01" });
+      await openBooks(R);
+
+      // AED 500,000 of exempt supplies, which are not taxable supplies and
+      // belong nowhere near this test. If they were counted the business would
+      // have crossed the threshold in February 2025 and every figure below
+      // would be wrong by half a million dirhams.
+      await sale("2025-02-10", 50_000_000, 0, "EXEMPT");
+      // AED 10,000 outside the twelve months the current figure covers.
+      await sale("2025-05-05", 1_000_000, 50_000);
+      // AED 200,000 and AED 130,000 inside it.
+      await sale("2025-09-15", 20_000_000, 1_000_000);
+      await sale("2026-02-20", 13_000_000, 0, "ZERO_EXPORT", "4200");
+      // AED 20,000 of services bought from abroad. Article 19(2) counts what
+      // the business accounts for itself towards the same threshold.
+      await post({
+        ...R, entryDate: "2026-04-10", source: "bill", memo: "Design work from overseas",
+        lines: [
+          { account: "6900", debit: 2_000_000, taxCode: "REVERSE_CHARGE" },
+          { account: "2000", credit: 2_000_000 },
+        ],
+      });
+    });
+
+    it("measures a rolling twelve months, not a financial year", async () => {
+      const t = await registrationThreshold({ ...R, asOf: AS_OF });
+
+      // Both ends inclusive, ending on the day it was asked about.
+      expect(t.from).toBe("2025-07-01");
+      expect(t.to).toBe("2026-06-30");
+      // 200,000 + 130,000 of supplies. The May 2025 sale is a month outside the
+      // window and the exempt supplies are outside the measure altogether.
+      expect(t.suppliesMinor).toBe("33000000");
+      expect(t.concernedMinor).toBe("2000000");
+      expect(t.totalMinor).toBe("35000000");
+      expect(t.mandatoryMinor).toBe("37500000");
+      expect(t.voluntaryMinor).toBe("18750000");
+      expect(t.currencyDiffers).toBe(false);
+    });
+
+    it("says nothing has been crossed while no twelve months has crossed it", async () => {
+      const t = await registrationThreshold({ ...R, asOf: AS_OF });
+      // 350,000 against 375,000 is inside a tenth of it and over nothing.
+      expect(t.standing).toBe("approaching_mandatory");
+      expect(t.crossedOn).toBeNull();
+      expect(t.crossedTotalMinor).toBeNull();
+      expect(t.applyBy).toBeNull();
+    });
+
+    it("names the day the threshold was crossed and the day the application was due", async () => {
+      // AED 50,000 more, which takes the twelve months to 2026-06-20 to
+      // AED 400,000.
+      await sale("2026-06-20", 5_000_000, 250_000);
+
+      const t = await registrationThreshold({ ...R, asOf: AS_OF });
+      expect(t.standing).toBe("over_mandatory");
+      expect(t.totalMinor).toBe("40000000");
+      expect(t.crossedOn).toBe("2026-06-20");
+      expect(t.crossedTotalMinor).toBe("40000000");
+      // Thirty days to apply, and not a day of it depends on when the return
+      // for the quarter falls due.
+      expect(t.applyBy).toBe("2026-07-20");
+    });
+
+    it("does not let a quiet quarter undo a crossing that has already happened", async () => {
+      // Four months later the last twelve months are AED 200,000 — well under
+      // the threshold. The obligation was triggered in June all the same, and a
+      // business in this position applies to deregister rather than never
+      // having had to register.
+      const t = await registrationThreshold({ ...R, asOf: "2026-10-15" });
+      expect(t.totalMinor).toBe("20000000");
+      expect(BigInt(t.totalMinor!)).toBeLessThan(BigInt(t.mandatoryMinor));
+      expect(t.standing).toBe("over_mandatory");
+      expect(t.crossedOn).toBe("2026-06-20");
+      expect(t.applyBy).toBe("2026-07-20");
+    });
+
+    it("refuses a date it cannot read rather than quietly using today", async () => {
+      await expect(registrationThreshold({ ...R, asOf: "the fifteenth" })).rejects.toThrow(/valid date/i);
+    });
+
+    it("stops measuring once a registration is recorded, and says so rather than reporting a nil", async () => {
+      await recordRegistration({
+        ...R, regime: "VAT", trn: "100123456700003", frequency: "QUARTERLY", firstPeriodEndMonth: 3,
+        registeredOn: "2026-07-01",
+      });
+
+      const t = await registrationThreshold({ ...R, asOf: AS_OF });
+      expect(t.standing).toBe("registered");
+      expect(t.registered).toBe(true);
+      expect(t.trn).toBe("100123456700003");
+      // Not measured, which is a different statement from nothing supplied.
+      expect(t.totalMinor).toBeNull();
+      expect(t.suppliesMinor).toBeNull();
+      expect(t.crossedOn).toBeNull();
+    });
+
+    it("watches again once a registration has been given up", async () => {
+      await recordRegistration({
+        ...R, regime: "VAT", trn: "100123456700003", frequency: "QUARTERLY", firstPeriodEndMonth: 3,
+        registeredOn: "2026-07-01", deregisteredOn: "2026-08-31",
+      });
+
+      // Deregistering does not put a business outside the threshold; it puts it
+      // back on the near side of it.
+      const t = await registrationThreshold({ ...R, asOf: "2026-10-15" });
+      expect(t.registered).toBe(false);
+      expect(t.standing).toBe("over_mandatory");
+      expect(t.totalMinor).toBe("20000000");
+    });
+  });
 
   describe("corrections to a return already filed", () => {
     // Its own registration, so the periods are known rather than assumed, and

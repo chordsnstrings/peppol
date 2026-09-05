@@ -176,6 +176,45 @@ const BUCKETS: { key: DueBucket; label: string; hint: string }[] = [
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+/**
+ * The currency the journal is written in. A cheque may be drawn in anything —
+ * a supplier in Riyadh writes one in SAR — but the entry that records it is in
+ * the book's own currency, so anything else has to arrive with a rate.
+ *
+ * The subledger says the same thing by comparing the cheque's currency against
+ * this literal, which is why the screen can state it rather than read it: if
+ * the book ever stops being kept in dirhams, `fxOf` in cheques.ts is the place
+ * that changes and this follows it.
+ */
+const BOOK_CURRENCY = "AED";
+
+/**
+ * Which moves need a rate to the book's currency.
+ *
+ * Not "every move on a foreign cheque": banking a cheque raises no journal at
+ * all — the paper went from a drawer to a counter — and handing back or
+ * cancelling one that has already bounced raises none either, because the
+ * bounce already put the debt back on the trade account. Demanding a rate for
+ * a posting that will not happen is a gate that teaches the wrong rule.
+ */
+function needsRate(cheque: { currency: string; status: ChequeStatus }, to: ChequeStatus): boolean {
+  if (cheque.currency.toUpperCase() === BOOK_CURRENCY) return false;
+  if (to === "deposited") return false;
+  if (cheque.status === "bounced" && (to === "returned" || to === "cancelled")) return false;
+  return true;
+}
+
+/** A rate as typed, or null when it is not one the ledger can use. */
+function parseRate(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** A currency is a three-letter code. Anything else is a typo, not a currency. */
+const isCurrencyCode = (raw: string) => /^[A-Z]{3}$/.test(raw.trim().toUpperCase());
+
 export default function ChequesPage() {
   const entityId = useEntityId();
   const [asOf, setAsOf] = React.useState(today);
@@ -355,7 +394,22 @@ export default function ChequesPage() {
 function Reconciliation({ title, sub, register, asOf }: {
   title: string; sub: string; register: DirectionRegister; asOf: string;
 }) {
-  const currency = register.held[0]?.currency ?? register.deposited[0]?.currency ?? "AED";
+  const currency = register.held[0]?.currency ?? register.deposited[0]?.currency ?? BOOK_CURRENCY;
+  /*
+   * Whether the outstanding total is a total of one currency.
+   *
+   * `chequeRegister` adds `amountMinor` across the paper it is a register of,
+   * and a cheque keeps its own currency — so once a foreign cheque is in the
+   * drawer, that total is dirhams and riyals added together, while the ledger
+   * figure beside it is the entity's functional currency alone. The difference
+   * between them is then a translation and not a fault, and the chip above
+   * would be calling it one. Saying so is the only honest thing to draw here:
+   * the register cannot be made to tie in a currency it does not carry.
+   */
+  const currencies = [...new Set(
+    [...register.held, ...register.deposited].map((c) => c.currency.toUpperCase()),
+  )];
+  const mixed = currencies.length > 1 || (currencies.length === 1 && currencies[0] !== BOOK_CURRENCY);
   return (
     <Panel className="p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -363,8 +417,11 @@ function Reconciliation({ title, sub, register, asOf }: {
           <div className="sw-label">{title}</div>
           <p className="sw-sub mt-0.5">{sub}</p>
         </div>
-        <span className={`sw-chip ${register.reconciled ? "sw-chip-ok" : "sw-chip-bad"}`} data-testid={`chip-${register.direction}`}>
-          {register.reconciled ? "ties to the ledger" : "does not tie"}
+        <span
+          className={`sw-chip ${mixed ? "sw-chip-warn" : register.reconciled ? "sw-chip-ok" : "sw-chip-bad"}`}
+          data-testid={`chip-${register.direction}`}
+        >
+          {mixed ? "not comparable" : register.reconciled ? "ties to the ledger" : "does not tie"}
         </span>
       </div>
 
@@ -415,6 +472,15 @@ function Reconciliation({ title, sub, register, asOf }: {
           </tr>
         </tfoot>
       </table>
+
+      {mixed && (
+        <p className="sw-sub mt-2 max-w-[60ch]" data-testid={`mixed-${register.direction}`}>
+          This register holds paper in {currencies.join(", ")}, and the outstanding figure adds those face amounts
+          together as they are written. Account {register.accountCode} is kept in {BOOK_CURRENCY} at the rate on each
+          posting, so the two are not the same measurement and the difference above is a translation rather than a
+          finding. The paper itself is right; only the subtraction is meaningless.
+        </p>
+      )}
 
       <div className="sw-scroll mt-3">
         <table className="sw-table">
@@ -721,9 +787,15 @@ function ChequePanel({ detail, busy, onAct }: {
   const c = detail.cheque;
   const [on, setOn] = React.useState(today);
   const [reason, setReason] = React.useState("");
+  const [fxRate, setFxRate] = React.useState("");
   const allowed = ALLOWED[c.status] ?? [];
   const can = (to: ChequeStatus) => allowed.includes(to);
   const running = (action: string) => busy === `${c.id}:${action}`;
+  const rate = parseRate(fxRate);
+  /* A rate is asked for once the cheque is foreign and at least one of the
+   * steps still open to it would post. Asking on every foreign cheque would
+   * demand one to bank a cheque, which posts nothing. */
+  const ratePossiblyNeeded = allowed.some((to) => needsRate(c, to));
 
   /**
    * Why a step is unavailable, in the words the server would use. Returning the
@@ -736,12 +808,24 @@ function ChequePanel({ detail, busy, onAct }: {
         `so this is not a step it can take.`;
     }
     if (to === "bounced" && !reason.trim()) return "A bounce needs the reason the bank gave.";
+    if (needsRate(c, to) && rate === null) {
+      return `Cheque ${c.number} is in ${c.currency}, so this entry needs the rate to ${BOOK_CURRENCY} on ${on}. ` +
+        `The rate is not held on the cheque — a cheque moves on several different days and a rate belongs to one.`;
+    }
     return undefined;
   };
 
   const fire = (to: ChequeStatus, action: string, said: string) => {
     if (blocked(to)) return;
-    onAct(action, { on, ...(reason.trim() ? { reason: reason.trim() } : {}) }, said);
+    onAct(
+      action,
+      {
+        on,
+        ...(reason.trim() ? { reason: reason.trim() } : {}),
+        ...(needsRate(c, to) && rate !== null ? { fxRate: rate } : {}),
+      },
+      said,
+    );
   };
 
   return (
@@ -761,7 +845,12 @@ function ChequePanel({ detail, busy, onAct }: {
           <tbody>
             <tr>
               <th scope="row" style={{ fontWeight: 400 }}>Amount</th>
-              <td className="sw-num"><Figure minor={c.amountMinor} currency={c.currency} colour={false} /></td>
+              <td className="sw-num">
+                <Figure minor={c.amountMinor} currency={c.currency} colour={false} />
+                {c.currency.toUpperCase() !== BOOK_CURRENCY && (
+                  <span className="sw-code"> {c.currency}</span>
+                )}
+              </td>
             </tr>
             <tr>
               <th scope="row" style={{ fontWeight: 400 }}>Due in</th>
@@ -841,6 +930,22 @@ function ChequePanel({ detail, busy, onAct }: {
               data-testid="reason"
             />
           </Field>
+          {ratePossiblyNeeded && (
+            <Field label={`Rate — one ${c.currency} in ${BOOK_CURRENCY}`}>
+              <input
+                className={`sw-input sw-cell-num ${fxRate.trim() && rate === null ? "sw-cell-invalid" : ""}`}
+                inputMode="decimal"
+                value={fxRate}
+                aria-invalid={Boolean(fxRate.trim()) && rate === null ? true : undefined}
+                onChange={(e) => setFxRate(e.target.value)}
+                placeholder="0.9793"
+                data-testid="move-fx-rate"
+              />
+              <span className="sw-sub">
+                The rate on the day above. Banking it needs none — that step posts nothing.
+              </span>
+            </Field>
+          )}
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -872,6 +977,13 @@ function ChequePanel({ detail, busy, onAct }: {
               the reason and the date are what any recovery rests on &mdash; and they are what tells you whether to
               present it again or to stop.
             </>
+          ) : ratePossiblyNeeded && rate === null ? (
+            <>
+              Cheque {c.number} is in {c.currency}. Every step here that moves money writes its entry in{" "}
+              {BOOK_CURRENCY}, so it needs the rate on the day above; the cheque itself stays in {c.currency}, which is
+              what it is worth to whoever is holding it. Banking it is the exception and needs no rate, because that
+              step posts nothing.
+            </>
           ) : (
             <>From {SAYS[c.status]} this cheque can be {allowed.map((a) => ACT[a]).join(", ")}.</>
           )}
@@ -895,16 +1007,29 @@ function RecordCheque({ busy, onRecord }: {
     writtenOn: today(),
     dueOn: "",
     amount: "",
+    currency: BOOK_CURRENCY,
+    fxRate: "",
     settlesId: "",
     bankAccount: "1010",
   });
   const set = (k: keyof typeof f, v: string) => setF((x) => ({ ...x, [k]: v }));
-  const amount = parseAmount(f.amount);
+
+  const currency = f.currency.trim().toUpperCase();
+  const foreign = isCurrencyCode(currency) && currency !== BOOK_CURRENCY;
+  /* Parsed at the cheque's own exponent, not at two decimals. A Kuwaiti cheque
+   * for 250 dinars is 250,000 fils and a dirham cheque for 250 is 25,000 —
+   * reading both as "250 at two places" is wrong by a factor of ten for the
+   * one that is not a dirham, and `parseAmount` treats "250" and "250.000"
+   * identically once it knows which currency it is reading. */
+  const amount = parseAmount(f.amount, currency);
+  const rate = parseRate(f.fxRate);
 
   const blocker =
     !f.number.trim() ? "The number on the paper, please — it is what the bank and the register both quote." :
     !f.counterparty.trim() ? (f.direction === "RECEIVED" ? "Who wrote it?" : "Who is it written to?") :
+    !isCurrencyCode(currency) ? "A currency is a three-letter code, such as AED or SAR." :
     amount === null || amount <= 0n ? "How much is it for?" :
+    foreign && rate === null ? `A cheque in ${currency} needs its rate to ${BOOK_CURRENCY} on the day it changed hands — the ledger is kept in ${BOOK_CURRENCY}, and the cheque stays in ${currency}.` :
     !f.writtenOn ? "When was it written?" :
     !f.dueOn ? "What date does it carry? That date is the whole point of a post-dated cheque." :
     f.dueOn < f.writtenOn ? "A cheque cannot fall due before it is written — check which way round the dates went in." :
@@ -948,9 +1073,35 @@ function RecordCheque({ busy, onRecord }: {
         <Field label="Dated for (may be presented)">
           <input type="date" className="sw-input" value={f.dueOn} onChange={(e) => set("dueOn", e.target.value)} />
         </Field>
-        <Field label="Amount">
+        <Field label="Currency">
+          <input
+            className="sw-input sw-code"
+            value={f.currency}
+            onChange={(e) => set("currency", e.target.value.toUpperCase())}
+            placeholder={BOOK_CURRENCY}
+            data-testid="cheque-currency"
+          />
+        </Field>
+        <Field label={`Amount on the cheque, in ${isCurrencyCode(currency) ? currency : "its own currency"}`}>
           <input className="sw-input sw-cell-num" inputMode="decimal" value={f.amount} onChange={(e) => set("amount", e.target.value)} placeholder="105,000.00" />
         </Field>
+        {foreign && (
+          <Field label={`Rate — one ${currency} in ${BOOK_CURRENCY}`}>
+            <input
+              className={`sw-input sw-cell-num ${f.fxRate.trim() && rate === null ? "sw-cell-invalid" : ""}`}
+              inputMode="decimal"
+              value={f.fxRate}
+              aria-invalid={Boolean(f.fxRate.trim()) && rate === null ? true : undefined}
+              onChange={(e) => set("fxRate", e.target.value)}
+              placeholder="0.9793"
+              data-testid="cheque-fx-rate"
+            />
+            <span className="sw-sub">
+              The rate on the day the paper changed hands. It is not kept on the cheque: a cheque moves on several
+              different days and a rate belongs to one of them.
+            </span>
+          </Field>
+        )}
         <Field label={received ? "Invoice it settles" : "Bill it settles"}>
           <input className="sw-input" value={f.settlesId} onChange={(e) => set("settlesId", e.target.value)} placeholder="optional" />
         </Field>
@@ -977,6 +1128,8 @@ function RecordCheque({ busy, onRecord }: {
               writtenOn: f.writtenOn,
               dueOn: f.dueOn,
               amountMinor: amount.toString(),
+              currency,
+              ...(foreign && rate !== null ? { fxRate: rate } : {}),
               settlesId: f.settlesId.trim() || null,
             });
           }}
@@ -987,13 +1140,16 @@ function RecordCheque({ busy, onRecord }: {
         {!blocker && amount !== null && (
           <span className="sw-sub" data-testid="record-preview">
             {received ? (
-              <>Dr 1050 Cheques in hand <Figure minor={amount} colour={false} /> · Cr 1100 Trade receivables{" "}
-                <Figure minor={amount} colour={false} /></>
+              <>Dr 1050 Cheques in hand <Figure minor={amount} currency={currency} colour={false} /> · Cr 1100 Trade
+                receivables <Figure minor={amount} currency={currency} colour={false} /></>
             ) : (
-              <>Dr 2000 Trade payables <Figure minor={amount} colour={false} /> · Cr 2050 Cheques issued{" "}
-                <Figure minor={amount} colour={false} /></>
+              <>Dr 2000 Trade payables <Figure minor={amount} currency={currency} colour={false} /> · Cr 2050 Cheques
+                issued <Figure minor={amount} currency={currency} colour={false} /></>
             )}
-            {" "}· presentable from {f.dueOn} ({fmtMinor(amount)} due that day)
+            {" "}· presentable from {f.dueOn} ({fmtMinor(amount, currency)} due that day)
+            {foreign && (
+              <> · each line carries {currency} at {f.fxRate.trim()}, and the ledger holds its {BOOK_CURRENCY} value</>
+            )}
           </span>
         )}
       </div>

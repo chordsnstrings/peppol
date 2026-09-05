@@ -19,6 +19,12 @@ export default function JournalRegister() {
   const entityId = useEntityId();
   const params = useSearchParams();
   const posted = params.get("posted");
+  /* Set when the entry the New journal screen was posting turned out to be
+   * already there — the same form submitted twice under the same idempotency
+   * token. One journal exists, which is the right outcome, but saying "Posted"
+   * for something that was posted a moment ago by the press before is the kind
+   * of small untruth that teaches people not to read the banner. */
+  const alreadyPosted = params.get("already") === "1";
   // A finding, a report or a note has to be able to point at one entry. Without
   // this the register could only be linked to as a whole, and an entry from
   // March was unreachable from anywhere at all.
@@ -38,7 +44,24 @@ export default function JournalRegister() {
   const [busy, setBusy] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
 
+  /**
+   * The entries whose reversal is already on its way, held in a ref rather than
+   * read off `busy`.
+   *
+   * Two clicks on the same Reverse are one instruction. The button is disabled
+   * by the next render, which is too late — both clicks are handled before
+   * React repaints, and the handler for the second one closes over a `busy`
+   * that is still null. The ledger refuses to mirror an entry twice and that is
+   * where the guarantee lives; what this stops is the pointless second request,
+   * whose answer is "this one is already reversed" and which would land on
+   * screen as a failure for something that worked. Reversing a different entry
+   * meanwhile is a different instruction and still goes.
+   */
+  const inFlight = React.useRef(new Set<string>());
+
   const reverse = async (id: string, reference: string) => {
+    if (inFlight.current.has(id)) return;
+    inFlight.current.add(id);
     setBusy(id);
     setActionError(null);
     try {
@@ -50,6 +73,7 @@ export default function JournalRegister() {
     } catch (e) {
       setActionError(e instanceof ApiError ? e.message : "The entry could not be reversed.");
     } finally {
+      inFlight.current.delete(id);
       setBusy(null);
     }
   };
@@ -67,7 +91,16 @@ export default function JournalRegister() {
 
       {posted && (
         <div className="sw-note mb-3" role="status">
-          Posted <strong>{posted}</strong>.
+          {alreadyPosted ? (
+            <>
+              <strong>{posted}</strong> was already posted — this entry was sent twice and the
+              ledger kept the first. There is one journal, not two.
+            </>
+          ) : (
+            <>
+              Posted <strong>{posted}</strong>.
+            </>
+          )}
         </div>
       )}
       {error && <ErrorNote>{error}</ErrorNote>}

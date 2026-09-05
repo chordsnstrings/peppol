@@ -141,10 +141,6 @@ function toFunctional(amount: bigint, rate: number): bigint {
 }
 
 /**
- * Post a balanced journal entry. Atomic: the number allocation, the entry, its
- * lines and the balance cache all commit together or not at all.
- */
-/**
  * The database raises `ledger: …` for every invariant it enforces. Surface those
  * as LedgerError so a guard we have not mirrored in application code still
  * reaches the user as an actionable message rather than a generic 500.
@@ -156,7 +152,56 @@ function rethrowLedgerErrors(e: unknown): never {
   throw e;
 }
 
+/**
+ * The `(orgId, externalKey)` unique index refusing a second entry under a key
+ * that already exists.
+ *
+ * The idempotency check below cannot see an insert that has not committed, so
+ * two requests carrying the same key genuinely can both reach the INSERT — a
+ * double-clicked button is exactly that. The index is what decides it, and the
+ * request that loses has not failed: the work it asked for is on the books, so
+ * it is handed the entry that won rather than an error.
+ *
+ * Narrowed to the key's own index, because the gapless number carries a unique
+ * index too and a collision there is a different problem with a different fix.
+ */
+function isDuplicateExternalKey(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
+  const target = (e.meta as { target?: unknown } | undefined)?.target;
+  return String(Array.isArray(target) ? target.join(",") : target ?? "").includes("externalKey");
+}
+
+/** The entry holding a key, read back with its lines so it can be returned as posted. */
+function entryByKey(orgId: string, externalKey: string) {
+  return prisma.journalEntry.findFirst({ where: { orgId, externalKey }, include: { lines: true } });
+}
+
+/**
+ * Post a balanced journal entry. Atomic: the number allocation, the entry, its
+ * lines and the balance cache all commit together or not at all.
+ */
 export async function post(input: PostInput) {
+  try {
+    return await prisma.$transaction((tx) => postWithin(tx, input));
+  } catch (e) {
+    if (input.externalKey && isDuplicateExternalKey(e)) {
+      const won = await entryByKey(input.orgId, input.externalKey);
+      if (won) return won;
+    }
+    return rethrowLedgerErrors(e);
+  }
+}
+
+/**
+ * Everything post() does, against a transaction somebody else opened.
+ *
+ * It exists so that a caller which has to decide something *from* the ledger
+ * and then write to it — `reverse()`, which reads an entry's status and then
+ * mirrors it — can do both inside one transaction. Calling post() from inside
+ * a transaction would open a second one on a second connection, and the two
+ * would commit independently, which is the whole defect it is there to close.
+ */
+async function postWithin(tx: Prisma.TransactionClient, input: PostInput) {
   const {
     orgId, entityId, bookCode = "PRIMARY", entryDate, dueDate, memo, source = "manual",
     sourceType, sourceId, externalKey, reversalOfId, settlesId, periodId,
@@ -167,7 +212,7 @@ export async function post(input: PostInput) {
 
   // Idempotency: a retried post must not double-post.
   if (externalKey) {
-    const existing = await prisma.journalEntry.findFirst({
+    const existing = await tx.journalEntry.findFirst({
       where: { orgId, externalKey },
       include: { lines: true },
     });
@@ -182,177 +227,191 @@ export async function post(input: PostInput) {
     );
   }
 
-  return prisma.$transaction(async (tx) => {
-    const book = await tx.book.findFirst({ where: { orgId, entityId, code: bookCode } });
-    if (!book) throw new LedgerError(`No book "${bookCode}" for this entity. Set up the chart of accounts first.`);
+  const book = await tx.book.findFirst({ where: { orgId, entityId, code: bookCode } });
+  if (!book) throw new LedgerError(`No book "${bookCode}" for this entity. Set up the chart of accounts first.`);
 
-    const period = periodId
-      ? await tx.accountingPeriod.findFirst({ where: { id: periodId, orgId, entityId } })
-      : // Ordinary postings never land in an adjustment period by accident: it
-        // overlaps the last trading month, so ordering puts the real month
-        // first and a caller has to ask for the other one by name.
-        await tx.accountingPeriod.findFirst({
-          where: { orgId, entityId, startsOn: { lte: date }, endsOn: { gte: date } },
-          orderBy: [{ isAdjustment: "asc" }, { seq: "asc" }],
-        });
-    if (!period) {
-      throw new LedgerError(
-        periodId
-          ? "That accounting period does not exist for this entity."
-          : `No accounting period covers ${date.toISOString().slice(0, 10)}. Open the fiscal year first.`,
-      );
-    }
-    if (period.status !== "open") {
-      throw new LedgerError(`Period ${period.label} is ${period.status.replace("_", " ")}. Post to an open period, or reopen it.`);
-    }
-
-    // Resolve accounts by code in one query.
-    const codes = [...new Set(lines.map((l) => l.account))];
-    const accounts = await tx.account.findMany({ where: { orgId, entityId, code: { in: codes } } });
-    const byCode = new Map(accounts.map((a) => [a.code, a]));
-    for (const c of codes) if (!byCode.has(c)) throw new LedgerError(`Account ${c} does not exist in this entity's chart.`);
-
-    // Resolve dimension codes → value ids.
-    const dimPairs = lines.flatMap((l) => Object.entries(l.dimensions ?? {}));
-    const dimValues = new Map<string, { dimensionId: string; valueId: string; status: string; name: string }>();
-    if (dimPairs.length) {
-      const dims = await tx.dimension.findMany({
-        where: { orgId, code: { in: [...new Set(dimPairs.map(([d]) => d))] } },
-        include: { values: true },
+  const period = periodId
+    ? await tx.accountingPeriod.findFirst({ where: { id: periodId, orgId, entityId } })
+    : // Ordinary postings never land in an adjustment period by accident: it
+      // overlaps the last trading month, so ordering puts the real month
+      // first and a caller has to ask for the other one by name.
+      await tx.accountingPeriod.findFirst({
+        where: { orgId, entityId, startsOn: { lte: date }, endsOn: { gte: date } },
+        orderBy: [{ isAdjustment: "asc" }, { seq: "asc" }],
       });
-      for (const d of dims) {
-        // Archived values are still resolvable, so a posting can be refused by
-        // name rather than reported as an unknown value — "SITE_A is closed" is
-        // a different problem from "there is no SITE_A", and telling someone
-        // the wrong one sends them to create a duplicate.
-        for (const v of d.values) {
-          dimValues.set(`${d.code}:${v.code}`, { dimensionId: d.id, valueId: v.id, status: v.status, name: v.name });
-        }
-      }
-      const known = new Set(dims.map((x) => x.code));
-      for (const [d, v] of dimPairs) {
-        // Blaming the value when the dimension itself is unknown sends someone
-        // looking in the wrong place entirely.
-        if (!known.has(d)) {
-          throw new LedgerError(
-            `There is no dimension called "${d}" in this organisation. ` +
-              `Create it before posting against it, or check the spelling.`,
-          );
-        }
-        const found = dimValues.get(`${d}:${v}`);
-        if (!found) {
-          const options = dims
-            .find((x) => x.code === d)?.values.filter((x) => x.status === "active").map((x) => x.code).slice(0, 6) ?? [];
-          throw new LedgerError(
-            `"${v}" is not a value of ${d}.` + (options.length ? ` The ones that exist are ${options.join(", ")}.` : ""),
-          );
-        }
-        // An archived value is a closed cost centre or a finished job. Letting
-        // a late posting land on one is how cost quietly arrives against work
-        // that was reported as complete.
-        if (found.status !== "active") {
-          throw new LedgerError(
-            `${d} value "${v}"${found.name ? ` (${found.name})` : ""} has been closed, so nothing further can be ` +
-              `posted against it. Reopen it, or post to an open one.`,
-          );
-        }
-      }
-    }
+  if (!period) {
+    throw new LedgerError(
+      periodId
+        ? "That accounting period does not exist for this entity."
+        : `No accounting period covers ${date.toISOString().slice(0, 10)}. Open the fiscal year first.`,
+    );
+  }
+  if (period.status !== "open") {
+    throw new LedgerError(`Period ${period.label} is ${period.status.replace("_", " ")}. Post to an open period, or reopen it.`);
+  }
 
-    // Normalise lines and prove the entry balances before touching the database.
-    const prepared = lines.map((l, i) => {
-      const account = byCode.get(l.account)!;
-      const txnAmountMinor = signed(l);
-      const currency = l.currency ?? book.functionalCurrency;
-      const fxRate = currency === book.functionalCurrency ? 1 : l.fxRate ?? 0;
-      if (currency !== book.functionalCurrency && !fxRate) {
-        throw new LedgerError(`Line ${i + 1} is in ${currency}; supply an fxRate to ${book.functionalCurrency}.`);
-      }
-      if (account.requiresDimension && !(l.dimensions ?? {})[account.requiresDimension]) {
-        throw new LedgerError(`Account ${account.code} requires a ${account.requiresDimension}.`);
-      }
-      // These are enforced by the database too; checking here means the message
-      // names the account and tells the user what to do instead of raising a 500.
-      if (!account.isPostable) {
-        throw new LedgerError(`${account.code} ${account.name} is a heading, not a postable account. Choose one of its sub-accounts.`);
-      }
-      if (account.status !== "active") {
-        throw new LedgerError(`Account ${account.code} ${account.name} is archived.`);
-      }
-      if (account.isControl && source === "manual") {
-        throw new LedgerError(`${account.code} ${account.name} is a control account — it is maintained by its subledger. Raise the underlying document instead of a manual journal.`);
-      }
-      if (account.currency && account.currency !== currency) {
-        throw new LedgerError(`Account ${account.code} ${account.name} only accepts ${account.currency}.`);
-      }
-      return {
-        lineNo: i + 1,
-        orgId,
-        accountId: account.id,
-        txnCurrency: currency,
-        txnAmountMinor,
-        fxRate: new Prisma.Decimal(fxRate),
-        functionalCurrency: book.functionalCurrency,
-        functionalAmountMinor: toFunctional(txnAmountMinor, fxRate),
-        memo: l.memo ?? null,
-        taxCode: l.taxCode ?? null,
-        taxEmirate: l.taxEmirate ?? null,
-        settlesId: l.settlesId ?? null,
-        dims: Object.entries(l.dimensions ?? {}).map(([d, v]) => dimValues.get(`${d}:${v}`)!),
-      };
+  // Resolve accounts by code in one query.
+  const codes = [...new Set(lines.map((l) => l.account))];
+  const accounts = await tx.account.findMany({ where: { orgId, entityId, code: { in: codes } } });
+  const byCode = new Map(accounts.map((a) => [a.code, a]));
+  for (const c of codes) if (!byCode.has(c)) throw new LedgerError(`Account ${c} does not exist in this entity's chart.`);
+
+  // Resolve dimension codes → value ids.
+  const dimPairs = lines.flatMap((l) => Object.entries(l.dimensions ?? {}));
+  const dimValues = new Map<string, { dimensionId: string; valueId: string; status: string; name: string }>();
+  if (dimPairs.length) {
+    const dims = await tx.dimension.findMany({
+      where: { orgId, code: { in: [...new Set(dimPairs.map(([d]) => d))] } },
+      include: { values: true },
     });
-
-    // A cross-currency entry (say, USD received into an AED ledger) is one
-    // economic event whose sides are in different currencies; it balances only
-    // after conversion. So the invariant is the functional-currency balance.
-    // For a single-currency entry we also check that currency directly, purely
-    // because it yields a far better message for the common mistake.
-    const currencies = new Set(prepared.map((p) => p.txnCurrency));
-    if (currencies.size === 1) {
-      const [cur] = [...currencies];
-      const sum = prepared.reduce((a, p) => a + p.txnAmountMinor, 0n);
-      if (sum !== 0n) {
-        throw new LedgerError(`Entry does not balance in ${cur}: it is out by ${fmt(sum, cur)}. Debits must equal credits.`);
+    for (const d of dims) {
+      // Archived values are still resolvable, so a posting can be refused by
+      // name rather than reported as an unknown value — "SITE_A is closed" is
+      // a different problem from "there is no SITE_A", and telling someone
+      // the wrong one sends them to create a duplicate.
+      for (const v of d.values) {
+        dimValues.set(`${d.code}:${v.code}`, { dimensionId: d.id, valueId: v.id, status: v.status, name: v.name });
       }
     }
-    const fnSum = prepared.reduce((a, p) => a + p.functionalAmountMinor, 0n);
-    if (fnSum !== 0n) {
-      throw new LedgerError(`Entry does not balance in ${book.functionalCurrency} after conversion (out by ${fmt(fnSum, book.functionalCurrency)}). Check the exchange rates — a cross-currency entry balances once converted.`);
+    const known = new Set(dims.map((x) => x.code));
+    for (const [d, v] of dimPairs) {
+      // Blaming the value when the dimension itself is unknown sends someone
+      // looking in the wrong place entirely.
+      if (!known.has(d)) {
+        throw new LedgerError(
+          `There is no dimension called "${d}" in this organisation. ` +
+            `Create it before posting against it, or check the spelling.`,
+        );
+      }
+      const found = dimValues.get(`${d}:${v}`);
+      if (!found) {
+        const options = dims
+          .find((x) => x.code === d)?.values.filter((x) => x.status === "active").map((x) => x.code).slice(0, 6) ?? [];
+        throw new LedgerError(
+          `"${v}" is not a value of ${d}.` + (options.length ? ` The ones that exist are ${options.join(", ")}.` : ""),
+        );
+      }
+      // An archived value is a closed cost centre or a finished job. Letting
+      // a late posting land on one is how cost quietly arrives against work
+      // that was reported as complete.
+      if (found.status !== "active") {
+        throw new LedgerError(
+          `${d} value "${v}"${found.name ? ` (${found.name})` : ""} has been closed, so nothing further can be ` +
+            `posted against it. Reopen it, or post to an open one.`,
+        );
+      }
     }
+  }
 
-    const [{ n: number }] = await tx.$queryRaw<{ n: string }[]>`
-      SELECT gl_next_number(${orgId}, ${entityId}, ${series}) AS n`;
+  // Normalise lines and prove the entry balances before touching the database.
+  const prepared = lines.map((l, i) => {
+    const account = byCode.get(l.account)!;
+    const txnAmountMinor = signed(l);
+    const currency = l.currency ?? book.functionalCurrency;
+    const fxRate = currency === book.functionalCurrency ? 1 : l.fxRate ?? 0;
+    if (currency !== book.functionalCurrency && !fxRate) {
+      throw new LedgerError(`Line ${i + 1} is in ${currency}; supply an fxRate to ${book.functionalCurrency}.`);
+    }
+    if (account.requiresDimension && !(l.dimensions ?? {})[account.requiresDimension]) {
+      throw new LedgerError(`Account ${account.code} requires a ${account.requiresDimension}.`);
+    }
+    // These are enforced by the database too; checking here means the message
+    // names the account and tells the user what to do instead of raising a 500.
+    if (!account.isPostable) {
+      throw new LedgerError(`${account.code} ${account.name} is a heading, not a postable account. Choose one of its sub-accounts.`);
+    }
+    if (account.status !== "active") {
+      throw new LedgerError(`Account ${account.code} ${account.name} is archived.`);
+    }
+    if (account.isControl && source === "manual") {
+      throw new LedgerError(`${account.code} ${account.name} is a control account — it is maintained by its subledger. Raise the underlying document instead of a manual journal.`);
+    }
+    if (account.currency && account.currency !== currency) {
+      throw new LedgerError(`Account ${account.code} ${account.name} only accepts ${account.currency}.`);
+    }
+    return {
+      lineNo: i + 1,
+      orgId,
+      accountId: account.id,
+      txnCurrency: currency,
+      txnAmountMinor,
+      fxRate: new Prisma.Decimal(fxRate),
+      functionalCurrency: book.functionalCurrency,
+      functionalAmountMinor: toFunctional(txnAmountMinor, fxRate),
+      memo: l.memo ?? null,
+      taxCode: l.taxCode ?? null,
+      taxEmirate: l.taxEmirate ?? null,
+      settlesId: l.settlesId ?? null,
+      dims: Object.entries(l.dimensions ?? {}).map(([d, v]) => dimValues.get(`${d}:${v}`)!),
+    };
+  });
 
-    const entry = await tx.journalEntry.create({
-      data: {
-        orgId, entityId, bookId: book.id, periodId: period.id, series, number,
-        entryDate: date, dueDate: due, status: "posted", memo: memo ?? null,
-        source, sourceType: sourceType ?? null, sourceId: sourceId ?? null,
-        externalKey: externalKey ?? null, reversalOfId: reversalOfId ?? null,
-        settlesId: settlesId ?? null,
-        actorType, actorId: actorId ?? null,
-        lines: {
-          create: prepared.map((p) => ({
-            lineNo: p.lineNo, orgId: p.orgId, accountId: p.accountId,
-            txnCurrency: p.txnCurrency, txnAmountMinor: p.txnAmountMinor, fxRate: p.fxRate,
-            functionalCurrency: p.functionalCurrency, functionalAmountMinor: p.functionalAmountMinor,
-            memo: p.memo, taxCode: p.taxCode, taxEmirate: p.taxEmirate, settlesId: p.settlesId,
-            dimensions: { create: p.dims.map((d) => ({ dimensionId: d.dimensionId, valueId: d.valueId })) },
-          })),
-        },
+  // A cross-currency entry (say, USD received into an AED ledger) is one
+  // economic event whose sides are in different currencies; it balances only
+  // after conversion. So the invariant is the functional-currency balance.
+  // For a single-currency entry we also check that currency directly, purely
+  // because it yields a far better message for the common mistake.
+  const currencies = new Set(prepared.map((p) => p.txnCurrency));
+  if (currencies.size === 1) {
+    const [cur] = [...currencies];
+    const sum = prepared.reduce((a, p) => a + p.txnAmountMinor, 0n);
+    if (sum !== 0n) {
+      throw new LedgerError(`Entry does not balance in ${cur}: it is out by ${fmt(sum, cur)}. Debits must equal credits.`);
+    }
+  }
+  const fnSum = prepared.reduce((a, p) => a + p.functionalAmountMinor, 0n);
+  if (fnSum !== 0n) {
+    throw new LedgerError(`Entry does not balance in ${book.functionalCurrency} after conversion (out by ${fmt(fnSum, book.functionalCurrency)}). Check the exchange rates — a cross-currency entry balances once converted.`);
+  }
+
+  const [{ n: number }] = await tx.$queryRaw<{ n: string }[]>`
+    SELECT gl_next_number(${orgId}, ${entityId}, ${series}) AS n`;
+
+  const entry = await tx.journalEntry.create({
+    data: {
+      orgId, entityId, bookId: book.id, periodId: period.id, series, number,
+      entryDate: date, dueDate: due, status: "posted", memo: memo ?? null,
+      source, sourceType: sourceType ?? null, sourceId: sourceId ?? null,
+      externalKey: externalKey ?? null, reversalOfId: reversalOfId ?? null,
+      settlesId: settlesId ?? null,
+      actorType, actorId: actorId ?? null,
+      lines: {
+        create: prepared.map((p) => ({
+          lineNo: p.lineNo, orgId: p.orgId, accountId: p.accountId,
+          txnCurrency: p.txnCurrency, txnAmountMinor: p.txnAmountMinor, fxRate: p.fxRate,
+          functionalCurrency: p.functionalCurrency, functionalAmountMinor: p.functionalAmountMinor,
+          memo: p.memo, taxCode: p.taxCode, taxEmirate: p.taxEmirate, settlesId: p.settlesId,
+          dimensions: { create: p.dims.map((d) => ({ dimensionId: d.dimensionId, valueId: d.valueId })) },
+        })),
       },
-      include: { lines: true },
-    });
+    },
+    include: { lines: true },
+  });
 
-    await bumpBalances(tx, { orgId, entityId, bookId: book.id, periodId: period.id }, prepared);
-    return entry;
-  }).catch(rethrowLedgerErrors);
+  await bumpBalances(tx, { orgId, entityId, bookId: book.id, periodId: period.id }, prepared);
+  return entry;
 }
 
 /**
  * Correction is reversal-only: the original entry stays exactly as posted and a
  * mirror-image entry is posted against it. This is what makes the ledger
  * defensible in an audit.
+ *
+ * An entry is reversed once, and two things enforce that here.
+ *
+ * The mirror carries an idempotency key of its own — `reversal:<entryId>` —
+ * because there is no unique index on `reversalOfId` and the immutability
+ * trigger does not object to reversed → reversed, that being no change of
+ * status at all. Two clicks on Reverse therefore used to post two mirrors, and
+ * the entry was applied MINUS once rather than nought: the balance cache moved
+ * with the second mirror, so the trial balance still tied and nothing showed.
+ * The key is derived from the entry being reversed, so a second mirror for it
+ * is refused by the same unique index every other retry is refused by.
+ *
+ * And the read, the mirror and the status change are one transaction. Deciding
+ * from the entry's status that it may be reversed, and only then — outside any
+ * transaction — writing that status, leaves a window in which the entry is
+ * still posted and a mirror already exists.
  */
 export async function reverse(opts: {
   orgId: string;
@@ -361,7 +420,26 @@ export async function reverse(opts: {
   memo?: string;
   actorId?: string;
 }) {
-  const original = await prisma.journalEntry.findFirst({
+  const externalKey = `reversal:${opts.entryId}`;
+  try {
+    return await prisma.$transaction(async (tx) => reverseWithin(tx, opts, externalKey));
+  } catch (e) {
+    // Two requests in flight at once: the loser is handed the mirror the winner
+    // posted, which is the entry it was asking for.
+    if (isDuplicateExternalKey(e)) {
+      const won = await entryByKey(opts.orgId, externalKey);
+      if (won) return won;
+    }
+    return rethrowLedgerErrors(e);
+  }
+}
+
+async function reverseWithin(
+  tx: Prisma.TransactionClient,
+  opts: { orgId: string; entryId: string; entryDate?: Date | string; memo?: string; actorId?: string },
+  externalKey: string,
+) {
+  const original = await tx.journalEntry.findFirst({
     where: { id: opts.entryId, orgId: opts.orgId },
     include: {
       lines: {
@@ -379,7 +457,7 @@ export async function reverse(opts: {
   if (!original) throw new LedgerError("That journal entry does not exist.");
   if (original.status !== "posted") throw new LedgerError(`Only a posted entry can be reversed; this one is ${original.status}.`);
 
-  const reversal = await post({
+  const reversal = await postWithin(tx, {
     orgId: original.orgId,
     entityId: original.entityId,
     bookCode: original.book.code,
@@ -388,6 +466,7 @@ export async function reverse(opts: {
     source: original.source,
     sourceType: original.sourceType ?? undefined,
     sourceId: original.sourceId ?? undefined,
+    externalKey,
     actorType: "HUMAN",
     actorId: opts.actorId,
     series: original.series,
@@ -421,8 +500,10 @@ export async function reverse(opts: {
     }),
   });
 
-  // The only mutation a posted entry ever receives: posted → reversed.
-  await prisma.journalEntry.update({ where: { id: original.id }, data: { status: "reversed" } });
+  // The only mutation a posted entry ever receives: posted → reversed. It
+  // commits with the mirror or not at all, so the books never hold one without
+  // the other.
+  await tx.journalEntry.update({ where: { id: original.id }, data: { status: "reversed" } });
 
   return reversal;
 }

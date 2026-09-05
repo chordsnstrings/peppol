@@ -5,7 +5,8 @@ import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
 import { useAsk } from "@/components/ledger/ask";
-import { parseAmount } from "@/lib/ledger/format";
+import { ProjectBudgetRevision } from "@/components/ledger/project-budget";
+import { fmtMinor, parseAmount } from "@/lib/ledger/format";
 
 interface ProjectRow {
   code: string; name: string; customerName: string | null;
@@ -172,6 +173,28 @@ export default function ProjectsPage() {
             p={oneQ.data.profitability}
             detail={oneQ.data.detail}
             busy={busy === `close:${oneQ.data.profitability.code}`}
+            revising={busy === `budget:${oneQ.data.profitability.code}`}
+            onRevise={async (code, budgetMinor) => {
+              const p = oneQ.data!.profitability!;
+              const ok = await act(`budget:${code}`, { action: "update", code, budgetMinor });
+              // The panel stays open on a refusal, with the figure still typed
+              // in it: the answer to "that is not an amount I can read" is to
+              // correct it, not to key the whole thing again.
+              if (!ok) return false;
+              /* Both figures, named. The old one is about to stop existing —
+               * the project row holds a single budget — so this sentence is
+               * the only record of what it was that anybody will be handed. */
+              const was = fmtMinor(p.budgetMinor, p.currency, { zero: "zero" });
+              const now = fmtMinor(budgetMinor, p.currency, { zero: "zero" });
+              const moved = BigInt(budgetMinor) - BigInt(p.budgetMinor);
+              setMsg(
+                `${code} was budgeted at ${was} and is now budgeted at ${now} — ` +
+                  `${moved > 0n ? "an increase" : "a reduction"} of ${fmtMinor(moved < 0n ? -moved : moved, p.currency, { zero: "zero" })}. ` +
+                  `Cost of ${fmtMinor(p.spentMinor, p.currency, { zero: "zero" })} is measured against the new figure from now on; ` +
+                  `the old one is not kept anywhere, so record what was agreed where it will be found.`,
+              );
+              return true;
+            }}
             onClose={async (code) => {
               const go = await ask({
                 title: `Mark ${code} complete?`,
@@ -314,8 +337,23 @@ function SummaryPanel({
 }
 
 function OneProject({
-  p, detail, busy, onClose,
-}: { p: Profitability; detail?: Detail; busy: boolean; onClose: (code: string) => void }) {
+  p, detail, busy, revising, onClose, onRevise,
+}: {
+  p: Profitability;
+  detail?: Detail;
+  busy: boolean;
+  revising: boolean;
+  onClose: (code: string) => void;
+  /** True once the new figure is on the project. False leaves the panel open. */
+  onRevise: (code: string, budgetMinor: string) => Promise<boolean>;
+}) {
+  const [budgeting, setBudgeting] = React.useState(false);
+
+  /* The panel follows the selection. Leaving it open across a change of
+   * project would put one job's figures under another job's heading, which is
+   * the one mistake a job-costing screen cannot afford to make. */
+  React.useEffect(() => setBudgeting(false), [p.code]);
+
   return (
     <Panel className="overflow-hidden">
       <Head>
@@ -347,6 +385,15 @@ function OneProject({
             over budget by <Figure minor={p.overBudgetByMinor} currency={p.currency} colour={false} />
           </span>
         )}
+        <button
+          type="button"
+          className="sw-btn sw-btn-sm"
+          aria-expanded={budgeting}
+          onClick={() => setBudgeting((b) => !b)}
+          data-testid="revise-budget"
+        >
+          {budgeting ? "Stop revising" : p.hasBudget ? "Revise the budget" : "Set a budget"}
+        </button>
         {p.status !== "complete" && p.status !== "cancelled" && (
           <button type="button" className="sw-btn sw-btn-sm" disabled={busy} onClick={() => onClose(p.code)}
             data-testid="close-project">
@@ -360,6 +407,26 @@ function OneProject({
           No budget was quoted for this job, so there is no percentage of it to consume. That is not the same as being on
           budget, and it is not shown as 0%.
         </p>
+      )}
+
+      {budgeting && (
+        <ProjectBudgetRevision
+          project={{
+            code: p.code,
+            name: p.name,
+            currency: p.currency,
+            budgetMinor: p.budgetMinor,
+            // The report's own figure, not a second definition of what was
+            // spent: `spentMinor` is exactly `costMinor` on the server.
+            spentMinor: p.spentMinor,
+            hasBudget: p.hasBudget,
+          }}
+          busy={revising}
+          onCancel={() => setBudgeting(false)}
+          onRevise={async (budgetMinor) => {
+            if (await onRevise(p.code, budgetMinor)) setBudgeting(false);
+          }}
+        />
       )}
 
       {detail && (

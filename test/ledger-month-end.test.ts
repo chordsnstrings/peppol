@@ -171,6 +171,33 @@ d("the month-end checklist", () => {
     expect(registers.detail).toMatch(/work in progress/);
   });
 
+  it("ties the control accounts as at the month end rather than as at today", async () => {
+    // A sale raised in March. The open items at the end of February do not
+    // include it, and neither does account 1100 read at that date — but the
+    // control balance used to be read as it stands, with no date on it at all,
+    // so one invoice in a later month made February's check report a difference
+    // that was nothing but the calendar. The blocker it raised said one of the
+    // two figures was wrong and nobody should act on either, about a month in
+    // which nothing had happened.
+    await post({
+      ...S, entryDate: "2026-03-10", source: "invoice", memo: "Sale after the month end",
+      lines: [
+        { account: "1100", debit: 500_000 },
+        { account: "4000", credit: 500_000, taxCode: "ZERO_OTHER", taxEmirate: "DU" },
+      ],
+    });
+
+    const february = await monthEnd({ ...S, period: "2026-02" });
+    const control = check(february, "control_accounts")!;
+    expect(control.severity).toBe("done");
+    expect(control.detail).toMatch(/which is what 1100 and 2000 hold/);
+
+    // And in the month the sale is actually in, the two still agree — the
+    // ageing and the control account are both read at the end of March.
+    const march = await monthEnd({ ...S, period: "2026-03" });
+    expect(check(march, "control_accounts")!.severity).toBe("done");
+  });
+
   it("does not read another organisation's month", async () => {
     await expect(monthEnd({ orgId: "someone-else", entityId: ENT, period: "2026-01" }))
       .rejects.toThrow(/no accounting period 2026-01/i);

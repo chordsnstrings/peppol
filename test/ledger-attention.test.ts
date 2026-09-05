@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { attentionList, type Finding } from "@/lib/server/ledger/attention";
+import { attentionList, sharedReads, type Finding, type SharedReads } from "@/lib/server/ledger/attention";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { post } from "@/lib/server/ledger/post";
 import { postInvoice } from "@/lib/server/ledger/ar";
@@ -27,6 +27,10 @@ const BARE = "t-ent-att-bare";
 const BROKEN = "t-ent-att-broken";
 /** Q1 traded and then closed behind itself: a filed return, as the books see it. */
 const FILED = "t-ent-att-filed";
+/** Trading straight past the VAT registration threshold with no registration recorded. */
+const GROWING = "t-ent-att-growing";
+/** Close enough to the threshold to be worth telling, and never over it. */
+const NEARLY = "t-ent-att-nearly";
 
 /**
  * The whole list is read as at one fixed day. A nag list is a function of the
@@ -208,6 +212,38 @@ d("the attention list", () => {
         `(SELECT id FROM "Account" WHERE "orgId" = '${ORG}' AND "entityId" = '${BROKEN}' AND code = '1010')`,
     );
 
+    /* ---- turnover past the VAT registration threshold --------------------- */
+
+    // AED 400,000 of standard-rated supplies in one day, which puts the twelve
+    // months ending on it over the AED 375,000 mandatory threshold. Two fiscal
+    // years, because the window the law measures over reaches back into the one
+    // before this.
+    await openFiscalYear({ orgId: ORG, entityId: GROWING, label: "2025", startsOn: "2025-01-01" });
+    await openFiscalYear({ orgId: ORG, entityId: GROWING, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG, entityId: GROWING });
+    await post({
+      orgId: ORG, entityId: GROWING, entryDate: "2026-01-15", source: "invoice", memo: "Fit-out contract",
+      lines: [
+        { account: "1010", debit: 42_000_000 },
+        { account: "4000", credit: 40_000_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+        { account: "2100", credit: 2_000_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+      ],
+    });
+
+    // ...and AED 350,000, which is inside a tenth of the threshold and over
+    // nothing at all.
+    await openFiscalYear({ orgId: ORG, entityId: NEARLY, label: "2025", startsOn: "2025-01-01" });
+    await openFiscalYear({ orgId: ORG, entityId: NEARLY, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG, entityId: NEARLY });
+    await post({
+      orgId: ORG, entityId: NEARLY, entryDate: "2026-03-01", source: "invoice", memo: "Season's trade",
+      lines: [
+        { account: "1010", debit: 36_750_000 },
+        { account: "4000", credit: 35_000_000, taxCode: "STANDARD_5", taxEmirate: "DU" },
+        { account: "2100", credit: 1_750_000, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+      ],
+    });
+
     /* ---- a quarter traded and then closed behind itself ------------------- */
 
     await openFiscalYear({ orgId: ORG, entityId: FILED, label: "2026", startsOn: "2026-01-01" });
@@ -222,7 +258,7 @@ d("the attention list", () => {
 
   it("returns every check in one read, urgent first", async () => {
     const list = await read(ENT);
-    expect(list.checked).toBe(10);
+    expect(list.checked).toBe(11);
     expect(list.entityId).toBe(ENT);
     expect(list.asOf).toBe(AS_OF);
     expect(list.currency).toBe("AED");
@@ -417,6 +453,95 @@ d("the attention list", () => {
     expect(keys(list.findings)).toContain("periods_open");
   });
 
+  /* ----------------------------------------- the registration threshold */
+
+  it("says registration is required, by when, and what being late costs", async () => {
+    const f = find((await read(GROWING)).findings, "vat_registration")!;
+    expect(f).toBeDefined();
+    expect(f.severity).toBe("urgent");
+    expect(f.amountMinor).toBe("40000000");
+
+    // The day the twelve-month window first went over, and thirty days after it.
+    expect(f.detail).toMatch(/twelve months to 2026-01-15/);
+    expect(f.detail).toMatch(/by 2026-02-14/);
+    expect(f.dueOn).toBe("2026-02-14");
+    expect(f.statutory).toBe(true);
+    // 15 June is 121 days past 14 February, and the title says so.
+    expect(f.title).toMatch(/has not been applied for/);
+    expect(f.detail).toMatch(/121 days ago/);
+
+    // The law, the threshold, and the thing that actually costs money.
+    expect(f.detail).toMatch(/Article 13 of Federal Decree-Law 8\/2017/);
+    expect(f.detail).toMatch(/AED 375,000/);
+    expect(f.detail).toMatch(/cannot be added to invoices already sent/);
+    expect(f.href).toBe("/accounting/vat");
+  });
+
+  it("tells a business approaching the threshold without telling it to do anything yet", async () => {
+    const f = find((await read(NEARLY)).findings, "vat_registration")!;
+    expect(f).toBeDefined();
+    // Nothing is required, so nothing is urgent and there is no deadline to
+    // carry — an invented one is how a list teaches people its dates mean
+    // nothing.
+    expect(f.severity).toBe("soon");
+    expect(f.dueOn).toBeUndefined();
+    expect(f.amountMinor).toBe("35000000");
+    expect(f.detail).toMatch(/within a tenth of the AED 375,000/);
+    // And the choice that is available now.
+    expect(f.detail).toMatch(/voluntary threshold is AED 187,500/);
+  });
+
+  it("stops watching the threshold once a registration is recorded", async () => {
+    // The threshold decides whether to register. Once that is answered the
+    // question is not a live one, and a row about it is noise.
+    await recordRegistration({
+      orgId: ORG, entityId: NEARLY, regime: "VAT", trn: "100123456700003",
+      frequency: "QUARTERLY", firstPeriodEndMonth: 3, registeredOn: "2026-04-01",
+    });
+    expect(keys((await read(NEARLY)).findings)).not.toContain("vat_registration");
+  });
+
+  it("says nothing about the threshold to a business nowhere near it", async () => {
+    // ENT has traded AED 13,000 in the window. Registration is neither required
+    // nor available, so there is nothing to say and nothing is said.
+    expect(keys((await read(ENT)).findings)).not.toContain("vat_registration");
+  });
+
+  /* --------------------------------------------------------- the fan-out */
+
+  it("makes one read for two callers asking the same question", async () => {
+    const reads = sharedReads({ orgId: ORG, entityId: ENT });
+    const day = (d: string) => new Date(`${d}T00:00:00.000Z`);
+
+    const [first, second] = await Promise.all([reads.receivables(day(AS_OF)), reads.receivables(day(AS_OF))]);
+    // The very same object, which is only possible if the ageing was read once.
+    expect(second).toBe(first);
+
+    // A different day is a different fact, and answering it with this one would
+    // be wrong rather than fast.
+    const march = await reads.receivables(day("2026-03-15"));
+    expect(march).not.toBe(first);
+    expect(march.asOf).toBe("2026-03-15");
+  });
+
+  it("puts the checks' reads through the object it is handed rather than round it", async () => {
+    const real = sharedReads({ orgId: ORG, entityId: ENT });
+    const asked: string[] = [];
+    const reads: SharedReads = {
+      ...real,
+      receivables(asOf) {
+        asked.push(asOf.toISOString().slice(0, 10));
+        return real.receivables(asOf);
+      },
+    };
+
+    const list = await attentionList({ orgId: ORG, entityId: ENT, asOf: AS_OF, reads });
+    // Asked once, by the one check that needs it — and asked at all, which it
+    // would not be if the check went to the database on its own account.
+    expect(asked).toEqual([AS_OF]);
+    expect(find(list.findings, "ar_overdue")).toBeDefined();
+  });
+
   /* ------------------------------------------------------------ good news */
 
   it("finds nothing at all in a set of books in good order", async () => {
@@ -424,9 +549,9 @@ d("the attention list", () => {
     expect(list.findings).toEqual([]);
     expect(list.failed).toEqual([]);
     expect(list.counts).toEqual({ urgent: 0, soon: 0, note: 0 });
-    // Ten checks ran and each declined to say anything, which is what makes
+    // Every check ran and each declined to say anything, which is what makes
     // the empty state trustworthy rather than merely empty.
-    expect(list.checked).toBe(10);
+    expect(list.checked).toBe(11);
   });
 
   /* ------------------------------------------------------------ degradation */

@@ -322,7 +322,12 @@ export default async function AttentionPage({ searchParams }: { searchParams: Pr
             A VAT return counts as filed once the months it covers have been closed behind it — nothing here
             talks to the FTA, so the period lock is the only evidence the books carry. Both readings are
             stated in{" "}
-            <span className="sw-code">attention.ts</span> beside the code that makes them.
+            <span className="sw-code">attention.ts</span> beside the code that makes them. The VAT
+            registration threshold is measured over twelve months rather than over a financial year, and
+            over every such window rather than only the one ending on the date above — a business that
+            crossed it during a good year had to register then, and a quiet year since does not undo that.
+            What counts towards the figure, and what is left out of it, is listed in{" "}
+            <span className="sw-code">vat.ts</span>.
           </p>
         </>
       )}

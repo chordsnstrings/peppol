@@ -10,7 +10,18 @@ import { useAsk } from "@/components/ledger/ask";
 
 interface RunItem {
   id: string; billId: string | null; billNumber: string; supplierName: string;
-  amountMinor: string; excluded: boolean; excludeReason: string | null;
+  amountMinor: string; excluded: boolean;
+  /**
+   * On an item that is still being paid, this is the release saying the amount
+   * changed — the bill was part-settled between the proposal and the release —
+   * rather than that the bill was left out.
+   */
+  excludeReason: string | null;
+}
+/** A bill the release paid differently from what the proposal said. */
+interface Restated {
+  billId: string; billNumber: string; supplierName: string;
+  proposedMinor: string; paidMinor: string; reason: string;
 }
 interface RunEntry { id: string; reference: string; entryDate: string; settlesId: string | null }
 interface RunDetail {
@@ -247,14 +258,26 @@ export default function PaymentRunsPage() {
                   type="button" className="sw-btn sw-btn-sm sw-btn-primary" data-testid="release-run"
                   disabled={busy !== null} aria-disabled={busy !== null || undefined}
                   onClick={async () => {
-                    const r = await act<RunDetail & { entryIds: string[]; alreadyReleased: boolean }>(
+                    const r = await act<RunDetail & { entryIds: string[]; alreadyReleased: boolean; restated: Restated[] }>(
                       "release", { action: "release", runId: open.id },
                     );
                     if (!r) return;
+                    // A bill paid between the proposal and the release is paid
+                    // for what is left of it, or not at all. The difference is
+                    // named here rather than left for somebody to find in the
+                    // total: it is the whole reason the figure that went to the
+                    // bank is not the figure that was approved.
+                    const moved = r.restated ?? [];
                     setMsg(
                       r.alreadyReleased
                         ? `${r.reference} had already been released; nothing was posted again.`
-                        : `${r.reference} released — ${r.entryIds.length} entries posted, one settling each bill.`,
+                        : `${r.reference} released — ${r.entryIds.length} entries posted, one settling each bill.` +
+                          (moved.length
+                            ? ` ${moved.length} bill${moved.length === 1 ? " was" : "s were"} settled between the ` +
+                              `proposal and the release, so ${moved.length === 1 ? "it was" : "they were"} paid for ` +
+                              `what was still owed: ${moved.map((m) => m.billNumber).join(", ")}. The reason is on ` +
+                              `each line.`
+                            : ""),
                     );
                   }}
                 >
@@ -318,7 +341,16 @@ export default function PaymentRunsPage() {
                     <td>
                       {i.excluded
                         ? <span style={{ color: "var(--sw-neg)" }}>{i.excludeReason}</span>
-                        : <span className="sw-chip sw-chip-ok">paying</span>}
+                        : (
+                          <>
+                            <span className="sw-chip sw-chip-ok">paying</span>
+                            {/* Only a release that changed the amount leaves a
+                                reason on a line still being paid, and the
+                                amount beside it is no longer the one that was
+                                proposed — so the sentence has to travel with it. */}
+                            {i.excludeReason && <div className="sw-sub mt-0.5">{i.excludeReason}</div>}
+                          </>
+                        )}
                     </td>
                     <td className="sw-num">
                       <Figure minor={i.amountMinor} currency={open.currency} colour={false} />

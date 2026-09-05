@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
-import { post, LedgerError, type PostLine } from "./post";
+import { post, reverse, LedgerError, type PostLine } from "./post";
 import { ledgerBalances } from "./balances";
 
 /**
@@ -224,6 +224,80 @@ function assertTransition(c: ChequeLike, to: ChequeStatus): void {
         ? `From ${SAYS[from]} it can only be ${options.map((o) => VERB[o]).join(", ")}.`
         : `Nothing further is possible from ${SAYS[from]} — reverse the journal if it was recorded in error.`),
   );
+}
+
+/**
+ * Take the state change, before anything is posted for it.
+ *
+ * `assertTransition` above checks a row that was read a moment ago; this is the
+ * guard, and the difference between the two is the whole of what used to be
+ * wrong here. Every transition wrote `where: { id }`, so two people making two
+ * DIFFERENT legal changes out of the same state both passed their own check and
+ * both wrote. A cheque cleared by the bank and returned unpaid by the same bank
+ * are both legal from "held", they carry different external keys, so BOTH
+ * entries posted: the bank was debited and the receivable reinstated for one
+ * piece of paper, and cheques in hand ended at a credit balance — a balance
+ * that can only mean the register holds less than nothing.
+ *
+ * The same change twice was never the problem. Its posting is keyed on the
+ * cheque and the presentation, so the second attempt found the first attempt's
+ * entry and the second write said exactly what the first one said.
+ *
+ * So the status the cheque is moving FROM is part of the update, and an update
+ * that moves no rows is the refusal. It is taken before the posting rather than
+ * after it, because an entry raised for a transition that then loses is an
+ * entry for something that did not happen.
+ *
+ * Returns false where the change had already been made by somebody else, which
+ * is a double-submitted button rather than a second event: the caller carries
+ * on, the keyed posting recognises itself, and what comes back describes the
+ * state that is really there.
+ *
+ * `also` carries whatever the target state cannot exist without —
+ * `Cheque_bounce_check` wants the bank's reason, `Cheque_cleared_check` wants
+ * the entry that moved the money — because a claim that leaves the row
+ * momentarily illegal is not a claim, it is a failed write.
+ */
+async function claim(
+  c: ChequeLike,
+  to: ChequeStatus,
+  on: Date,
+  also: { bounceReason?: string; clearedEntryId?: string } = {},
+): Promise<boolean> {
+  const moved = await prisma.cheque.updateMany({
+    where: { id: c.id, orgId: c.orgId, entityId: c.entityId, status: c.status },
+    data: { status: to, statusOn: on, ...also },
+  });
+  if (moved.count === 1) return true;
+
+  const now = await loadCheque(c.orgId, c.entityId, c.id);
+  if (now.status === to) return false;
+  // Where the cheque has gone somewhere this act cannot follow, the ordinary
+  // refusal says where it is and what can still be done to it from there.
+  assertTransition(now, to);
+  // And where it could still legally be done, it still was not done here: two
+  // people are acting on one piece of paper and only one of them can be right
+  // about what happened to it.
+  throw new LedgerError(
+    `Cheque ${c.number} was ${SAYS[now.status as ChequeStatus]} while this was in flight, so it has not been ` +
+      `${VERB[to]}. Somebody else moved it; look at where it is now before deciding again.`,
+  );
+}
+
+/**
+ * Put the cheque back where it was, because the posting for the change was
+ * refused.
+ *
+ * The bank's reason goes back with the status. It is written by the claim,
+ * because `Cheque_bounce_check` will not have a bounced cheque without one, and
+ * leaving it behind on a cheque that is once again in hand would show the
+ * register a dishonour that never happened.
+ */
+async function unclaim(c: ChequeLike, to: ChequeStatus): Promise<void> {
+  await prisma.cheque.updateMany({
+    where: { id: c.id, orgId: c.orgId, entityId: c.entityId, status: to },
+    data: { status: c.status, statusOn: c.statusOn, bounceReason: c.bounceReason },
+  });
 }
 
 /* --------------------------------------------------------------- the log */
@@ -674,13 +748,11 @@ export async function depositCheque(opts: {
     );
   }
 
+  // Nothing is posted for a deposit, so the claim and the log are one write.
+  await claim(c, "deposited", on);
   const saved = await prisma.cheque.update({
     where: { id: c.id },
-    data: {
-      status: "deposited",
-      statusOn: on,
-      note: logged(c.note, on, "deposited", opts.reference ?? undefined),
-    },
+    data: { note: logged(c.note, on, "deposited", opts.reference ?? undefined) },
   });
   return {
     chequeId: saved.id, number: saved.number, direction: saved.direction as ChequeDirection,
@@ -718,6 +790,19 @@ export async function clearCheque(opts: {
   }
 
   const presentation = bounceCountOf(c.note) + 1;
+
+  /*
+   * This is the one transition that posts before it claims, and the database
+   * is why: `Cheque_cleared_check` refuses a cheque marked cleared that does
+   * not name the entry which moved the money, so the entry has to exist before
+   * the status is allowed to say so. The claim carries it.
+   *
+   * Which leaves the case the claim exists for — the same cheque bounced, or
+   * was handed back, while this was in flight. The entry then stands for money
+   * that did not move, so it is reversed rather than left standing: the ledger
+   * keeps the posting and its mirror, which is how every correction in this
+   * product is made, and the caller is told where the cheque actually went.
+   */
   const entry = await postForCheque(c, {
     externalKey: `cheque-clear:${c.id}:${presentation}`,
     sourceType: "CHEQUE_CLEARED",
@@ -728,11 +813,24 @@ export async function clearCheque(opts: {
     actorType: opts.actorType,
   });
 
+  try {
+    await claim(c, "cleared", on, { clearedEntryId: entry.id });
+  } catch (e) {
+    if (!entry.alreadyPosted) {
+      await reverse({
+        orgId: c.orgId,
+        entryId: entry.id,
+        entryDate: on,
+        memo: `Cheque ${c.number} was not cleared after all — the paper had already moved on`,
+        actorId: opts.actorId,
+      }).catch(() => undefined);
+    }
+    throw e;
+  }
+
   const saved = await prisma.cheque.update({
     where: { id: c.id },
     data: {
-      status: "cleared",
-      statusOn: on,
       clearedEntryId: entry.id,
       note: logged(c.note, on, "cleared", `${entry.series}-${entry.number}`),
     },
@@ -788,6 +886,7 @@ export async function bounceCheque(opts: {
   }
 
   const presentation = bounceCountOf(c.note) + 1;
+  const taken = await claim(c, "bounced", on, { bounceReason: reason });
   const entry = await postForCheque(c, {
     externalKey: `cheque-bounce:${c.id}:${presentation}`,
     sourceType: "CHEQUE_BOUNCED",
@@ -796,13 +895,14 @@ export async function bounceCheque(opts: {
     lines: unwindLines(c, opts.fxRate, `Cheque ${c.number} dishonoured: ${reason}`),
     actorId: opts.actorId,
     actorType: opts.actorType,
+  }).catch(async (e) => {
+    if (taken) await unclaim(c, "bounced").catch(() => undefined);
+    throw e;
   });
 
   const saved = await prisma.cheque.update({
     where: { id: c.id },
     data: {
-      status: "bounced",
-      statusOn: on,
       bounceReason: reason,
       bouncedEntryId: entry.id,
       note: logged(c.note, on, "bounced", reason),
@@ -849,6 +949,7 @@ export async function representCheque(opts: {
   assertTransition(c, "held");
   const on = asDay(opts.on, `The date cheque ${c.number} was re-presented`);
   const presentation = bounceCountOf(c.note) + 1;
+  const taken = await claim(c, "held", on);
 
   const entry = await postForCheque(c, {
     externalKey: `cheque-hold:${c.id}:${presentation}`,
@@ -859,13 +960,14 @@ export async function representCheque(opts: {
     lines: takeLines(c, opts.fxRate),
     actorId: opts.actorId,
     actorType: opts.actorType,
+  }).catch(async (e) => {
+    if (taken) await unclaim(c, "held").catch(() => undefined);
+    throw e;
   });
 
   const saved = await prisma.cheque.update({
     where: { id: c.id },
     data: {
-      status: "held",
-      statusOn: on,
       heldEntryId: entry.id,
       // The bounce reason stays: it is the history of this piece of paper, and
       // a cheque being presented for the third time is a fact about the
@@ -916,6 +1018,11 @@ async function closeOut(to: "returned" | "cancelled", opts: CloseOutInput): Prom
       ? `Cheque ${c.number} returned to ${c.counterparty}${reason ? `: ${reason}` : ""}`
       : `Cheque ${c.number} cancelled${reason ? `: ${reason}` : ""}`;
 
+  // Whether this posts at all depends on where the cheque has been, so the
+  // claim is taken against the status this call read and the decision is made
+  // on that same status — a cheque that bounced while this was in flight fails
+  // the claim rather than having its unwind posted a second time.
+  const taken = await claim(c, to, on);
   const entry = isOutstanding(c.status)
     ? await postForCheque(c, {
         externalKey: `cheque-${to}:${c.id}`,
@@ -925,14 +1032,15 @@ async function closeOut(to: "returned" | "cancelled", opts: CloseOutInput): Prom
         lines: unwindLines(c, opts.fxRate, why),
         actorId: opts.actorId,
         actorType: opts.actorType,
+      }).catch(async (e) => {
+        if (taken) await unclaim(c, to).catch(() => undefined);
+        throw e;
       })
     : null;
 
   const saved = await prisma.cheque.update({
     where: { id: c.id },
     data: {
-      status: to,
-      statusOn: on,
       note: logged(c.note, on, to, reason ?? (entry ? undefined : "already off the books — it had bounced")),
     },
   });

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/server/prisma";
+import { Prisma } from "@prisma/client";
 import { fmtMinor, exponentOf } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { payablesAgeing } from "./ap";
@@ -92,6 +93,64 @@ const STATE_WORDS: Record<RunStatus, string> = {
 /* ------------------------------------------------------------------ helpers */
 
 const tidy = (v: string | null | undefined) => (v ?? "").trim();
+
+/** Either the client or a transaction of it — a claim has to be read inside one. */
+type Db = Prisma.TransactionClient;
+
+/**
+ * The advisory-lock namespace this module proposes runs under, and a stable
+ * key for one entity within it.
+ *
+ * Two proposals built at the same moment each read the claims before the other
+ * had written one, so each found the field clear and each took the bill: a bill
+ * on two live runs, paid twice, with nothing in the ledger to say it was coming
+ * because neither run had posted yet. There is no unique index that could have
+ * caught it — the same bill legitimately sits on a cancelled run and on the run
+ * that replaces it — so the read and the write are made one act instead.
+ *
+ * `pg_advisory_xact_lock` is the smallest thing that does that: taken on the
+ * entity, held for the length of the transaction, released by the commit, with
+ * no row and no table to maintain. Proposals are a handful a week; serialising
+ * them per entity costs nothing anybody will notice.
+ *
+ * The key is hashed here rather than by `hashtext()` so it does not depend on
+ * a Postgres internal, and it is 32-bit signed because that is what the
+ * two-argument form of the lock takes.
+ */
+const RUN_LOCK_NAMESPACE = 0x7061_796d | 0; // "paym"
+
+function lockKey(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h | 0;
+}
+
+/**
+ * Which of these bills is already claimed by a run that has not been released
+ * or cancelled.
+ *
+ * A bill sitting in an unreleased run is the double payment this module exists
+ * to prevent, and it is invisible in the ageing: nothing has been posted yet,
+ * so the payable is still wide open.
+ */
+async function claimedElsewhere(
+  tx: Db, orgId: string, entityId: string, billIds: string[], exceptRunId?: string,
+): Promise<Map<string, { reference: string; status: string }>> {
+  if (billIds.length === 0) return new Map();
+  const rows = await tx.paymentRunItem.findMany({
+    where: {
+      orgId,
+      excluded: false,
+      billId: { in: billIds },
+      run: { entityId, status: { in: ["draft", "approved"] }, ...(exceptRunId ? { id: { not: exceptRunId } } : {}) },
+    },
+    include: { run: { select: { reference: true, status: true } } },
+  });
+  return new Map(rows.filter((r) => r.billId).map((r) => [r.billId as string, r.run]));
+}
 /** Two people, by id — trimmed and case-insensitive, as in approvals.ts. */
 const fold = (v: string) => v.trim().toLowerCase();
 const samePerson = (a: string, b: string) => fold(a) === fold(b);
@@ -394,18 +453,11 @@ export async function proposeRun(opts: {
       where: { orgId: opts.orgId, entityId: opts.entityId, subjectType: "BILL", active: true },
     }),
     prisma.approvalDecision.findMany({ where: { orgId: opts.orgId, subjectType: "BILL", subjectId: { in: billIds } } }),
-    // A bill already sitting in an unreleased run is the double-payment this
-    // module exists to prevent, and it is invisible in the ageing: nothing has
-    // been posted yet, so the payable is still wide open.
-    prisma.paymentRunItem.findMany({
-      where: {
-        orgId: opts.orgId,
-        excluded: false,
-        billId: { in: billIds },
-        run: { entityId: opts.entityId, status: { in: ["draft", "approved"] } },
-      },
-      include: { run: { select: { reference: true, status: true } } },
-    }),
+    // Read here so the exclusion carries its reason in the order the loop
+    // decides them — already on a run comes before on hold, which comes before
+    // unapproved. It is read AGAIN under the lock below, which is the read that
+    // actually decides; this one is for the sentence.
+    claimedElsewhere(prisma, opts.orgId, opts.entityId, billIds),
   ]);
 
   const docs = new Map<string, Invoice>();
@@ -425,7 +477,6 @@ export async function proposeRun(opts: {
     const g = decisionsByBill.get(d.subjectId);
     if (g) g.push(d); else decisionsByBill.set(d.subjectId, [d]);
   }
-  const inRun = new Map(inFlight.filter((i) => i.billId).map((i) => [i.billId as string, i.run]));
 
   const items: { billId: string; billNumber: string; supplierName: string; amountMinor: bigint; excluded: boolean; excludeReason: string | null }[] = [];
   const notDue: ProposalView["notDue"] = [];
@@ -477,7 +528,7 @@ export async function proposeRun(opts: {
       continue;
     }
 
-    const already = inRun.get(o.sourceId);
+    const already = inFlight.get(o.sourceId);
     if (already) {
       items.push({
         billId: o.sourceId, billNumber, supplierName, amountMinor: outstanding, excluded: true,
@@ -520,21 +571,44 @@ export async function proposeRun(opts: {
     items.push({ billId: o.sourceId, billNumber, supplierName, amountMinor: outstanding, excluded: false, excludeReason: null });
   }
 
-  const reference = await nextReference(opts.orgId, opts.entityId, tidy(opts.reference), runDate);
+  /*
+   * The claims are read again here, and this is the read that decides. Between
+   * the read above and this write another proposal can have taken a bill, so
+   * the lock is held across both: nothing else can be proposing for this entity
+   * while the run is written, and the reference is chosen inside it too, so two
+   * proposals on one day cannot pick the same one and lose the race on a unique
+   * index instead of on a sentence.
+   */
+  const created = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${RUN_LOCK_NAMESPACE}::int, ${lockKey(`${opts.orgId}:${opts.entityId}`)}::int)`;
 
-  const created = await prisma.paymentRun.create({
-    data: {
-      orgId: opts.orgId,
-      entityId: opts.entityId,
-      reference,
-      runDate,
-      bankAccount,
-      currency,
-      status: "draft",
-      preparedBy: tidy(opts.preparedBy) || null,
-      items: { create: items.map((i) => ({ orgId: opts.orgId, ...i })) },
-    },
-    select: { id: true },
+    const claimed = await claimedElsewhere(
+      tx, opts.orgId, opts.entityId, items.filter((i) => !i.excluded && i.billId).map((i) => i.billId),
+    );
+    for (const i of items) {
+      const taken = i.excluded ? undefined : claimed.get(i.billId);
+      if (!taken) continue;
+      i.excluded = true;
+      i.excludeReason =
+        `${i.billNumber} is already on payment run ${taken.reference}, which is ${STATE_WORDS[taken.status as RunStatus]}. ` +
+        `Release or cancel that run rather than paying the bill from two.`;
+    }
+
+    const reference = await nextReference(tx, opts.orgId, opts.entityId, tidy(opts.reference), runDate);
+    return tx.paymentRun.create({
+      data: {
+        orgId: opts.orgId,
+        entityId: opts.entityId,
+        reference,
+        runDate,
+        bankAccount,
+        currency,
+        status: "draft",
+        preparedBy: tidy(opts.preparedBy) || null,
+        items: { create: items.map((i) => ({ orgId: opts.orgId, ...i })) },
+      },
+      select: { id: true },
+    });
   });
 
   // The proposal comes back in the order it was decided — worst first, the
@@ -552,11 +626,11 @@ export async function proposeRun(opts: {
  * two runs on one day get PR-2026-04-25 and PR-2026-04-25-2 rather than one of
  * them failing on a unique constraint the operator did not ask about.
  */
-async function nextReference(orgId: string, entityId: string, wanted: string, runDate: Date): Promise<string> {
+async function nextReference(tx: Db, orgId: string, entityId: string, wanted: string, runDate: Date): Promise<string> {
   const base = wanted || `PR-${iso(runDate)}`;
   for (let n = 1; n < 100; n++) {
     const candidate = n === 1 ? base : `${base}-${n}`;
-    const clash = await prisma.paymentRun.findFirst({
+    const clash = await tx.paymentRun.findFirst({
       where: { orgId, entityId, reference: candidate }, select: { id: true },
     });
     if (!clash) return candidate;
@@ -726,6 +800,24 @@ export interface ReleaseResult extends RunView {
   entryIds: string[];
   /** True when the run was already released and nothing was posted this time. */
   alreadyReleased: boolean;
+  /**
+   * Bills the release paid differently from what the proposal said, because the
+   * ageing had moved between the two. Reported rather than quietly dropped —
+   * somebody has to be able to explain the difference between the batch that
+   * was approved and the money that left.
+   */
+  restated: RestatedItem[];
+}
+
+export interface RestatedItem {
+  billId: string;
+  billNumber: string;
+  supplierName: string;
+  /** What the run was approved to pay. */
+  proposedMinor: string;
+  /** What it actually paid — nought where the bill had been settled since. */
+  paidMinor: string;
+  reason: string;
 }
 
 /**
@@ -744,6 +836,13 @@ export interface ReleaseResult extends RunView {
  * Idempotent twice over: the run's status stops a second release, and every
  * posting carries an externalKey of its own, so a release interrupted halfway
  * through can be repeated and will post only the entries that are missing.
+ *
+ * And it pays what is owed on the day it releases, not what was owed on the day
+ * it was proposed. A run built on Monday and released on Wednesday can hold a
+ * bill somebody paid on Tuesday by cheque or by transfer, and nothing about
+ * that payment touches the run — so the ageing is read again here and the
+ * difference is written onto the run and returned in `restated`, rather than a
+ * supplier being paid twice for the same invoice.
  */
 export async function releaseRun(opts: {
   orgId: string;
@@ -757,7 +856,7 @@ export async function releaseRun(opts: {
 
   if (run.status === "released") {
     const v = await view(run);
-    return { ...v, entryIds: v.entries.map((e) => e.id), alreadyReleased: true };
+    return { ...v, entryIds: v.entries.map((e) => e.id), alreadyReleased: true, restated: [] };
   }
   if (run.status === "cancelled") {
     throw new LedgerError(
@@ -787,6 +886,93 @@ export async function releaseRun(opts: {
     }
   }
 
+  /*
+   * What the ageing says NOW, not what it said when the run was proposed.
+   *
+   * The run is a proposal made on Monday and released on Wednesday, and a bill
+   * on it can be paid directly in between — by a cheque, by a transfer, through
+   * `postSupplierPayment` — without anything touching the run. Releasing what
+   * the proposal said would pay that bill a second time and put the payables
+   * control account into debit for it, which is the most expensive mistake this
+   * module can make.
+   *
+   * That it needs no lock is the point of reading it here: the ledger is the
+   * record, every one of those payments is in it, and the ageing is the ledger
+   * read back. What a re-read cannot do is stop a payment made in the seconds
+   * after it — which is why settlement is also keyed per bill on the line
+   * below, so a bill paid twice shows as a credit balance on that document
+   * rather than disappearing into the supplier's total.
+   *
+   * Any difference is written onto the run and reported to the caller. Quietly
+   * paying less than the batch somebody approved, with nothing to show for the
+   * difference, is how a run stops being an auditable act.
+   *
+   * It is read as at the LATER of the release date and today. A run is dated by
+   * its own run date unless the caller says otherwise, so asking the ageing
+   * only up to that date would hide a payment made the day after it — which is
+   * exactly the settlement this read exists to find. What matters is that the
+   * payment is in the ledger, not which side of the run's date it falls.
+   */
+  const asOf = new Date(Math.max(entryDate.getTime(), Date.now()));
+  const nowOwed = await payablesAgeing({ orgId: run.orgId, entityId: run.entityId, asOf });
+  const owed = new Map(nowOwed.open.map((o) => [o.sourceId, BigInt(o.outstandingMinor)]));
+
+  const restated: RestatedItem[] = [];
+  const paying: { item: LoadedRun["items"][number]; amountMinor: bigint }[] = [];
+  for (const item of ins) {
+    const billId = item.billId as string;
+    // A bill the ageing no longer carries has been settled in full, and a debit
+    // balance on one means it was over-paid. Neither is something to pay again.
+    const outstanding = owed.get(billId) ?? 0n;
+    const pay = outstanding <= 0n ? 0n : outstanding < item.amountMinor ? outstanding : item.amountMinor;
+    if (pay === item.amountMinor) {
+      paying.push({ item, amountMinor: pay });
+      continue;
+    }
+    restated.push({
+      billId,
+      billNumber: item.billNumber,
+      supplierName: item.supplierName,
+      proposedMinor: item.amountMinor.toString(),
+      paidMinor: pay.toString(),
+      reason: pay === 0n
+        ? `${item.billNumber} was settled between this run being proposed and released, so it was not paid again — ` +
+          `the payables ledger shows nothing outstanding on it.`
+        : `${item.billNumber} was part-settled between this run being proposed and released: ` +
+          `${money(item.amountMinor, run.currency)} was proposed, ${money(pay, run.currency)} was still owed, ` +
+          `and ${money(pay, run.currency)} was paid.`,
+    });
+    if (pay > 0n) paying.push({ item, amountMinor: pay });
+  }
+
+  if (paying.length === 0) {
+    throw new LedgerError(
+      `Every bill on payment run ${run.reference} has been settled since it was proposed, so there is nothing left ` +
+        `to pay. Cancel the run — releasing it would send ${money(runTotal(run), run.currency)} that is no longer owed.`,
+    );
+  }
+
+  // What the run is actually paying, written down before the money moves: a run
+  // has to be able to explain itself afterwards, and an item whose amount was
+  // quietly reduced at the moment of posting cannot.
+  if (restated.length) {
+    await prisma.$transaction(
+      restated.map((r) => {
+        const item = ins.find((i) => i.billId === r.billId)!;
+        const paid = BigInt(r.paidMinor);
+        return paid === 0n
+          ? prisma.paymentRunItem.update({
+              where: { id: item.id },
+              data: { excluded: true, excludeReason: r.reason },
+            })
+          : prisma.paymentRunItem.update({
+              where: { id: item.id },
+              data: { amountMinor: paid, excludeReason: r.reason },
+            });
+      }),
+    );
+  }
+
   // One entry for the run, one bank line for the transfer that actually left
   // the account. Posting a separate entry per bill would credit the bank once
   // per bill while the statement shows a single debit for the total, and the
@@ -796,7 +982,7 @@ export async function releaseRun(opts: {
   // What makes that possible is settlement recorded on the line: each payable
   // line names the bill it discharges, so the ageing clears exactly as it
   // would have done paying each bill on its own.
-  const total = ins.reduce((a, i) => a + i.amountMinor, 0n);
+  const total = paying.reduce((a, p) => a + p.amountMinor, 0n);
 
   /*
    * The organisation's own approval rules, on the largest single movement of
@@ -835,7 +1021,7 @@ export async function releaseRun(opts: {
     orgId: run.orgId,
     entityId: run.entityId,
     entryDate,
-    memo: `Payment run ${run.reference} — ${ins.length} bill${ins.length === 1 ? "" : "s"}`,
+    memo: `Payment run ${run.reference} — ${paying.length} bill${paying.length === 1 ? "" : "s"}`,
     source: "payment",
     sourceType: "PAYMENT_RUN",
     sourceId: run.id,
@@ -844,11 +1030,11 @@ export async function releaseRun(opts: {
     actorId: opts.actorId,
     series: "PR",
     lines: [
-      ...ins.map((item) => ({
+      ...paying.map((p) => ({
         account: AP_CONTROL,
-        debit: item.amountMinor,
-        settlesId: item.billId as string,
-        memo: `Settles ${item.billNumber}`,
+        debit: p.amountMinor,
+        settlesId: p.item.billId as string,
+        memo: `Settles ${p.item.billNumber}`,
       })),
       { account: run.bankAccount, credit: total, memo: `Payment run ${run.reference}` },
     ],
@@ -860,7 +1046,7 @@ export async function releaseRun(opts: {
   });
 
   const v = await view(await loadRun(opts.orgId, opts.runId));
-  return { ...v, entryIds: [entry.id], alreadyReleased: false };
+  return { ...v, entryIds: [entry.id], alreadyReleased: false, restated };
 }
 
 /* ---------------------------------------------------------------- cancelling */

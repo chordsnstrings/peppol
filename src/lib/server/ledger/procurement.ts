@@ -72,6 +72,15 @@ const PURCHASE_VARIANCE = "5300";
 
 const MILLI = 1000n;
 
+/**
+ * How many order ids go into one `in (…)`.
+ *
+ * PostgreSQL's wire protocol carries a hard limit of 65,535 bind parameters,
+ * and past it a query fails rather than slows. The ledger export chunks at the
+ * same 5,000.
+ */
+const ID_CHUNK = 5_000;
+
 /* ------------------------------------------------------------------- helpers */
 
 export type OrderStatus = "draft" | "open" | "part_received" | "received" | "closed" | "cancelled";
@@ -1254,18 +1263,45 @@ export async function grniReport(opts: {
 }) {
   const asOf = opts.asOf ? asDate(opts.asOf) : new Date();
 
-  const orders = await prisma.purchaseOrder.findMany({
-    where: { orgId: opts.orgId, entityId: opts.entityId },
-    include: {
-      lines: { orderBy: { lineNo: "asc" } },
-      receipts: {
-        where: { receivedOn: { lte: asOf } },
-        include: { lines: true },
-        orderBy: [{ receivedOn: "asc" }, { createdAt: "asc" }],
-      },
-    },
-    orderBy: { number: "asc" },
+  /*
+   * Which orders can be holding anything at all.
+   *
+   * A line invoiced for at least as much as it has received has nothing left in
+   * 1250, and it cannot acquire any by being read at an earlier date either:
+   * the invoiced quantity is capped at what had arrived by that date, so both
+   * sides fall together and the difference stays nought. An order whose every
+   * line is in that state contributes exactly nought — and reading it, with its
+   * lines, its receipts and every one of their lines, to add nought to a total
+   * is the whole of what made this report load the entire purchasing history of
+   * the business onto a dashboard.
+   *
+   * The test is between two columns of the same row, which a Prisma filter
+   * cannot express, so the columns are read and compared here. Three whole-
+   * thousandth fields per order line is a flat read; the shape below, with its
+   * receipts and receipt lines, is not.
+   */
+  const lineStates = await prisma.purchaseOrderLine.findMany({
+    // A line nothing has been delivered against cannot have received more than
+    // it was invoiced for, so the whole of a draft, an order awaiting its first
+    // delivery and a cancelled one never leave the database.
+    where: { orgId: opts.orgId, order: { entityId: opts.entityId }, receivedMilli: { gt: 0 } },
+    select: { orderId: true, receivedMilli: true, invoicedMilli: true },
   });
+  const unbilled = [...new Set(
+    lineStates.filter((l) => l.receivedMilli > l.invoicedMilli).map((l) => l.orderId),
+  )];
+
+  /*
+   * Chunked, because `id: { in: [...] }` is one bind parameter per id and
+   * PostgreSQL's protocol refuses a statement past 65,535 of them.
+   */
+  const orders: Awaited<ReturnType<typeof readOrders>> = [];
+  for (let i = 0; i < unbilled.length; i += ID_CHUNK) {
+    orders.push(...(await readOrders(opts.orgId, unbilled.slice(i, i + ID_CHUNK), asOf)));
+  }
+  // Sorted here rather than by the database, because the rows arrived in pages
+  // and a page each sorted by itself is not a sorted report.
+  orders.sort((a, b) => a.number.localeCompare(b.number));
 
   const rows: GrniOrder[] = [];
   let total = 0n;
@@ -1339,8 +1375,11 @@ export async function grniReport(opts: {
     where: { orgId: opts.orgId, entityId: opts.entityId, code: GRNI },
     select: { id: true },
   });
-  const ledgerLines = account
-    ? await prisma.journalLine.findMany({
+  // Summed by the database. The balance of an account is one figure, and
+  // fetching a row for every posting ever made to 1250 in order to add them up
+  // here is a second unbounded read on the same page as the first.
+  const ledger = account
+    ? await prisma.journalLine.aggregate({
         where: {
           orgId: opts.orgId,
           accountId: account.id,
@@ -1350,10 +1389,10 @@ export async function grniReport(opts: {
           // by exactly the amount that was reversed.
           entry: { status: { in: ["posted", "reversed"] }, entryDate: { lte: asOf } },
         },
-        select: { functionalAmountMinor: true },
+        _sum: { functionalAmountMinor: true },
       })
-    : [];
-  const ledgerBalance = ledgerLines.reduce((a, l) => a + l.functionalAmountMinor, 0n);
+    : null;
+  const ledgerBalance = ledger?._sum.functionalAmountMinor ?? 0n;
 
   // 1250 is an asset: a receipt credits it, an invoice debits it back out, so
   // the balance sits on the credit side and the ledger holds it negative. What
@@ -1363,8 +1402,6 @@ export async function grniReport(opts: {
   return {
     asOf: asOf.toISOString().slice(0, 10),
     orders: rows.filter((r) => BigInt(r.outstandingMinor) !== 0n),
-    /** Every order that has ever had a receipt, including the settled ones. */
-    allOrders: rows,
     totals: { outstandingMinor: total.toString() },
     ledger: {
       account: GRNI,
@@ -1372,7 +1409,36 @@ export async function grniReport(opts: {
       differenceMinor: (ledgerOutstanding - total).toString(),
       agrees: ledgerOutstanding === total,
     },
+    /**
+     * What was read to produce this, said out loud.
+     *
+     * The report used to return every order the business had ever raised,
+     * settled ones included, and every settled one was a row of zeroes. They
+     * are not read at all now, which is why none of the figures moved — and a
+     * reader who goes looking for an order that has been fully invoiced is
+     * better told where it went than left wondering.
+     */
+    note:
+      `Read from ${unbilled.length} purchase order${unbilled.length === 1 ? "" : "s"} with something delivered and ` +
+      `not yet billed. An order whose deliveries have all been invoiced holds nothing in ${GRNI} and is not read. ` +
+      `Account ${GRNI}'s own balance is the whole of it either way, and that is what the two figures here compare.`,
   };
+}
+
+/** One page of orders, with the deliveries that had arrived by the report date. */
+function readOrders(orgId: string, ids: string[], asOf: Date) {
+  return prisma.purchaseOrder.findMany({
+    where: { orgId, id: { in: ids } },
+    include: {
+      lines: { orderBy: { lineNo: "asc" } },
+      receipts: {
+        where: { receivedOn: { lte: asOf } },
+        include: { lines: true },
+        orderBy: [{ receivedOn: "asc" }, { createdAt: "asc" }],
+      },
+    },
+    orderBy: { number: "asc" },
+  });
 }
 
 /* ---------------------------------------------------------------- reading --- */

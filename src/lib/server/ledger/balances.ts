@@ -13,6 +13,15 @@ import { prisma } from "@/lib/server/prisma";
  * ledger disagreeing and the customer being told to report a defect.
  *
  * Draft and void entries are correctly excluded: neither has ever been money.
+ *
+ * The arithmetic is done by the database rather than here. This used to read
+ * every line ever posted to the accounts and add them up in JavaScript, which
+ * is the same answer at a hundred thousand times the cost: ten reconciliations
+ * are built on this helper, and each of them wanted one figure per account and
+ * was handed the whole history of the account to make it. A grouped sum is not
+ * an approximation of that loop — it is the identical signed total, because
+ * `functionalAmountMinor` is already signed on the row and SUM over a set of
+ * signed integers is what the loop was doing one row at a time.
  */
 export async function ledgerBalances(opts: {
   orgId: string;
@@ -45,19 +54,25 @@ export async function ledgerBalances(opts: {
       ? { ...(opts.from ? { gte: day(opts.from) } : {}), ...(opts.asOf ? { lte: day(opts.asOf) } : {}) }
       : undefined;
 
-  const lines = await prisma.journalLine.findMany({
+  const sums = await prisma.journalLine.groupBy({
+    by: ["accountId"],
     where: {
       orgId: opts.orgId,
       accountId: { in: accounts.map((a) => a.id) },
       entry: { status: { in: ["posted", "reversed"] }, ...(entryDate ? { entryDate } : {}) },
     },
-    select: { accountId: true, functionalAmountMinor: true },
+    _sum: { functionalAmountMinor: true },
   });
 
+  // Every code asked for is answered, including the ones with no postings on
+  // them: a caller comparing a register to an account needs "the ledger holds
+  // nothing here" to be a figure rather than an absence. An account that has
+  // never been posted to produces no group at all, which is why the zeros are
+  // seeded rather than read.
   for (const code of opts.codes) out.set(code, 0n);
-  for (const l of lines) {
-    const code = byId.get(l.accountId);
-    if (code) out.set(code, (out.get(code) ?? 0n) + l.functionalAmountMinor);
+  for (const s of sums) {
+    const code = byId.get(s.accountId);
+    if (code) out.set(code, (out.get(code) ?? 0n) + (s._sum.functionalAmountMinor ?? 0n));
   }
   return out;
 }

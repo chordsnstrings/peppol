@@ -445,4 +445,134 @@ d("payroll", () => {
 
     await db.approvalRule.delete({ where: { id: rule.id } });
   });
+
+  it("posts a payslip that reaches draft after the month as an entry of its own", async () => {
+    await runPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    const run = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    expect(run.supplementary).toBe(false);
+
+    /*
+     * A payslip written after the month was posted. It is written straight to
+     * the table because that is what produces it: a run that read the register
+     * before the post and upserted after it, or a joiner keyed in late.
+     *
+     * The month used to be sealed by its first journal. The next call hit the
+     * early return, reported a gross that INCLUDED this person — the ledger had
+     * never received them — and `payPayroll` pays a posted payslip and nothing
+     * else, so they were never paid either. Salaries payable was understated by
+     * their net with no error anywhere, because the journal that did exist
+     * balanced and the trial balance tied on it.
+     */
+    const omar = await addEmployee({
+      orgId: ORG, entityId: ENT,
+      employee: { code: "E-004", name: "Omar Farouk", joinedOn: "2026-08-01", basicMinor: 900_000 },
+    });
+    await db.payslip.create({
+      data: {
+        orgId: ORG, entityId: ENT, employeeId: omar.id, period: "2026-08",
+        basicMinor: 900_000n, netMinor: 900_000n,
+      },
+    });
+
+    const late = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    expect(late.supplementary).toBe(true);
+    expect(late.alreadyPosted).toBe(false);
+    expect(late.entryId).not.toBe(run.entryId);
+    expect(late.payslips).toBe(1);
+    expect(late.grossMinor).toBe("900000");
+
+    const by = await linesOf(late.entryId);
+    expect(by["6000"]).toBe(900_000n);    // Dr salaries — the cost, charged at last
+    expect(by["2200"]).toBe(-900_000n);   // Cr salaries payable — and now owed
+
+    // The register and the ledger say the same thing about August, which is
+    // the only claim either of them is entitled to make.
+    const summary = await payrollSummary({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    expect(summary.register.salariesMinor).toBe(summary.ledger.salariesMinor);
+    expect(summary.ledger.salariesAgree).toBe(true);
+
+    // Nothing outstanding now: the answer is the month's first entry again, and
+    // the figures are the ones that reached the ledger.
+    const settled = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    expect(settled.alreadyPosted).toBe(true);
+    expect(settled.supplementary).toBe(false);
+    expect(settled.entryId).toBe(run.entryId);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYROLL_RUN", sourceId: "2026-08" } })).toBe(2);
+
+    // And the money reaches them, which is what all of it was for.
+    const august = await db.payslip.findMany({ where: { orgId: ORG, period: "2026-08" } });
+    const paid = await payPayroll({ orgId: ORG, entityId: ENT, period: "2026-08", paidOn: "2026-09-03" });
+    expect(BigInt(paid.paidMinor)).toBe(august.reduce((a, p) => a + p.netMinor, 0n));
+    const afterPayment = await db.payslip.findMany({ where: { orgId: ORG, period: "2026-08" } });
+    expect(afterPayment.every((p) => p.status === "paid")).toBe(true);
+  });
+
+  it("transfers a payslip posted after the month was paid, rather than leaving it owed", async () => {
+    // The other half of the same seal: August has been paid, and one more
+    // payslip reaches the ledger afterwards. The payment key used to be the
+    // month, so the next run found it, said "already paid" and left the net
+    // sitting on 2200 for a person nobody had transferred anything to.
+    const nadia = await addEmployee({
+      orgId: ORG, entityId: ENT,
+      employee: { code: "E-005", name: "Nadia Aziz", joinedOn: "2026-08-10", basicMinor: 400_000 },
+    });
+    await db.payslip.create({
+      data: {
+        orgId: ORG, entityId: ENT, employeeId: nadia.id, period: "2026-08",
+        basicMinor: 400_000n, netMinor: 400_000n,
+      },
+    });
+    await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+
+    const owed = await accountTotal("2200");
+    const paid = await payPayroll({ orgId: ORG, entityId: ENT, period: "2026-08", paidOn: "2026-09-06" });
+    expect(paid.supplementary).toBe(true);
+    expect(paid.alreadyPaid).toBe(false);
+    expect(paid.paidMinor).toBe("400000");
+
+    const by = await linesOf(paid.entryId);
+    expect(by["2200"]).toBe(400_000n);   // Dr — no longer owed
+    expect(by["1010"]).toBe(-400_000n);  // Cr bank — the transfer that was missing
+    // A liability is held negative, so discharging it moves the balance up.
+    expect(await accountTotal("2200")).toBe(owed + 400_000n);
+
+    // Asked again, with nothing outstanding, it reports the transfer rather
+    // than making a second one.
+    const again = await payPayroll({ orgId: ORG, entityId: ENT, period: "2026-08" });
+    expect(again.alreadyPaid).toBe(true);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYROLL_PAYMENT", sourceId: "2026-08" } })).toBe(2);
+  });
+
+  it("repairs a run cut off between the journal and the payslips, rather than charging the month twice", async () => {
+    await runPayroll({ orgId: ORG, entityId: ENT, period: "2026-09" });
+    const run = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-09" });
+
+    // The journal committed and the payslips were never marked — the state a
+    // process dying between the two leaves behind. Read as late payslips it
+    // would charge September twice; read as the interrupted run it is, the link
+    // is repaired and nothing further is posted.
+    await db.payslip.updateMany({
+      where: { orgId: ORG, period: "2026-09" },
+      data: { status: "draft", entryId: null },
+    });
+
+    const repaired = await postPayroll({ orgId: ORG, entityId: ENT, period: "2026-09" });
+    expect(repaired.alreadyPosted).toBe(true);
+    expect(repaired.supplementary).toBe(false);
+    expect(repaired.entryId).toBe(run.entryId);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYROLL_RUN", sourceId: "2026-09" } })).toBe(1);
+    const slips = await db.payslip.findMany({ where: { orgId: ORG, period: "2026-09" } });
+    expect(slips.every((p) => p.status === "posted" && p.entryId === run.entryId)).toBe(true);
+
+    // And where the drafts no longer come to what that entry charged, it says
+    // so rather than guessing which of them the journal already covers.
+    await db.payslip.updateMany({
+      where: { orgId: ORG, period: "2026-09" },
+      data: { status: "draft", entryId: null },
+    });
+    const one = await db.payslip.findFirstOrThrow({ where: { orgId: ORG, period: "2026-09" } });
+    await db.payslip.update({ where: { id: one.id }, data: { basicMinor: one.basicMinor + 100_000n } });
+    await expect(postPayroll({ orgId: ORG, entityId: ENT, period: "2026-09" }))
+      .rejects.toThrow(/interrupted between the journal and the payslips/i);
+  });
 });

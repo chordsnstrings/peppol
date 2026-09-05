@@ -3,7 +3,8 @@ import { PrismaClient } from "@prisma/client";
 import { post, reverse } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import {
-  importStatement, suggestMatches, confirmMatch, unmatch, postFromBankLine, reconcile, fingerprintOf,
+  importStatement, suggestMatches, confirmMatch, unmatch, postFromBankLine, reconcile,
+  reconciliationSummary, fingerprintOf,
 } from "@/lib/server/ledger/bank";
 
 const db = new PrismaClient();
@@ -124,6 +125,27 @@ d("bank reconciliation", () => {
     const amb = s.find((x) => x.amountMinor === "77000")!;
     expect(amb.confidence).toBeLessThanOrEqual(45);
     expect(amb.why.join(" ")).toMatch(/fit equally well/);
+  });
+
+  it("still reaches a posting at the far edge of the window, and no further", async () => {
+    /*
+     * The candidate postings are now asked for by date rather than read whole
+     * and sifted, because reading every posting an account has ever carried is
+     * what a five-year-old bank account makes expensive. The band has to be the
+     * same rule the scoring already applied — three windows either side — or a
+     * suggestion that used to be made silently stops being made.
+     */
+    await P("2026-06-16", [{ account: "1010", debit: 66_000 }, { account: "4000", credit: 66_000 }], "Fifteen days early");
+    await P("2026-05-01", [{ account: "1010", debit: 55_000 }, { account: "4000", credit: 55_000 }], "Two months early");
+    await imp([
+      { postedOn: "2026-07-01", description: "Edge of the window", amountMinor: 66_000 },
+      { postedOn: "2026-07-01", description: "Far outside it", amountMinor: 55_000 },
+    ]);
+
+    const s = await suggestMatches({ orgId: ORG, entityId: ENT, accountCode: "1010" });
+    const edge = s.find((x) => x.amountMinor === "66000")!;
+    expect(edge.dayGap).toBe(15);
+    expect(s.find((x) => x.amountMinor === "55000")).toBeUndefined();
   });
 
   it("matches, and refuses to match the same posting twice", async () => {
@@ -291,5 +313,156 @@ d("bank reconciliation", () => {
     // success.
     await expect(postFromBankLine({ orgId: ORG, entityId: ENT, bankLineId: b!.id, contraAccount: "6900" }))
       .rejects.toThrow(new RegExp(`already booked as ${first.reference}`));
+  });
+
+  /* ------------------------------------------------- reading a long history */
+
+  /*
+   * The reconciliation used to read every statement line and every posting the
+   * account had ever carried, and return all of them — matched pairs included.
+   * At two thousand transactions a month that is a hundred and twenty thousand
+   * rows of each after five years, on a page nobody scrolls past the first
+   * screen of, and it was called in a loop by the month-end checklist and the
+   * attention list once per bank account. The figures are now asked of the
+   * database and the lists are pages; these say the figures did not move.
+   */
+  describe("on an account with more history than anyone will read", () => {
+    const asOf = new Date("2027-03-31");
+    const DAYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const day = (month: string, n: number) => `2027-${month}-${String(n).padStart(2, "0")}`;
+    /** The postings the bank has never seen, in the order they were made. */
+    const inFlight = new Map<number, string>();
+    /** The postings a statement line agreed with, keyed the same way. */
+    const cleared = new Map<number, string>();
+
+    beforeAll(async () => {
+      await wipe();
+      await openFiscalYear({ orgId: ORG, entityId: ENT, label: "2027", startsOn: "2027-01-01" });
+      await openBooks({ orgId: ORG, entityId: ENT });
+
+      // Twelve receipts the bank has seen and agreed, and twelve it has not.
+      for (const n of DAYS) {
+        const e = await P(day("02", n), [{ account: "1010", debit: 1_000 * n }, { account: "4000", credit: 1_000 * n }], `Cleared ${n}`);
+        const j = await db.journalLine.findFirst({ where: { entryId: e.id, account: { code: "1010" } } });
+        cleared.set(n, j!.id);
+      }
+      for (const n of DAYS) {
+        const e = await P(day("03", n), [{ account: "1010", debit: 100 * n }, { account: "4000", credit: 100 * n }], `In flight ${n}`);
+        const j = await db.journalLine.findFirst({ where: { entryId: e.id, account: { code: "1010" } } });
+        inFlight.set(n, j!.id);
+      }
+    });
+
+    // The statement is emptied before every test in this file, so the bank's
+    // side of the history is laid down again here rather than once above.
+    beforeEach(async () => {
+      await imp(
+        DAYS.map((n) => ({ postedOn: day("02", n), description: `Cleared ${n}`, amountMinor: 1_000 * n })),
+        "cleared",
+      );
+      await imp(
+        DAYS.map((n) => ({ postedOn: day("03", n), description: `Unexplained ${n}`, amountMinor: -10 * n })),
+        "unexplained",
+      );
+      const lines = await db.bankStatementLine.findMany({ where: { orgId: ORG, importBatch: "cleared" } });
+      for (const b of lines) {
+        const n = Number(b.description.replace("Cleared ", ""));
+        await confirmMatch({ orgId: ORG, bankLineId: b.id, journalLineId: cleared.get(n)! });
+      }
+    });
+
+    it("gives the same figures whether it lists four items or all of them", async () => {
+      const whole = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 1_000 });
+      const paged = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 4 });
+
+      for (const k of [
+        "ledgerBalanceMinor", "statementBalanceMinor", "outstandingInLedgerMinor",
+        "unrecordedInBankMinor", "reconciledBalanceMinor", "differenceMinor",
+        "unmatchedBankCount", "unmatchedLedgerCount", "matchedCount",
+      ] as const) {
+        expect(paged[k]).toEqual(whole[k]);
+      }
+      expect(paged.reconciled).toBe(whole.reconciled);
+
+      // And the counts are the whole account, not the length of the page.
+      expect(paged.unmatchedBank).toHaveLength(4);
+      expect(paged.unmatchedLedger).toHaveLength(4);
+      expect(paged.matched).toHaveLength(4);
+      expect(paged.unmatchedBankCount).toBe(12);
+      expect(paged.unmatchedLedgerCount).toBe(12);
+      expect(paged.matchedCount).toBe(12);
+    });
+
+    it("says what the lists leave out rather than quietly returning less", async () => {
+      const paged = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 4 });
+      expect(paged.itemLimit).toBe(4);
+      expect(paged.itemsNote).toMatch(/oldest 4 of each/);
+      expect(paged.itemsNote).toMatch(/4 of 12 unexplained statement lines/);
+      expect(paged.itemsNote).toMatch(/4 of 12 postings the bank has not seen/);
+
+      // Oldest first, so the item worth chasing is the one on the page.
+      expect(paged.unmatchedBank[0].description).toBe("Unexplained 1");
+      expect(paged.unmatchedLedger[0].memo).toBe("In flight 1");
+
+      const whole = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 1_000 });
+      expect(whole.itemsNote).toMatch(/Every item behind this reconciliation is listed/);
+    });
+
+    it("answers the summary without a single row of itemisation", async () => {
+      const summary = await reconciliationSummary({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf });
+      const whole = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 1_000 });
+
+      expect(summary.ledgerBalanceMinor).toBe(whole.ledgerBalanceMinor);
+      expect(summary.outstandingInLedgerMinor).toBe(whole.outstandingInLedgerMinor);
+      expect(summary.unrecordedInBankMinor).toBe(whole.unrecordedInBankMinor);
+      expect(summary.reconciledBalanceMinor).toBe(whole.reconciledBalanceMinor);
+      expect(summary.unmatchedBankCount).toBe(12);
+      expect(summary.unmatchedLedgerCount).toBe(12);
+      expect(summary.matchedCount).toBe(12);
+      // The oldest unexplained line, so a caller measuring how long something
+      // has been sitting there does not have to pull the list down to find it.
+      expect(summary.oldestUnmatchedBankOn).toBe("2027-03-01");
+
+      // The point of the split: no rows come back at all.
+      expect(Object.keys(summary)).not.toContain("unmatchedBank");
+      expect(Object.keys(summary)).not.toContain("matched");
+    });
+
+    it("still leaves a posting outstanding when the bank line that matched it falls after the date", async () => {
+      // A statement line dated in April against a posting dated in March. Read
+      // to 31 March the match has not happened yet, so the posting is money the
+      // bank has not seen — which is what the row-by-row version said, and what
+      // the aggregate has to keep saying.
+      const j = inFlight.get(1)!;
+      await imp([{ postedOn: "2027-04-02", description: "Late clearing", amountMinor: 100 }], "april");
+      const late = await db.bankStatementLine.findFirst({ where: { orgId: ORG, description: "Late clearing" } });
+      await confirmMatch({ orgId: ORG, bankLineId: late!.id, journalLineId: j });
+
+      const march = await reconcile({ orgId: ORG, entityId: ENT, accountCode: "1010", asOf, limit: 1_000 });
+      expect(march.unmatchedLedger.map((l) => l.id)).toContain(j);
+      expect(march.unmatchedLedgerCount).toBe(12);
+
+      const april = await reconcile({
+        orgId: ORG, entityId: ENT, accountCode: "1010", asOf: new Date("2027-04-30"), limit: 1_000,
+      });
+      expect(april.unmatchedLedger.map((l) => l.id)).not.toContain(j);
+      expect(april.unmatchedLedgerCount).toBe(11);
+    });
+
+    it("does not suggest a posting another statement line has already claimed", async () => {
+      // The exclusion used to be written as `id: { notIn: taken }`, one bind
+      // parameter per matched posting, which PostgreSQL refuses past 65,535 of
+      // them. It is sifted in memory now, and it has to exclude exactly the
+      // same postings.
+      const claims = await db.bankStatementLine.findMany({
+        where: { orgId: ORG, matchedLineId: { not: null } },
+        select: { matchedLineId: true },
+      });
+      const taken = new Set(claims.map((c) => c.matchedLineId as string));
+      expect(taken.size).toBeGreaterThan(0);
+
+      const suggestions = await suggestMatches({ orgId: ORG, entityId: ENT, accountCode: "1010" });
+      for (const s of suggestions) expect(taken.has(s.journalLineId)).toBe(false);
+    });
   });
 });

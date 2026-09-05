@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
-import { attentionList, type Severity as AttentionSeverity } from "./attention";
+import { attentionList, sharedReads, type SharedReads, type Severity as AttentionSeverity } from "./attention";
 import { monthEnd } from "./month-end";
-import { vatReturn } from "./vat";
 import { expiringStock, belowReorderLevel } from "./inventory";
 import { dueSoon } from "./cheques";
 import { deliveredNotInvoiced } from "./deliveries";
@@ -11,9 +10,7 @@ import { dueSubscriptions } from "./subscriptions";
 import { ledgerAnalytics } from "./analytics";
 import { testCovenants } from "./borrowings";
 import { adjustmentDue } from "./vat-schemes";
-import { contingentLiabilities } from "./trade-finance";
 import { dunningPlan } from "./credit-control";
-import { lastCompletedPeriod } from "./tax-periods";
 
 /**
  * The notification centre — one place for everything the books are trying to
@@ -292,6 +289,17 @@ interface Ctx {
   entityId: string;
   asOf: Date;
   currency: string;
+  /**
+   * The reads the sources make in common, made once for the whole page.
+   *
+   * Three of the twelve sources below are the attention list, the month-end
+   * checklist and the VAT return, and between them they used to compute the
+   * same quarter's return twice and look the same tax period up three times —
+   * because each of them correctly called the module that owns the fact and
+   * none of them could see the others doing it. See the note on `SharedReads`
+   * in `attention.ts` for what is shared and what deliberately is not.
+   */
+  reads: SharedReads;
 }
 
 interface Source {
@@ -357,14 +365,15 @@ const attentionSource: Source = {
   key: "attention",
   label: "Needs attention",
   async run(ctx) {
-    const list = await attentionList({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    const list = await attentionList({
+      orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf, reads: ctx.reads,
+    });
     // Read from the registration, so the deadline attached here and the period
     // attention.ts decided about are the same period. Both used to derive a
     // calendar quarter independently, which agreed only for taxpayers the FTA
-    // happened to put on the calendar's own stagger.
-    const period = await lastCompletedPeriod({
-      orgId: ctx.orgId, entityId: ctx.entityId, regime: "VAT", asOf: ctx.asOf,
-    });
+    // happened to put on the calendar's own stagger — and it is now literally
+    // the same read, so they cannot even disagree by a race.
+    const period = await ctx.reads.vatPeriod(ctx.asOf);
     const out: Raw[] = [];
 
     for (const f of list.findings) {
@@ -382,8 +391,11 @@ const attentionSource: Source = {
         href: f.href,
         itemCount: f.count,
         amountMinor: f.amountMinor === undefined ? undefined : BigInt(f.amountMinor),
-        dueOn: vat ? vat.dueOn : null,
-        statutory: Boolean(vat),
+        // The check's own deadline where it has one, and the tax period's for
+        // the return — which is the one row on that list whose date this module
+        // knows better than the check does, because it reads the registration.
+        dueOn: vat ? vat.dueOn : f.dueOn ?? null,
+        statutory: Boolean(vat) || f.statutory === true,
       });
     }
 
@@ -448,7 +460,9 @@ const monthEndSource: Source = {
     });
     if (!period) return [];
 
-    const state = await monthEnd({ orgId: ctx.orgId, entityId: ctx.entityId, period: period.label });
+    const state = await monthEnd({
+      orgId: ctx.orgId, entityId: ctx.entityId, period: period.label, reads: ctx.reads,
+    });
     const out: Raw[] = [];
 
     for (const c of state.checks) {
@@ -494,11 +508,9 @@ const vatSource: Source = {
     // The same period the attention list reads, from the same registration, so
     // the row this source raises and the deadline that one carries cannot drift
     // apart — and neither of them is a calendar quarter unless the FTA said so.
-    const { label, from, to } = await lastCompletedPeriod({
-      orgId: ctx.orgId, entityId: ctx.entityId, regime: "VAT", asOf: ctx.asOf,
-    });
+    const { label, from, to } = await ctx.reads.vatPeriod(ctx.asOf);
 
-    const ret = await vatReturn({ orgId: ctx.orgId, entityId: ctx.entityId, from, to });
+    const ret = await ctx.reads.vatReturn(from, to);
     if (ret.warnings.length === 0) return [];
 
     // One row for the set, not one per string. The wording of each warning is
@@ -945,7 +957,7 @@ const tradeFinanceSource: Source = {
   key: "trade-finance",
   label: "Guarantees and letters of credit",
   async run(ctx) {
-    const c = await contingentLiabilities({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.asOf });
+    const c = await ctx.reads.facilities(ctx.asOf);
     const out: Raw[] = [];
 
     const soon = c.expiringWithin90Days;
@@ -1356,7 +1368,12 @@ function assemble(ctx: Ctx, bare: Bare[], sources: SourceRun[], acks: AckRow[]):
   return { entityId: ctx.entityId, asOf: isoDay(ctx.asOf), currency: ctx.currency, notices, sources, digest };
 }
 
-async function context(opts: { orgId: string; entityId: string; asOf?: Date | string }): Promise<Ctx> {
+async function context(opts: {
+  orgId: string;
+  entityId: string;
+  asOf?: Date | string;
+  reads?: SharedReads;
+}): Promise<Ctx> {
   const asOf = asDate(opts.asOf, "The date the notifications are read as at");
   // The book is read for its currency alone, and its absence is not a finding:
   // an entity with no ledger open has nothing to say, and every source that
@@ -1368,7 +1385,13 @@ async function context(opts: { orgId: string; entityId: string; asOf?: Date | st
     })
     .then((b) => b?.functionalCurrency ?? "AED")
     .catch(() => "AED");
-  return { orgId: opts.orgId, entityId: opts.entityId, asOf, currency };
+  return {
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    asOf,
+    currency,
+    reads: opts.reads ?? sharedReads({ orgId: opts.orgId, entityId: opts.entityId }),
+  };
 }
 
 function readAcks(ctx: Ctx): Promise<AckRow[]> {
@@ -1394,10 +1417,35 @@ export async function notificationCentre(opts: {
   orgId: string;
   entityId: string;
   asOf?: Date | string;
+  /**
+   * The reads to make the twelve sources go through. Left out, this page makes
+   * its own set and they are shared across the sources and nothing else, which
+   * is what every caller in the product wants. It is a parameter so that what
+   * the sources actually ask for can be observed from outside.
+   */
+  reads?: SharedReads;
 }): Promise<NotificationCentre> {
-  const ctx = await context(opts);
+  return (await read(await context(opts))).centre;
+}
+
+/**
+ * The queue, with the survey behind it kept in hand.
+ *
+ * Acknowledging and snoozing both have to read the queue twice: once to find
+ * the row being acted on and refuse an act that does not apply to it, and once
+ * afterwards to hand back the queue with the act in it. Taken literally that is
+ * the whole twelve-source fan-out run twice for one click — every ageing, every
+ * register, the audit sweep, all of it — when the two reads cannot differ by
+ * anything except the acknowledgement just written. Nothing else has changed in
+ * between: the act writes one row of one table and touches no ledger.
+ *
+ * So the survey is made once and only the acks are read again over it.
+ * `assemble` is a pure function of the two, which is what makes this safe to
+ * say rather than merely fast.
+ */
+async function read(ctx: Ctx): Promise<{ centre: NotificationCentre; bare: Bare[]; sources: SourceRun[] }> {
   const [{ bare, sources }, acks] = await Promise.all([survey(ctx), readAcks(ctx)]);
-  return assemble(ctx, bare, sources, acks);
+  return { centre: assemble(ctx, bare, sources, acks), bare, sources };
 }
 
 /** Every act on one notification, oldest first. Why a row went quiet, and who. */
@@ -1524,7 +1572,7 @@ async function record(ctx: Ctx, notice: Notice, act: Act, action: "acknowledged"
  */
 export async function acknowledge(act: Act): Promise<NotificationCentre> {
   const ctx = await context(act);
-  const centre = await notificationCentre(act);
+  const { centre, bare, sources } = await read(ctx);
   const notice = locate(centre, act.key);
 
   if (!notice.mayAcknowledge) {
@@ -1532,7 +1580,7 @@ export async function acknowledge(act: Act): Promise<NotificationCentre> {
   }
 
   await record(ctx, notice, act, "acknowledged", null);
-  return notificationCentre(act);
+  return assemble(ctx, bare, sources, await readAcks(ctx));
 }
 
 /**
@@ -1558,7 +1606,7 @@ export async function snooze(act: Act & { until: Date | string }): Promise<Notif
   const ctx = await context(act);
   const until = asDate(act.until, "The day to bring it back");
   const untilDay = day(isoDay(until));
-  const centre = await notificationCentre(act);
+  const { centre, bare, sources } = await read(ctx);
   const notice = locate(centre, act.key);
 
   if (untilDay <= ctx.asOf) {
@@ -1586,7 +1634,7 @@ export async function snooze(act: Act & { until: Date | string }): Promise<Notif
   }
 
   await record(ctx, notice, act, "snoozed", untilDay);
-  return notificationCentre(act);
+  return assemble(ctx, bare, sources, await readAcks(ctx));
 }
 
 /**
@@ -1620,5 +1668,5 @@ export async function bringBack(act: Act): Promise<NotificationCentre> {
     }),
   ]);
 
-  return notificationCentre(act);
+  return (await read(ctx)).centre;
 }

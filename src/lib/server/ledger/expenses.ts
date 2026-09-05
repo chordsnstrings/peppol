@@ -839,37 +839,36 @@ function summarise(claim: {
   };
 }
 
+export interface ClaimSummary {
+  /** Submitted, nobody has looked at it yet. */
+  awaitingApprovalMinor: bigint;
+  awaitingApprovalCount: number;
+  /** Approved or posted, and the employee still has not been paid. */
+  approvedUnpaidMinor: bigint;
+  approvedUnpaidCount: number;
+}
+
 /**
- * The claim list, and the two figures anyone actually opens this screen for:
- * what is sitting on somebody's desk waiting to be approved, and what has been
- * approved and still has not been paid. The second is a real liability to staff
- * whether or not it has reached 2200 yet, so it counts approved and posted
- * claims alike — a claim approved on Thursday and posted on Monday is owed to
- * the employee on both days.
+ * The two figures anyone opens the expenses screen for: what is sitting on
+ * somebody's desk waiting to be approved, and what has been approved and still
+ * has not been paid. The second is a real liability to staff whether or not it
+ * has reached 2200 yet, so it counts approved and posted claims alike — a claim
+ * approved on Thursday and posted on Monday is owed to the employee on both
+ * days.
  *
- * Both totals are computed over every claim in the entity, never over whatever
- * the caller happened to filter to; a filtered total is how "what we owe staff"
+ * It reads the open claims only, and of those only the three columns the
+ * arithmetic needs. That is the whole reason it exists apart from `claimList`:
+ * a caller that wants these two numbers and nothing else — the attention queue
+ * asks for them on every page load — was loading every expense claim the
+ * business has ever filed, with every line on every one of them, and then
+ * throwing the list away. The cost of that grows with the age of the business
+ * while the answer stays two numbers.
+ *
+ * Both totals are over every open claim in the entity, never over whatever a
+ * caller happened to filter to; a filtered total is how "what we owe staff"
  * quietly becomes "what we owe staff on this page".
  */
-export async function claimList(opts: {
-  orgId: string;
-  entityId: string;
-  status?: ClaimStatus | ClaimStatus[];
-  employeeCode?: string;
-}) {
-  const status = opts.status === undefined ? undefined : Array.isArray(opts.status) ? opts.status : [opts.status];
-
-  const claims = await prisma.expenseClaim.findMany({
-    where: {
-      orgId: opts.orgId,
-      entityId: opts.entityId,
-      ...(status ? { status: { in: status } } : {}),
-      ...(opts.employeeCode ? { employeeCode: opts.employeeCode } : {}),
-    },
-    include: { lines: true },
-    orderBy: [{ claimedOn: "desc" }, { reference: "desc" }],
-  });
-
+export async function claimSummary(opts: { orgId: string; entityId: string }): Promise<ClaimSummary> {
   const outstanding = await prisma.expenseClaim.findMany({
     where: { orgId: opts.orgId, entityId: opts.entityId, status: { in: ["submitted", "approved", "posted"] } },
     select: { status: true, lines: { select: { netMinor: true, vatMinor: true, vatRecoverable: true } } },
@@ -884,16 +883,44 @@ export async function claimList(opts: {
   }
 
   return {
-    claims: claims.map(summarise),
-    summary: {
-      /** Submitted, nobody has looked at it yet. */
-      awaitingApprovalMinor: awaitingApproval,
-      awaitingApprovalCount: awaitingCount,
-      /** Approved or posted, and the employee still has not been paid. */
-      approvedUnpaidMinor: approvedUnpaid,
-      approvedUnpaidCount: approvedCount,
-    },
+    awaitingApprovalMinor: awaitingApproval,
+    awaitingApprovalCount: awaitingCount,
+    approvedUnpaidMinor: approvedUnpaid,
+    approvedUnpaidCount: approvedCount,
   };
+}
+
+/**
+ * The claim list — the rows a screen shows — with the same two figures beside
+ * them, so the screen that genuinely wants the list still makes one call.
+ *
+ * The summary comes from `claimSummary` rather than from the rows above it, and
+ * that is not an optimisation: the rows are whatever the caller filtered to,
+ * and totalling those would answer a different question under the same label.
+ */
+export async function claimList(opts: {
+  orgId: string;
+  entityId: string;
+  status?: ClaimStatus | ClaimStatus[];
+  employeeCode?: string;
+}) {
+  const status = opts.status === undefined ? undefined : Array.isArray(opts.status) ? opts.status : [opts.status];
+
+  const [claims, summary] = await Promise.all([
+    prisma.expenseClaim.findMany({
+      where: {
+        orgId: opts.orgId,
+        entityId: opts.entityId,
+        ...(status ? { status: { in: status } } : {}),
+        ...(opts.employeeCode ? { employeeCode: opts.employeeCode } : {}),
+      },
+      include: { lines: true },
+      orderBy: [{ claimedOn: "desc" }, { reference: "desc" }],
+    }),
+    claimSummary({ orgId: opts.orgId, entityId: opts.entityId }),
+  ]);
+
+  return { claims: claims.map(summarise), summary };
 }
 
 /** One claim, its lines, and the entries it produced. */

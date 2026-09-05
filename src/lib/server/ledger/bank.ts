@@ -148,20 +148,44 @@ export async function suggestMatches(opts: {
   if (bankLines.length === 0) return [];
 
   const already = await prisma.bankStatementLine.findMany({
-    where: { orgId: opts.orgId, accountId: account.id, matchedLineId: { not: null } },
+    where: { orgId: opts.orgId, entityId: opts.entityId, accountId: account.id, matchedLineId: { not: null } },
     select: { matchedLineId: true },
   });
-  const taken = already.map((a) => a.matchedLineId as string);
+  /*
+   * The postings a bank line has already claimed.
+   *
+   * They used to be excluded in the query, as `id: { notIn: taken }`, which is
+   * one bind parameter per id — and PostgreSQL refuses a statement past 65,535
+   * of them. An account with four years of matched history would not slow
+   * down, it would fail outright, and it would fail on the account with the
+   * most to reconcile. The set is carried here and the rows sifted below,
+   * which excludes exactly the same postings.
+   */
+  const taken = new Set(already.map((a) => a.matchedLineId as string));
 
-  const journalLines = await prisma.journalLine.findMany({
-    where: {
-      orgId: opts.orgId,
-      accountId: account.id,
-      entry: { status: "posted" },
-      ...(taken.length ? { id: { notIn: taken } } : {}),
-    },
-    include: { entry: { select: { series: true, number: true, entryDate: true, memo: true } } },
-  });
+  /*
+   * Only the postings near enough in time to be one of these events.
+   *
+   * A candidate more than `windowDays * 3` from the statement line is thrown
+   * away below whatever it scores, so reading it was never going to change an
+   * answer — and reading every posting an account has carried for five years to
+   * throw almost all of them away is what the exclusion above used to hide.
+   * The band is the same rule, asked of the database instead.
+   */
+  const reach = windowDays * 3 * 86_400_000;
+  const earliest = new Date(bankLines[0].postedOn.getTime() - reach);
+  const latest = new Date(bankLines[bankLines.length - 1].postedOn.getTime() + reach);
+
+  const journalLines = (
+    await prisma.journalLine.findMany({
+      where: {
+        orgId: opts.orgId,
+        accountId: account.id,
+        entry: { status: "posted", entryDate: { gte: earliest, lte: latest } },
+      },
+      include: { entry: { select: { series: true, number: true, entryDate: true, memo: true } } },
+    })
+  ).filter((j) => !taken.has(j.id));
 
   const suggestions: Suggestion[] = [];
   const claimed = new Set<string>();
@@ -368,7 +392,23 @@ export async function postFromBankLine(opts: {
   return { entryId: entry.id, reference: `${entry.series}-${entry.number}` };
 }
 
-export interface Reconciliation {
+/**
+ * The figures a reconciliation comes to, without any of the rows behind them.
+ *
+ * This exists because the figures and the itemisation have different sizes. A
+ * caller that only wants to know whether an account is clean — the month-end
+ * checklist, the attention list, anything that asks the same question of every
+ * bank account in a loop — was paying for every statement line and every
+ * posting the account has ever carried, to read three totals off the end of
+ * them. Five years at two thousand transactions a month is a hundred and
+ * twenty thousand rows, per account, per call.
+ *
+ * Every figure here is exact and covers the whole life of the account up to
+ * `asOf`. Nothing in it is sampled, capped or windowed: it is computed by the
+ * database rather than by counting rows in memory, which is why it can afford
+ * to be complete.
+ */
+export interface ReconciliationSummary {
   accountCode: string;
   accountName: string;
   asOf: string;
@@ -385,6 +425,21 @@ export interface Reconciliation {
   reconciledBalanceMinor: string;
   reconciled: boolean;
   differenceMinor: string;
+  /** Every unexplained statement line up to `asOf`, not only the ones listed. */
+  unmatchedBankCount: number;
+  /** Every posting the bank has not seen up to `asOf`, not only the ones listed. */
+  unmatchedLedgerCount: number;
+  matchedCount: number;
+  /**
+   * The oldest statement line still unexplained, or null where there are none.
+   *
+   * It is here so that a caller measuring how long something has been sitting
+   * unexplained does not have to pull the list down to find its first row.
+   */
+  oldestUnmatchedBankOn: string | null;
+}
+
+export interface Reconciliation extends ReconciliationSummary {
   unmatchedBank: { id: string; postedOn: string; description: string; amountMinor: string }[];
   unmatchedLedger: { id: string; reference: string; entryDate: string; memo: string | null; amountMinor: string }[];
   /**
@@ -397,6 +452,18 @@ export interface Reconciliation {
    * cheque, with nothing on screen to unpick.
    */
   matched: MatchedPair[];
+  /** The earliest date itemised. Null where the lists were not bounded below. */
+  itemsSince: string | null;
+  /** How many rows of each list were asked for. */
+  itemLimit: number;
+  /**
+   * What the three lists leave out, in a sentence.
+   *
+   * The figures above are complete and the lists are not, and a page showing
+   * both would otherwise invite the reader to add up the rows and wonder why
+   * they do not reach the total.
+   */
+  itemsNote: string;
 }
 
 export interface MatchedPair {
@@ -425,68 +492,238 @@ export interface MatchedPair {
 }
 
 /**
- * The reconciliation statement: our balance, the bank's, and every item that
- * explains the gap. A reconciliation that only says "out by 412.50" has not
- * done its job — the items are the answer.
+ * How many ids go into one `in (…)`.
+ *
+ * PostgreSQL's wire protocol carries a hard limit of 65,535 bind parameters,
+ * and past it a query does not slow down — it fails, on exactly the account
+ * with the most history behind it. The ledger export chunks at the same 5,000.
  */
-export async function reconcile(opts: {
+const ID_CHUNK = 5_000;
+
+/** Rows of each list a reconciliation itemises before it says how many more there are. */
+const DEFAULT_ITEM_LIMIT = 200;
+
+/**
+ * How many postings the search for unmatched ones will read before it stops.
+ *
+ * A match is recorded on the bank line, not on the journal line, so "postings
+ * the bank has not seen" cannot be a `where` clause: the rows have to be read
+ * and sifted. Reading them oldest first means the ones worth looking at — the
+ * cheque written in March that still has not cleared — are the ones found
+ * first, and the ceiling is what stops a five-year-old account reading a
+ * hundred thousand rows to show two hundred. The count beside the list is
+ * exact whether or not the search reached the end.
+ */
+const LEDGER_SCAN_CEILING = 20_000;
+
+/**
+ * The account, the figures, and the ids of the postings already claimed.
+ *
+ * Both entry points below need all three, and computing them once is what lets
+ * `reconciliationSummary` be genuinely cheaper than `reconcile` rather than the
+ * same work with the rows thrown away at the end.
+ */
+async function reconciliationFigures(opts: {
   orgId: string;
   entityId: string;
   accountCode: string;
   asOf?: Date;
-}): Promise<Reconciliation> {
+}) {
   const asOf = opts.asOf ?? new Date();
   const account = await prisma.account.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, code: opts.accountCode },
   });
   if (!account) throw new LedgerError(`Account ${opts.accountCode} does not exist.`);
 
-  const journalLines = await prisma.journalLine.findMany({
-    where: {
-      orgId: opts.orgId,
-      accountId: account.id,
-      // Both halves of a reversed pair, or the ledger balance here would be
-      // out by the reversal while the bank statement is not.
-      entry: { status: { in: ["posted", "reversed"] }, entryDate: { lte: asOf } },
-    },
-    include: { entry: { select: { series: true, number: true, entryDate: true, memo: true } } },
-    orderBy: { entry: { entryDate: "asc" } },
-  });
+  const ledgerWhere = {
+    orgId: opts.orgId,
+    accountId: account.id,
+    // Both halves of a reversed pair, or the ledger balance here would be
+    // out by the reversal while the bank statement is not.
+    entry: { status: { in: ["posted", "reversed"] }, entryDate: { lte: asOf } },
+  };
+  /*
+   * `entityId` is named even though `accountId` already implies it — the
+   * account was looked up within this entity, so no line on it can belong to
+   * another. It is here because the only index on a statement line leads with
+   * the entity, and a filter that skips it can use nothing past the org.
+   */
+  const bankWhere = {
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    accountId: account.id,
+    postedOn: { lte: asOf },
+  };
 
-  const bankLines = await prisma.bankStatementLine.findMany({
-    where: { orgId: opts.orgId, accountId: account.id, postedOn: { lte: asOf } },
-    orderBy: [{ postedOn: "asc" }, { createdAt: "asc" }],
-  });
-
-  const ledgerBalance = journalLines.reduce((a, l) => a + l.txnAmountMinor, 0n);
-  const matchedIds = new Set(bankLines.filter((b) => b.matchedLineId).map((b) => b.matchedLineId as string));
-
-  const unmatchedLedger = journalLines.filter((l) => !matchedIds.has(l.id));
-  const unmatchedBank = bankLines.filter((b) => b.status === "unmatched");
-
-  const outstanding = unmatchedLedger.reduce((a, l) => a + l.txnAmountMinor, 0n);
-  const unrecorded = unmatchedBank.reduce((a, b) => a + b.amountMinor, 0n);
-
-  // The bank's own last reported running balance, when the file supplied one.
-  const withBalance = [...bankLines].reverse().find((b) => b.balanceMinor !== null);
-  const statementBalance = withBalance?.balanceMinor ?? null;
-
-  const reconciled = ledgerBalance - outstanding + unrecorded;
+  const [ledger, unrecorded, withBalance, oldestUnmatched, claims] = await Promise.all([
+    prisma.journalLine.aggregate({ where: ledgerWhere, _sum: { txnAmountMinor: true }, _count: { _all: true } }),
+    prisma.bankStatementLine.aggregate({
+      where: { ...bankWhere, status: "unmatched" },
+      _sum: { amountMinor: true },
+      _count: { _all: true },
+    }),
+    // The bank's own last reported running balance, when the file supplied one.
+    prisma.bankStatementLine.findFirst({
+      where: { ...bankWhere, balanceMinor: { not: null } },
+      orderBy: [{ postedOn: "desc" }, { createdAt: "desc" }],
+      select: { balanceMinor: true },
+    }),
+    prisma.bankStatementLine.findFirst({
+      where: { ...bankWhere, status: "unmatched" },
+      orderBy: [{ postedOn: "asc" }, { createdAt: "asc" }],
+      select: { postedOn: true },
+    }),
+    prisma.bankStatementLine.findMany({
+      where: { ...bankWhere, matchedLineId: { not: null } },
+      select: { matchedLineId: true },
+    }),
+  ]);
 
   /*
-   * The matched pairs, read separately from the lines above.
+   * What the matched postings come to.
    *
-   * A match is not bounded by `asOf` the way the balance is: a bank line dated
-   * inside the period can perfectly well be matched to a posting dated after
-   * it, and dropping that pair would show the line as matched to nothing.
+   * There is no relation from a journal line back to the statement line that
+   * claims it — the match lives on the bank line — so this cannot be a join:
+   * the ids have to be carried across in an `in`, and one of those is a bind
+   * parameter each. Hence the chunking; a busy account passes 65,535 matched
+   * lines inside four years, and the whole page would fail rather than slow.
+   *
+   * Only postings inside the balance can come out of it, so the same date and
+   * status filter is applied to the chunk. A bank line dated inside the period
+   * can be matched to a posting dated after it, and that pair leaves the
+   * posting outside `asOf` and the outstanding figure rightly untouched.
    */
-  const matchedBank = bankLines.filter((b) => b.matchedLineId);
-  const matchedLines = matchedBank.length
-    ? await prisma.journalLine.findMany({
-        where: { orgId: opts.orgId, id: { in: matchedBank.map((b) => b.matchedLineId as string) } },
-        include: { entry: { select: { id: true, series: true, number: true, entryDate: true, memo: true, status: true } } },
-      })
-    : [];
+  const matchedIds = claims.map((c) => c.matchedLineId as string);
+  let matchedSumMinor = 0n;
+  let matchedInLedger = 0;
+  for (let i = 0; i < matchedIds.length; i += ID_CHUNK) {
+    const chunk = await prisma.journalLine.aggregate({
+      where: { ...ledgerWhere, id: { in: matchedIds.slice(i, i + ID_CHUNK) } },
+      _sum: { txnAmountMinor: true },
+      _count: { _all: true },
+    });
+    matchedSumMinor += chunk._sum.txnAmountMinor ?? 0n;
+    matchedInLedger += chunk._count._all;
+  }
+
+  const ledgerBalance = ledger._sum.txnAmountMinor ?? 0n;
+  const outstanding = ledgerBalance - matchedSumMinor;
+  const unrecordedMinor = unrecorded._sum.amountMinor ?? 0n;
+  const statementBalance = withBalance?.balanceMinor ?? null;
+  const reconciled = ledgerBalance - outstanding + unrecordedMinor;
+
+  const summary: ReconciliationSummary = {
+    accountCode: account.code,
+    accountName: account.name,
+    asOf: asOf.toISOString().slice(0, 10),
+    currency: account.currency ?? "AED",
+    ledgerBalanceMinor: ledgerBalance.toString(),
+    statementBalanceMinor: statementBalance?.toString() ?? null,
+    outstandingInLedgerMinor: outstanding.toString(),
+    unrecordedInBankMinor: unrecordedMinor.toString(),
+    reconciledBalanceMinor: reconciled.toString(),
+    reconciled: statementBalance !== null && reconciled === statementBalance,
+    differenceMinor: statementBalance === null ? "0" : (reconciled - statementBalance).toString(),
+    unmatchedBankCount: unrecorded._count._all,
+    unmatchedLedgerCount: ledger._count._all - matchedInLedger,
+    matchedCount: matchedIds.length,
+    oldestUnmatchedBankOn: oldestUnmatched?.postedOn.toISOString().slice(0, 10) ?? null,
+  };
+
+  return { account, asOf, summary, claimed: new Set(matchedIds) };
+}
+
+/**
+ * Whether an account reconciles, and by how much, without a single row of
+ * itemisation.
+ *
+ * Use this wherever the answer is a number rather than a working paper — a
+ * checklist asking every bank account the same question, a notification
+ * deciding whether there is anything to say. `reconcile` below adds the items
+ * to it, and the items are what cost.
+ */
+export async function reconciliationSummary(opts: {
+  orgId: string;
+  entityId: string;
+  accountCode: string;
+  asOf?: Date;
+}): Promise<ReconciliationSummary> {
+  return (await reconciliationFigures(opts)).summary;
+}
+
+/**
+ * The reconciliation statement: our balance, the bank's, and every item that
+ * explains the gap. A reconciliation that only says "out by 412.50" has not
+ * done its job — the items are the answer.
+ *
+ * The figures are the whole life of the account; the three lists are the
+ * oldest `limit` of each, because an account that has been running for years
+ * holds more matched pairs than anybody will ever read and the oldest item is
+ * always the one worth looking at. `itemsNote` says what was left off, so that
+ * nobody adds up the rows on the page and wonders why they do not reach the
+ * total above them.
+ */
+export async function reconcile(opts: {
+  orgId: string;
+  entityId: string;
+  accountCode: string;
+  asOf?: Date;
+  /** Itemise nothing earlier than this. The figures are unaffected by it. */
+  since?: Date;
+  /** Rows of each list. Defaults to 200. */
+  limit?: number;
+}): Promise<Reconciliation> {
+  const { account, asOf, summary, claimed } = await reconciliationFigures(opts);
+  const limit = opts.limit ?? DEFAULT_ITEM_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new LedgerError(`A reconciliation lists a whole number of rows, so ${opts.limit} is not one.`);
+  }
+  const since = opts.since ?? null;
+  const bankWindow = since ? { gte: since, lte: asOf } : { lte: asOf };
+  const bankWhere = { orgId: opts.orgId, entityId: opts.entityId, accountId: account.id, postedOn: bankWindow };
+
+  const [unmatchedBank, matchedBank, scanned] = await Promise.all([
+    prisma.bankStatementLine.findMany({
+      where: { ...bankWhere, status: "unmatched" },
+      orderBy: [{ postedOn: "asc" }, { createdAt: "asc" }],
+      take: limit,
+    }),
+    /*
+     * The matched pairs, read separately from the balances above.
+     *
+     * A match is not bounded by `asOf` the way the balance is: a bank line
+     * dated inside the period can perfectly well be matched to a posting dated
+     * after it, and dropping that pair would show the line as matched to
+     * nothing.
+     */
+    prisma.bankStatementLine.findMany({
+      where: { ...bankWhere, matchedLineId: { not: null } },
+      orderBy: [{ postedOn: "asc" }, { createdAt: "asc" }],
+      take: limit,
+    }),
+    prisma.journalLine.findMany({
+      where: {
+        orgId: opts.orgId,
+        accountId: account.id,
+        entry: {
+          status: { in: ["posted", "reversed"] },
+          entryDate: since ? { gte: since, lte: asOf } : { lte: asOf },
+        },
+      },
+      include: { entry: { select: { series: true, number: true, entryDate: true, memo: true } } },
+      orderBy: { entry: { entryDate: "asc" } },
+      take: LEDGER_SCAN_CEILING,
+    }),
+  ]);
+
+  const unmatchedLedger = scanned.filter((l) => !claimed.has(l.id)).slice(0, limit);
+  const scanCut = scanned.length === LEDGER_SCAN_CEILING;
+
+  const matchedLineIds = matchedBank.map((b) => b.matchedLineId as string);
+  const matchedLines: Awaited<ReturnType<typeof readMatchedLines>> = [];
+  for (let i = 0; i < matchedLineIds.length; i += ID_CHUNK) {
+    matchedLines.push(...(await readMatchedLines(opts.orgId, matchedLineIds.slice(i, i + ID_CHUNK))));
+  }
   const lineById = new Map(matchedLines.map((l) => [l.id, l]));
 
   const reversedEntryIds = matchedLines.filter((l) => l.entry.status === "reversed").map((l) => l.entry.id);
@@ -515,18 +752,15 @@ export async function reconcile(opts: {
     };
   });
 
+  const whole =
+    !scanCut &&
+    since === null &&
+    unmatchedBank.length === summary.unmatchedBankCount &&
+    unmatchedLedger.length === summary.unmatchedLedgerCount &&
+    matched.length === summary.matchedCount;
+
   return {
-    accountCode: account.code,
-    accountName: account.name,
-    asOf: asOf.toISOString().slice(0, 10),
-    currency: account.currency ?? "AED",
-    ledgerBalanceMinor: ledgerBalance.toString(),
-    statementBalanceMinor: statementBalance?.toString() ?? null,
-    outstandingInLedgerMinor: outstanding.toString(),
-    unrecordedInBankMinor: unrecorded.toString(),
-    reconciledBalanceMinor: reconciled.toString(),
-    reconciled: statementBalance !== null && reconciled === statementBalance,
-    differenceMinor: statementBalance === null ? "0" : (reconciled - statementBalance).toString(),
+    ...summary,
     unmatchedBank: unmatchedBank.map((b) => ({
       id: b.id,
       postedOn: b.postedOn.toISOString().slice(0, 10),
@@ -541,5 +775,31 @@ export async function reconcile(opts: {
       amountMinor: l.txnAmountMinor.toString(),
     })),
     matched,
+    itemsSince: since ? since.toISOString().slice(0, 10) : null,
+    itemLimit: limit,
+    itemsNote: whole
+      ? `Every item behind this reconciliation is listed: ${count(summary.unmatchedBankCount, "unexplained statement line")}, ` +
+        `${count(summary.unmatchedLedgerCount, "posting the bank has not seen", "postings the bank has not seen")} and ` +
+        `${count(summary.matchedCount, "matched pair")}.`
+      : `The figures are the whole account to ${summary.asOf}; the lists are the oldest ${limit} of each. ` +
+        `Showing ${unmatchedBank.length} of ${summary.unmatchedBankCount} unexplained statement lines, ` +
+        `${unmatchedLedger.length} of ${summary.unmatchedLedgerCount} postings the bank has not seen, and ` +
+        `${matched.length} of ${summary.matchedCount} matched pairs.` +
+        (since ? ` Nothing before ${since.toISOString().slice(0, 10)} is itemised.` : "") +
+        (scanCut
+          ? ` The search for unmatched postings stopped after ${LEDGER_SCAN_CEILING.toLocaleString("en")} of them, ` +
+            `so an older one may be missing from the list — it is still inside the figures.`
+          : ""),
   };
 }
+
+/** The postings behind a page of matched bank lines, with what reversed them. */
+function readMatchedLines(orgId: string, ids: string[]) {
+  return prisma.journalLine.findMany({
+    where: { orgId, id: { in: ids } },
+    include: { entry: { select: { id: true, series: true, number: true, entryDate: true, memo: true, status: true } } },
+  });
+}
+
+/** "3 matched pairs", "1 matched pair" — the plural a sentence needs. */
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;

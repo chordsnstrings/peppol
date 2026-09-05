@@ -545,6 +545,38 @@ d("post-dated cheques", () => {
     expect(await balanceOf("1060", ORG)).not.toBe(1_000n);
   });
 
+  it("lets one piece of paper be cleared or bounced, and not both", async () => {
+    // Both transitions are legal from "held", both used to be checked against a
+    // row read a moment earlier, and both wrote `where: { id }`. So both
+    // passed, both posted under their own key, and one cheque was recorded as
+    // paid by the bank AND put back on the customer: 1060 was credited twice
+    // for 105,000 of paper and ended at a credit balance, which can only mean
+    // the register holds less than nothing.
+    const inv = doc("OUTBOUND", { id: "inv-race", number: "INV-RACE" }, [line(100_000, 5_000)]);
+    await postInvoice({ orgId: ORG, invoice: inv });
+    const r = await recordCheque({
+      ...scope, direction: "RECEIVED", number: "900001", counterparty: "Al Marri Trading LLC",
+      writtenOn: "2026-03-20", dueOn: "2026-08-10", amountMinor: 105_000, settlesId: inv.id,
+    });
+    const before = await balanceOf("1060", ORG);
+
+    const both = await Promise.allSettled([
+      clearCheque({ ...scope, chequeId: r.chequeId, on: "2026-08-11" }),
+      bounceCheque({ ...scope, chequeId: r.chequeId, on: "2026-08-11", reason: "Insufficient funds" }),
+    ]);
+    expect(both.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    expect(both.filter((x) => x.status === "rejected")).toHaveLength(1);
+
+    // One of them happened, and the register says which.
+    const now = await db.cheque.findUniqueOrThrow({ where: { id: r.chequeId } });
+    expect(["cleared", "bounced"]).toContain(now.status);
+
+    // And the paper left cheques in hand exactly once, whichever way it went.
+    // A clearing that lost the race is reversed rather than left standing, so
+    // the account moves by one cheque and no more.
+    expect(await balanceOf("1060", ORG)).toBe(before - 105_000n);
+  });
+
   it("keeps the trial balance tied after everything above", async () => {
     for (const label of ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"]) {
       const tb = await trialBalance({ orgId: ORG, entityId: ENT, periodLabel: label });

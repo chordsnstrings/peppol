@@ -71,6 +71,31 @@ export function EntryGrid() {
   const [error, setError] = React.useState<string | null>(null);
   const [pasteNote, setPasteNote] = React.useState<string | null>(null);
 
+  /*
+   * The token that makes posting this form retry-safe.
+   *
+   * Minted once, when the form is opened, and held in a ref so a re-render
+   * cannot replace it. That is the whole point: a token generated at submit
+   * time is a different token on the retry, which is no token at all, and a
+   * manual journal is the one posting path in the product that needs no second
+   * user to go wrong — a double-submitted form or a browser retry after a slow
+   * post makes two identical balanced entries with two gapless numbers, and
+   * nothing afterwards can tell that apart from two journals somebody meant.
+   *
+   * It survives an error and a correction: the entry the user is trying to post
+   * is the same entry whether or not the first attempt reached the server, so a
+   * second press answers with the one that got through rather than posting it
+   * again. It is minted afresh only when the screen is, which is what `router`
+   * does on the way to the register after a success.
+   */
+  const idempotencyKey = React.useRef<string>(
+    globalThis.crypto?.randomUUID?.().replace(/-/g, "") ??
+      // A browser old enough to lack randomUUID still gets a token; it is not a
+      // secret, only a value that has to be the same on the retry and different
+      // between forms.
+      `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`,
+  );
+
   const accountsQ = useLedgerQuery<{ accounts: Account[] }>(
     entityId ? `/api/ledger/accounts?entityId=${entityId}&postable=1` : null,
   );
@@ -276,12 +301,16 @@ export function EntryGrid() {
     setPosting(true);
     setError(null);
     try {
-      const res = await api<{ entry: { id: string; series: string; number: number } }>("/api/ledger/journals", {
+      const res = await api<{
+        entry: { id: string; series: string; number: number };
+        alreadyPosted: boolean;
+      }>("/api/ledger/journals", {
         method: "POST",
         body: JSON.stringify({
           entityId,
           entryDate,
           memo: memo.trim() || undefined,
+          idempotencyKey: idempotencyKey.current,
           // Minor units go over the wire as strings, not numbers — a
           // consolidated group balance can exceed what a JSON number holds.
           lines: filled.map((p) => ({
@@ -298,7 +327,15 @@ export function EntryGrid() {
           })),
         }),
       });
-      router.push(`/accounting/journals?posted=${res.entry.series}-${res.entry.number}`);
+      /* A retry that finds its own entry already posted is a success, not a
+       * collision: the user pressed the button twice and got one journal,
+       * which is what they wanted both times. The register is told which case
+       * it was so it can say so rather than claiming to have posted an entry
+       * that was already there. */
+      router.push(
+        `/accounting/journals?posted=${res.entry.series}-${res.entry.number}` +
+          (res.alreadyPosted ? "&already=1" : ""),
+      );
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "The entry could not be posted.");
       setPosting(false);

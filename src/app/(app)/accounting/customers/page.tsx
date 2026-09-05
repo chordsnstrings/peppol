@@ -4,6 +4,8 @@ import * as React from "react";
 import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
+import { PartyEditForm, type PartyChange } from "@/components/ledger/party-edit";
+import { parseAmount } from "@/lib/ledger/format";
 
 /**
  * Customers and credit control.
@@ -91,12 +93,20 @@ export default function CustomersPage() {
   const [asOf, setAsOf] = React.useState(() => new Date().toISOString().slice(0, 10));
   const [adding, setAdding] = React.useState(false);
   const [open, setOpen] = React.useState<string | null>(null);
+  const [editing, setEditing] = React.useState<string | null>(null);
+  /* Archived parties are off the working list by default and reachable, which
+   * is the whole point of archiving rather than deleting: the record stays,
+   * every document that names it still resolves, and somebody who archived the
+   * wrong account can find it again. Until now nothing could show one. */
+  const [showArchived, setShowArchived] = React.useState(false);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
 
   const list = useLedgerQuery<{ asOf: string; counterparties: Row[] }>(
-    entityId ? `/api/ledger/counterparties?entityId=${entityId}&asOf=${asOf}` : null,
+    entityId
+      ? `/api/ledger/counterparties?entityId=${entityId}&asOf=${asOf}${showArchived ? "&includeArchived=1" : ""}`
+      : null,
   );
   const dunning = useLedgerQuery<{ asOf: string; rows: DunningRow[]; totalOverdueMinor: string; note: string }>(
     entityId ? `/api/ledger/counterparties?entityId=${entityId}&view=dunning&asOf=${asOf}` : null,
@@ -111,6 +121,7 @@ export default function CustomersPage() {
       });
       setMsg(describe);
       setAdding(false);
+      setEditing(null);
       list.reload();
       dunning.reload();
     } catch (e) {
@@ -148,10 +159,19 @@ export default function CustomersPage() {
                 onChange={(e) => setAsOf(e.target.value)}
               />
             </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(e) => setShowArchived(e.target.checked)}
+                data-testid="show-archived"
+              />
+              <span className="text-[0.8125rem]">Show archived</span>
+            </label>
             <button
               type="button"
               className="sw-btn sw-btn-primary"
-              onClick={() => { setAdding((a) => !a); setOpen(null); }}
+              onClick={() => { setAdding((a) => !a); setOpen(null); setEditing(null); }}
             >
               {adding ? "Cancel" : "Add customer"}
             </button>
@@ -202,6 +222,7 @@ export default function CustomersPage() {
                       <td className="max-w-0 truncate">
                         {r.name}
                         <span className="ms-1 inline-flex flex-wrap gap-1">
+                          {r.status !== "active" && <span className="sw-chip sw-chip-warn">archived</span>}
                           {r.onHold && <span className="sw-chip sw-chip-bad">on hold</span>}
                           {r.overLimit && <span className="sw-chip sw-chip-bad">over limit</span>}
                           {r.overdue && <span className="sw-chip sw-chip-warn">{r.oldestOverdueDays} d late</span>}
@@ -230,30 +251,62 @@ export default function CustomersPage() {
                             type="button"
                             className="sw-btn sw-btn-sm"
                             aria-expanded={open === r.code}
-                            onClick={() => { setOpen(open === r.code ? null : r.code); setAdding(false); }}
+                            onClick={() => { setOpen(open === r.code ? null : r.code); setAdding(false); setEditing(null); }}
                           >
                             {open === r.code ? "Close" : "Statement"}
                           </button>
-                          <HoldButton
-                            row={r}
-                            busy={busy === r.code}
-                            onHold={(reason) =>
-                              act(r.code, { action: "hold", code: r.code, reason }, `${r.name} is on hold.`)
-                            }
-                            onRelease={(reason) =>
-                              act(r.code, { action: "release", code: r.code, reason }, `The hold on ${r.name} is released.`)
-                            }
-                          />
                           <button
                             type="button"
                             className="sw-btn sw-btn-sm"
-                            aria-disabled={r.outstandingMinor !== "0" || undefined}
-                            disabled={r.outstandingMinor !== "0" || busy === r.code}
-                            title={r.outstandingMinor === "0" ? undefined : "They still have a balance on the sales ledger"}
-                            onClick={() => act(r.code, { action: "archive", code: r.code }, `Archived ${r.name}.`)}
+                            aria-expanded={editing === r.code}
+                            onClick={() => { setEditing(editing === r.code ? null : r.code); setAdding(false); setOpen(null); }}
+                            data-testid={`edit-${r.code}`}
                           >
-                            Archive
+                            {editing === r.code ? "Close" : "Edit"}
                           </button>
+                          {/* An archived party is not held, released or archived
+                              again. Restoring is the one thing left to do with
+                              it, besides correcting what it says. */}
+                          {r.status === "active" ? (
+                            <>
+                              <HoldButton
+                                row={r}
+                                busy={busy === r.code}
+                                onHold={(reason) =>
+                                  act(r.code, { action: "hold", code: r.code, reason }, `${r.name} is on hold.`)
+                                }
+                                onRelease={(reason) =>
+                                  act(r.code, { action: "release", code: r.code, reason }, `The hold on ${r.name} is released.`)
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="sw-btn sw-btn-sm"
+                                aria-disabled={r.outstandingMinor !== "0" || undefined}
+                                disabled={r.outstandingMinor !== "0" || busy === r.code}
+                                title={r.outstandingMinor === "0" ? undefined : "They still have a balance on the sales ledger"}
+                                onClick={() =>
+                                  act(
+                                    r.code,
+                                    { action: "archive", code: r.code },
+                                    `Archived ${r.name}. Every document that names them still resolves, and "Show archived" brings them back into view.`,
+                                  )
+                                }
+                              >
+                                Archive
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              className="sw-btn sw-btn-sm"
+                              disabled={busy === r.code}
+                              data-testid={`restore-${r.code}`}
+                              onClick={() => act(r.code, { action: "restore", code: r.code }, `${r.name} is active again.`)}
+                            >
+                              Restore
+                            </button>
+                          )}
                         </span>
                       </td>
                     </tr>
@@ -264,6 +317,19 @@ export default function CustomersPage() {
                       <tr>
                         <td colSpan={8} style={{ background: "var(--sw-surface-2)", padding: "0.75rem" }}>
                           <StatementPanel entityId={entityId} code={r.code} to={asOf} />
+                        </td>
+                      </tr>
+                    )}
+                    {editing === r.code && (
+                      <tr>
+                        <td colSpan={8} style={{ background: "var(--sw-surface-2)", padding: "0.75rem" }}>
+                          <PartyEditForm
+                            party={r}
+                            busy={busy === r.code}
+                            onSave={(change: PartyChange) =>
+                              act(r.code, { action: "update", code: r.code, change }, `Updated ${r.code} ${r.name}.`)
+                            }
+                          />
                         </td>
                       </tr>
                     )}
@@ -288,7 +354,9 @@ export default function CustomersPage() {
             Every figure here is the customer&rsquo;s share of account 1100 Trade receivables, netted document by
             document exactly as the{" "}
             <Link href="/accounting/receivables" className="sw-link">ageing report</Link> nets it, so a statement
-            and the ageing can never tell a customer two different things.
+            and the ageing can never tell a customer two different things. Archiving takes a settled account off
+            this list and deletes nothing — every invoice, receipt and statement that names them is untouched, and
+            Show archived brings them back into view to be corrected or restored.
           </p>
         </Panel>
       )}
@@ -501,13 +569,22 @@ function AddForm({ busy, onAdd }: { busy: boolean; onAdd: (c: Record<string, unk
 
   const terms = Number(f.terms);
   const trn = f.trn.trim();
+  /* Through the ledger's own parser, not through a double multiplied by a
+   * hundred. A credit limit is a minor-unit figure like any other, and a float
+   * on a write path is wrong twice over: it rounds at the half-fils boundary
+   * the way binary floating point happens to fall, and a hard-coded hundred is
+   * out by a factor of ten for a three-decimal currency. The books here are
+   * opened in dirhams, which is why nothing ever showed. */
+  const limitMinor = f.limitMode === "set" ? parseAmount(f.limit.trim(), "AED") : null;
   const blocker =
     !f.code.trim() ? "Give the customer a code." :
     !/^[A-Za-z0-9._-]+$/.test(f.code.trim()) ? "A code is letters, digits, dots, dashes or underscores." :
     !f.name.trim() ? "Give the customer a name — it is what appears on their statement." :
     !Number.isInteger(terms) || terms < 0 || terms > 365 ? "Payment terms are a whole number of days, 0 to 365." :
     trn.length > 0 && !/^\d{15}$/.test(trn) ? "A UAE TRN is fifteen digits." :
-    f.limitMode === "set" && !/^\d+(\.\d{1,2})?$/.test(f.limit.trim()) ? "Give the limit as an amount, e.g. 5000." :
+    f.limitMode === "set" && (f.limit.trim() === "" || limitMinor === null)
+      ? "Give the limit as an amount, e.g. 5000." :
+    limitMinor !== null && limitMinor < 0n ? "A credit limit cannot be negative." :
     null;
 
   return (
@@ -566,7 +643,7 @@ function AddForm({ busy, onAdd }: { busy: boolean; onAdd: (c: Record<string, unk
               paymentTerms: terms,
               // null and a number are different answers, and the form keeps them
               // apart rather than sending 0 for "left blank".
-              creditLimitMinor: f.limitMode === "set" ? String(Math.round(Number(f.limit) * 100)) : null,
+              creditLimitMinor: limitMinor === null ? null : limitMinor.toString(),
             })
           }
         >

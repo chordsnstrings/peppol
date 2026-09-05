@@ -1,9 +1,11 @@
-import { halfUp } from "./money";
+import { convertMinorAtRate, divHalfUp, halfUp } from "./money";
 import type {
   AnyTaxProfile,
   AnyTaxProfileCode,
   CategoryBreakdown,
   DocType,
+  FxInfo,
+  Invoice,
   InvoiceLine,
   InvoiceTotals,
   PurchaseTaxProfileCode,
@@ -161,6 +163,52 @@ export const ALL_TAX_PROFILES: Record<AnyTaxProfileCode, AnyTaxProfile> = {
  */
 const STATES_NO_TAX_ON_THE_DOCUMENT = new Set<AnyTaxProfileCode>(["MARGIN_SCHEME", "IMPORT_GOODS"]);
 
+/**
+ * The words a reverse-charge document has to carry.
+ *
+ * Article 59(1)(l) of the Executive Regulation is explicit that where the
+ * recipient is the one who must account for the tax, the invoice states so AND
+ * cites the provision that puts it on them — Article 48 of Federal Decree-Law
+ * 8/2017. A bare "VAT 0%" row satisfies neither half: it reads as a relief, and
+ * a buyer who takes it at face value never self-accounts for the tax.
+ *
+ * Shared with the UBL serializer on purpose. The printed document and the
+ * machine-readable one carry the same sentence because they are the same
+ * statement, and BR-AE-10 requires the exchanged copy to carry it too.
+ */
+export const REVERSE_CHARGE_STATEMENT =
+  "Reverse charge: the recipient is required to account for the VAT due on this supply " +
+  "(Article 48, Federal Decree-Law 8/2017).";
+
+/**
+ * The words a profit-margin-scheme document has to carry.
+ *
+ * Article 43 of the Executive Regulation requires the invoice to say the scheme
+ * was applied and forbids it from stating a tax amount. The totals already
+ * withhold the amount (`computeTotals` keeps the margin tax off `vatMinor`);
+ * this is the other half of the same rule, and without it the document shows a
+ * used-car sale at nil tax with nothing to explain why.
+ */
+export const MARGIN_SCHEME_STATEMENT =
+  "Profit margin scheme applied — the tax on the margin is accounted for by the supplier and no tax " +
+  "amount is stated (Executive Regulation Article 43).";
+
+/**
+ * The statements a document must carry, read off the categories it produced.
+ *
+ * Derived from the totals rather than from the lines so the printed document
+ * and the exchanged one cannot disagree about which statements apply: the
+ * breakdown is what both of them render.
+ */
+export function documentTaxStatements(totals: InvoiceTotals): string[] {
+  const carries = (code: AnyTaxProfileCode) =>
+    totals.perCategory.some((c) => c.profileCode === code);
+  const out: string[] = [];
+  if (carries("REVERSE_CHARGE")) out.push(REVERSE_CHARGE_STATEMENT);
+  if (carries("MARGIN_SCHEME")) out.push(MARGIN_SCHEME_STATEMENT);
+  return out;
+}
+
 /** Credit-note reason codes (plain-language; UNTDID-aligned) `[VERIFY-LATEST]`. */
 export const CREDIT_REASONS: { code: string; label: string }[] = [
   { code: "PRICE", label: "Price/quantity correction" },
@@ -305,23 +353,111 @@ export function marginSchemeLineTax(
 }
 
 /**
- * Divide rounding halves away from zero, in BigInt so the multiplication
- * happens before the division and no money passes through a float. Rounding
- * once at the end is what keeps 5/105 of a margin within half a fils, and it
- * makes a refund and a sale of the same size round to the same figure.
+ * The subtotal a line's treatment belongs to.
+ *
+ * Margin-scheme lines get their own subtotal. Their profile carries category S
+ * at 5%, exactly the key standard-rated lines use, so sharing it would fold the
+ * selling price of used goods into the standard-rated subtotal and charge 5% on
+ * the whole of it. An import of goods is the same trap one category over: it
+ * carries AE at 5% and the reverse charge carries AE at 0, so keying on the
+ * pair alone would put 5% of the customs value on the face of a document that
+ * must show none.
+ *
+ * Exported because the UBL serializer has to hang each line's exemption reason
+ * on the subtotal that line fed (BR-E-10, BR-Z-10, BR-AE-10 all read the
+ * breakdown, not the lines), and a second grouping written there would
+ * eventually group them differently from this one.
  */
-function divHalfUp(value: bigint, divisor: bigint): bigint {
-  const neg = value < 0n;
-  const abs = neg ? -value : value;
-  const out = (abs * 2n + divisor) / (divisor * 2n);
-  return neg ? -out : out;
+export function categorySubtotalKey(code: AnyTaxProfileCode): string {
+  const profile = getProfile(code);
+  return STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code)
+    ? `NO_TAX_STATED:${profile.code}`
+    : `${profile.categoryCode}:${profile.ratePercent}`;
+}
+
+export interface AedTaxTotals {
+  /** The document's tax total in fils, at the rate the document states. */
+  vatMinorAED: number;
+  /** The payable total in fils, at the same rate. */
+  payableMinorAED: number;
+  /** The rate itself, exactly as the document states it. */
+  rateToAED: string;
+  rateDate: string;
+  source: FxInfo["source"];
+}
+
+/**
+ * The AED figures a foreign-currency document must state, at the rate it prints.
+ *
+ * Article 69 of Federal Decree-Law 8/2017 requires the tax on a document issued
+ * in another currency to be converted to AED, and Article 59(1)(k) of the
+ * Executive Regulation requires the converted amount and the rate used to
+ * appear ON the document. Printing the rate with no figure after it — which is
+ * what this product did — satisfies neither: the reader is handed the
+ * multiplication rather than the answer, and the FTA is owed the answer.
+ *
+ * One derivation, used three times: `computeTotals` records it on the totals,
+ * the rendered invoice prints it, and the UBL serializer puts it in the second
+ * `cac:TaxTotal` that BR-53 requires. They cannot disagree because there is
+ * nowhere else for any of them to get it.
+ *
+ * Undefined — rather than a nought or an unconverted figure — when the document
+ * is already in AED, when no rate has been captured, or when the captured rate
+ * is not a usable decimal. A document that cannot state the conversion must not
+ * pretend to have made one.
+ */
+function aedFrom(
+  vatMinor: number,
+  payableMinor: number,
+  currency: string,
+  fx?: FxInfo,
+): AedTaxTotals | undefined {
+  if (!fx || currency === "AED") return undefined;
+  const vatMinorAED = convertMinorAtRate(vatMinor, fx.rateToAED);
+  const payableMinorAED = convertMinorAtRate(payableMinor, fx.rateToAED);
+  if (vatMinorAED === undefined || payableMinorAED === undefined) return undefined;
+  return {
+    vatMinorAED,
+    payableMinorAED,
+    rateToAED: fx.rateToAED,
+    rateDate: fx.rateDate,
+    source: fx.source,
+  };
+}
+
+/**
+ * The same conversion, for a document that already has its totals.
+ *
+ * The renderers take this path because a persisted invoice may predate the
+ * fields on `InvoiceTotals`, or have been totalled by a caller that had no rate
+ * to hand — and a stored figure that was computed at a rate the document has
+ * since been re-quoted at would be worse than no figure at all. Deriving it
+ * from the document's own `fx` every time it is rendered is what makes the
+ * printed copy and the exchanged copy the same number.
+ */
+export function aedTaxTotals(
+  doc: Pick<Invoice, "currency" | "fx"> & { totals: InvoiceTotals },
+): AedTaxTotals | undefined {
+  return aedFrom(doc.totals.vatMinor, doc.totals.payableMinor, doc.currency, doc.fx);
+}
+
+/**
+ * What the document is denominated in, and the rate it converts to AED at.
+ *
+ * Optional because most callers total an AED document, where there is nothing
+ * to convert. A caller holding a foreign-currency document passes both, and the
+ * AED figures Article 59(1)(k) requires are recorded on the totals it gets back.
+ */
+export interface TotalsOptions {
+  currency?: string;
+  fx?: FxInfo;
 }
 
 /**
  * Compute document totals from lines using EN 16931 style: VAT rounded per
  * category subtotal, not per line (§7.5).
  */
-export function computeTotals(lines: TaxableLine[]): InvoiceTotals {
+export function computeTotals(lines: TaxableLine[], opts: TotalsOptions = {}): InvoiceTotals {
   const byCategory = new Map<string, CategoryBreakdown>();
   let taxExclusiveMinor = 0;
   let marginTaxMinor = 0;
@@ -347,16 +483,7 @@ export function computeTotals(lines: TaxableLine[]): InvoiceTotals {
       if (!margin.costKnown) marginLinesWithoutCostCount += 1;
     }
 
-    // Margin-scheme lines get their own subtotal. Their profile carries
-    // category S at 5%, exactly the key standard-rated lines use, so sharing it
-    // would fold the selling price of used goods into the standard-rated
-    // subtotal and charge 5% on the whole of it. An import of goods is the same
-    // trap one category over: it carries AE at 5% and the reverse charge
-    // carries AE at 0, so keying on the pair alone would put 5% of the customs
-    // value on the face of a document that must show none.
-    const key = STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code)
-      ? `NO_TAX_STATED:${profile.code}`
-      : `${profile.categoryCode}:${profile.ratePercent}`;
+    const key = categorySubtotalKey(profile.code);
     const existing = byCategory.get(key);
     if (existing) {
       existing.taxableMinor += lineNetMinor;
@@ -392,14 +519,20 @@ export function computeTotals(lines: TaxableLine[]): InvoiceTotals {
   }
 
   const taxInclusiveMinor = taxExclusiveMinor + vatMinor;
+  // The margin tax is not added to the payable. It is already inside the price
+  // the buyer pays; charging it on top would collect it twice.
+  const payableMinor = taxInclusiveMinor;
+  const aed = aedFrom(vatMinor, payableMinor, opts.currency ?? "AED", opts.fx);
   return {
     taxExclusiveMinor,
     vatMinor,
     taxInclusiveMinor,
-    // The margin tax is not added here. It is already inside the price the
-    // buyer pays; charging it on top would collect it twice.
-    payableMinor: taxInclusiveMinor,
+    payableMinor,
     perCategory: perCategory.sort((a, b) => b.ratePercent - a.ratePercent),
+    // Only where a rate was actually supplied and usable. An AED document has
+    // nothing to convert, and a foreign-currency one whose rate is still being
+    // typed must carry no converted figure rather than a stale one.
+    ...(aed ? { vatMinorAED: aed.vatMinorAED, payableMinorAED: aed.payableMinorAED } : {}),
     // Only on documents that have a margin-scheme line — on every other
     // document the fields would be noise that means nothing.
     ...(anyMarginLine ? { marginTaxMinor, marginLinesWithoutCostCount } : {}),

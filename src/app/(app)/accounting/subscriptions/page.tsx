@@ -10,7 +10,10 @@ interface Recent { scheduledOn: string; number: string; totalMinor: string; invo
 interface Row {
   code: string; customerName: string; frequency: string; status: string;
   startsOn: string; endsOn: string | null; nextOn: string; overdue: boolean;
-  perInvoiceMinor: string; issuedCount: number; billedMinor: string; recent: Recent[];
+  perInvoiceMinor: string; issuedCount: number;
+  /** Every invoice this subscription has raised, not only the recent ones listed. */
+  billedMinor: string; billedCount: number;
+  recent: Recent[];
 }
 interface Register {
   asOf: string;
@@ -249,6 +252,17 @@ export default function SubscriptionsPage() {
                                   ))}
                                 </tbody>
                               </table>
+                              {/* What the list is a list of. The total beside it
+                                  covers every invoice the subscription has ever
+                                  raised, so saying only "here are six" would
+                                  leave a reader to add the column up and get a
+                                  different answer. */}
+                              <p className="sw-sub" style={{ margin: "0 0.5rem 0.5rem" }} data-testid={`billed-${s.code}`}>
+                                {s.billedCount > s.recent.length
+                                  ? <>The most recent {s.recent.length} of {s.billedCount} invoices. </>
+                                  : <>All {s.billedCount} invoice{s.billedCount === 1 ? "" : "s"}. </>}
+                                Billed altogether: <Figure minor={s.billedMinor} zero="zero" colour={false} />.
+                              </p>
                             </td>
                           </tr>
                         )}

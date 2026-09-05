@@ -242,6 +242,36 @@ d("subscriptions", () => {
     expect(reg.summary.activeCount).toBeGreaterThan(0);
   });
 
+  it("bills the whole history, not the six invoices the screen happens to list", async () => {
+    // The register read the last six invoices and reduced them, beside
+    // `issuedCount`, which counts all of them. Past the sixth invoice the two
+    // columns described different sets: "48 issued, AED 30,000 billed" against
+    // a real AED 240,000, with nothing on the row to say so.
+    await createSubscription({
+      ...S,
+      subscription: {
+        code: "SUB-LONG", customerName: "Deira Marine LLC", customerTrn: "100000000000009",
+        frequency: "MONTHLY", startsOn: "2026-01-01", paymentTerms: 30,
+        lines: [{ description: "Monitoring", quantityMilli: 1000, unitPriceMinor: 100_000 }],
+      },
+    });
+    // Ten months of it, which is more than the six the screen lists.
+    const issued = await issueDue({ ...S, code: "SUB-LONG", asOf: "2026-10-01" });
+    expect(issued.raised).toHaveLength(10);
+
+    const reg = await subscriptionRegister({ ...S, asOf: "2026-10-31" });
+    const long = reg.subscriptions.find((s) => s.code === "SUB-LONG")!;
+    const everyInvoice = issued.raised.reduce((a, r) => a + r.totalMinor, 0n);
+
+    expect(long.issuedCount).toBe(10);
+    expect(long.billedCount).toBe(10);
+    expect(long.billedMinor).toBe(everyInvoice);
+    // The list is still a list of the recent ones, and the total is not a total
+    // of the list — which is the distinction the row was getting wrong.
+    expect(long.recent).toHaveLength(6);
+    expect(long.recent.reduce((a, r) => a + r.totalMinor, 0n)).toBeLessThan(long.billedMinor);
+  });
+
   it("leaves the books balanced after all of it", async () => {
     const tb = await trialBalance({ orgId: ORG, entityId: ENT, periodLabel: "2026-04" });
     expect(tb.balanced).toBe(true);

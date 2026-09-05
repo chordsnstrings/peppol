@@ -26,6 +26,8 @@ import {
   Link2,
   MessageCircle,
   BookOpen,
+  Lock,
+  ShieldAlert,
 } from "lucide-react";
 import { createPaymentLink, markPaid, sendReminder } from "@/lib/payments-client";
 import { sendInvoiceWhatsApp } from "@/lib/whatsapp-client";
@@ -38,7 +40,10 @@ import { EXCHANGE_META, REPORTING_META } from "@/lib/domain/status";
 import { generateUBL, downloadText } from "@/lib/domain/ubl";
 import { useAppState } from "@/lib/app-state";
 import { useRecord, useCollection } from "@/lib/db/hooks";
+import { touch } from "@/lib/db/database";
 import { cancelInvoice, deleteInvoice, sendInvoice } from "@/lib/db/repo";
+import { useLedgerQuery } from "@/components/ledger/use-ledger";
+import { fmtMinor } from "@/lib/ledger/format";
 import { useGatewayMode } from "@/lib/gateway/mode";
 import {
   SIMULATED_LABEL,
@@ -69,6 +74,86 @@ import { ConfirmDialog, Modal } from "@/components/ui/modal";
 import { Dropdown, DropdownItem, DropdownSeparator, DropdownTrigger } from "@/components/ui/dropdown";
 import { toast } from "sonner";
 
+/* ------------------------------------------------------------ credit gate */
+
+/**
+ * What the finalisation gate answers with.
+ *
+ * Only the fields this screen actually renders are named. A client type that
+ * declares more than it shows invites the next person to trust a field nothing
+ * has ever displayed. Every amount is a string of minor units in the book's own
+ * currency — the one a credit limit is held in, which is not necessarily the
+ * currency this invoice was raised in.
+ */
+interface CreditGate {
+  decision: "allow" | "review" | "refuse" | "unknown";
+  allowed: boolean;
+  overrode: boolean;
+  headline: string;
+  reasons: { code: string; blocking: boolean; message: string }[];
+  currency: string;
+  additionalMinor: string;
+  exposureMinor: string | null;
+  wouldBeMinor: string | null;
+  creditLimitMinor: string | null;
+  limitSet: boolean;
+  limitEffectiveFrom: string | null;
+  headroomMinor: string | null;
+  overByMinor: string | null;
+  caveat: string | null;
+}
+
+const GATE_TONE = { allow: "success", review: "warning", refuse: "error", unknown: "neutral" } as const;
+const GATE_WORD = {
+  allow: "Within limit",
+  review: "Somebody should look",
+  refuse: "Stop",
+  unknown: "Not checked",
+} as const;
+
+/** Money in the book's currency, in the same shape the ledger screens write it. */
+const gateMoney = (v: string | null, currency: string) =>
+  v === null ? "—" : `${currency} ${fmtMinor(v, currency, { zero: "zero" })}`;
+
+/**
+ * Finalise the draft through the credit gate: DRAFT → READY, or a refusal.
+ *
+ * The refusal is the interesting answer, so it comes back rather than being
+ * thrown. The 409 carries the whole gate — the limit, what the customer already
+ * carries, what this document would take them to, and every ground separately —
+ * and a caller that collapsed that into an error string would throw away
+ * precisely the figures the person in front of the customer needs.
+ */
+async function finaliseThroughGate(
+  invoiceId: string,
+  overrideReason?: string,
+): Promise<{ ok: boolean; error: string | null; gate: CreditGate | null; alreadyFinalised: boolean }> {
+  const res = await fetch("/api/ledger/credit-control/invoice", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ invoiceId, ...(overrideReason ? { overrideReason } : {}) }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    gate?: CreditGate | null;
+    alreadyFinalised?: boolean;
+  };
+  if (res.ok) {
+    /* The document and its timeline both moved on the server, and every screen
+     * reading either of them is subscribed to those two stores. */
+    touch("invoices");
+    touch("invoiceEvents");
+    return { ok: true, error: null, gate: body.gate ?? null, alreadyFinalised: Boolean(body.alreadyFinalised) };
+  }
+  return {
+    ok: false,
+    error: body.error ?? "The credit check could not be run, so nothing was finalised.",
+    gate: body.gate ?? null,
+    alreadyFinalised: false,
+  };
+}
+
 export default function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -88,6 +173,12 @@ export default function InvoiceDetailPage() {
   const [ledgerError, setLedgerError] = React.useState<string | null>(null);
   const [receiptOpen, setReceiptOpen] = React.useState(false);
   const [receiptSuggestion, setReceiptSuggestion] = React.useState<bigint | null>(null);
+  const [finalising, setFinalising] = React.useState(false);
+  /* The gate's last answer, kept so a refusal stays on screen with its figures
+   * instead of vanishing into a toast the moment it is read. */
+  const [gate, setGate] = React.useState<CreditGate | null>(null);
+  const [gateError, setGateError] = React.useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = React.useState("");
   const gateway = useGatewayMode();
 
   /* Why this document does not belong in the sales ledger, where it does not.
@@ -106,6 +197,20 @@ export default function InvoiceDetailPage() {
     issuedOn ? { from: issuedOn, to: dayAfter(issuedOn) } : undefined,
   );
 
+  /* Where the customer stands, asked while the draft is still open.
+   *
+   * The gate below is what actually stops a sale, and this read stops nothing —
+   * it exists so the answer arrives before somebody has told the customer the
+   * goods are on their way, rather than at the moment they press Send. Only for
+   * a draft that would create a receivable: a finalised document is past the
+   * decision, and an inbound one puts the business in debt rather than the
+   * customer. */
+  const gateAdvice = useLedgerQuery<{ gate: CreditGate; finalised: boolean }>(
+    invoice && invoice.direction === "OUTBOUND" && invoice.lifecycleStatus === "DRAFT"
+      ? `/api/ledger/credit-control/invoice?invoiceId=${encodeURIComponent(invoice.id)}`
+      : null,
+  );
+
   if (loading) return <DetailSkeleton />;
   if (!invoice) {
     return (
@@ -122,11 +227,68 @@ export default function InvoiceDetailPage() {
   const isCompleted = invoice.lifecycleStatus === "COMPLETED";
   const isProforma = invoice.docType === "PROFORMA";
   const posted = ledger.index?.postings.get(invoice.id) ?? null;
+  /* Not yet finalised: the document can still change, and nobody has committed
+   * to it. `isDraft` above means something wider — everything before the send
+   * pipeline takes it — and the two are not interchangeable here. */
+  const unfinalised = invoice.lifecycleStatus === "DRAFT";
+  /* The last word on credit: what finalising actually answered, falling back to
+   * what the advisory read said while the draft is still open. */
+  const standing = gate ?? gateAdvice.data?.gate ?? null;
+
+  /**
+   * Finalise the draft, through the credit gate.
+   *
+   * This is the moment the business commits — the last point at which not
+   * selling costs a conversation rather than a credit note — so it is where the
+   * limit is checked. A refusal leaves the draft exactly as it was, comes back
+   * with the figures, and can be overridden by somebody who holds the credit
+   * grant on a reason that goes onto the document's own timeline.
+   *
+   * Answers true only when the document is now finalised, so a caller can use
+   * it as the gate on whatever it was about to do next.
+   */
+  const doFinalise = async (reason?: string): Promise<boolean> => {
+    setFinalising(true);
+    setGateError(null);
+    const r = await finaliseThroughGate(invoice.id, reason);
+    /* Only where an answer came back with one. A failure that carried no gate —
+     * the network, or a refusal about something other than credit — must not
+     * wipe the refusal already on screen, or the grounds and the override box
+     * vanish at the moment they are being read. */
+    if (r.gate) setGate(r.gate);
+    setFinalising(false);
+    if (!r.ok) {
+      setGateError(r.error);
+      return false;
+    }
+    setOverrideReason("");
+    if (r.alreadyFinalised) {
+      toast("Already finalised", { description: `${invoice.number || "This document"} was ready to send already.` });
+    } else if (r.gate?.overrode) {
+      toast.warning("Finalised over a credit refusal", {
+        description: "The refusal, the figures behind it and your reason are on the invoice's timeline.",
+      });
+    } else {
+      toast.success("Finalised", {
+        description: r.gate && r.gate.decision !== "unknown" ? r.gate.headline : "The document is locked and ready to send.",
+      });
+    }
+    return true;
+  };
 
   const doSend = async () => {
     if (!currentEntity) return;
     setBusy(true);
     try {
+      /* Finalising first, so the credit gate binds on the path people actually
+       * take. Sending is what puts the document in the customer's hands, and a
+       * check that ran only when somebody chose to press Finalise would be a
+       * check the busy day skips. A refusal stops here with the dialog still
+       * open on the grounds. */
+      if (unfinalised && !(await doFinalise())) {
+        setBusy(false);
+        return;
+      }
       await sendInvoice(invoice, currentEntity);
       /* On a simulated gateway the acceptance came from this deployment, not
        * from the buyer's Access Point or the FTA, so it is reported as the
@@ -280,6 +442,16 @@ export default function InvoiceDetailPage() {
                 <Button variant="outline" onClick={() => router.push(`/invoices/new?from=${invoice.id}`)}>
                   Edit
                 </Button>
+                {unfinalised && (
+                  <Button
+                    variant="outline"
+                    icon={<Lock />}
+                    loading={finalising}
+                    onClick={() => void doFinalise()}
+                  >
+                    Finalise
+                  </Button>
+                )}
                 {isProforma ? (
                   <Button icon={<FileText />} onClick={() => router.push(`/invoices/new?convertFrom=${invoice.id}`)}>
                     Convert to tax invoice
@@ -458,6 +630,50 @@ export default function InvoiceDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Credit — whether this customer should be sold to at all, which is
+              a question that has to be answered before the document goes out
+              rather than after it is on the books. The card is shown only while
+              the answer can still change something: a finalised document is
+              past the decision, and the gate said what it said. */}
+          {invoice.direction === "OUTBOUND" && (unfinalised || gate) && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <ShieldAlert className="size-4" /> Credit
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                {gateAdvice.loading && !standing && <p className="text-muted-foreground">Checking where they stand…</p>}
+                {gateAdvice.error && !standing && (
+                  <p className="text-muted-foreground">
+                    Where {invoice.buyer.nameEn || "the customer"} stands could not be read: {gateAdvice.error} The
+                    check runs again when the document is finalised, and it is that one that decides.
+                  </p>
+                )}
+                <CreditPanel
+                  gate={standing}
+                  error={gateError}
+                  override={
+                    standing && !standing.allowed
+                      ? {
+                          reason: overrideReason,
+                          setReason: setOverrideReason,
+                          busy: finalising,
+                          onConfirm: () => void doFinalise(overrideReason.trim()),
+                        }
+                      : undefined
+                  }
+                />
+                {unfinalised && standing?.allowed === true && (
+                  <p className="text-xs text-muted-foreground">
+                    Nothing is decided by this. The check runs again when the document is finalised, against what
+                    the customer owes at that moment.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Sales ledger — what this document did to the books, which is a
               different question from what the network did with it. */}
@@ -673,12 +889,39 @@ export default function InvoiceDetailPage() {
               the FTA.
             </p>
           )}
+          {unfinalised && (
+            <p className="mt-2 text-sm text-muted-foreground">
+              It is finalised first, which is where the credit limit is checked. A refusal stops here and leaves
+              the draft exactly as it is.
+            </p>
+          )}
+          {/* The refusal stays in the dialog the person is standing in, with
+              the figures and the override, rather than sending them off to
+              another screen to find out what happened. */}
+          {(gateError || (gate && !gate.allowed)) && (
+            <div className="mt-4 rounded-lg border border-border p-3">
+              <CreditPanel
+                gate={gate}
+                error={gateError}
+                override={
+                  gate && !gate.allowed
+                    ? {
+                        reason: overrideReason,
+                        setReason: setOverrideReason,
+                        busy: finalising,
+                        onConfirm: () => void doFinalise(overrideReason.trim()),
+                      }
+                    : undefined
+                }
+              />
+            </div>
+          )}
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmSend(false)}>
               Cancel
             </Button>
-            <Button icon={<Send />} loading={busy} onClick={doSend}>
-              Confirm & send
+            <Button icon={<Send />} loading={busy || finalising} onClick={doSend}>
+              {unfinalised ? "Finalise & send" : "Confirm & send"}
             </Button>
           </div>
         </div>
@@ -737,6 +980,157 @@ export default function InvoiceDetailPage() {
         confirmLabel="Delete"
         tone="destructive"
       />
+    </div>
+  );
+}
+
+/**
+ * What the credit gate said, with the figures in it.
+ *
+ * A refusal that says only "refused" sends the salesperson to accounts and
+ * accounts back to the salesperson, and the second time that happens somebody
+ * raises the invoice somewhere this product cannot see. So the three numbers
+ * the argument is actually about are here — what the customer may owe, what
+ * they carry now, and where this document would take them — and each ground is
+ * listed separately, because "eight hundred over the limit" and "nobody has
+ * ever assessed this account" need opposite responses and a single collapsed
+ * verdict cannot tell them apart.
+ *
+ * Every figure is in the book's own currency, which is the currency a credit
+ * limit is held in and not necessarily the one this invoice was raised in. The
+ * currency code is printed beside each so the two are never confused.
+ */
+function CreditPanel({
+  gate,
+  error,
+  override,
+}: {
+  gate: CreditGate | null;
+  /** A sentence from the gate or the route, where one came back. */
+  error: string | null;
+  /** The override controls, offered only where a refusal can be overridden. */
+  override?: {
+    reason: string;
+    setReason: (v: string) => void;
+    onConfirm: () => void;
+    busy: boolean;
+  };
+}) {
+  if (!gate && !error) return null;
+  const cur = gate?.currency ?? BOOK_CURRENCY;
+  /* Figures are shown only where the check actually ran. An unresolved customer
+   * or an entity whose books are not open produces no exposure and no limit,
+   * and a row of dashes reads like "nil" rather than "not asked". */
+  const measured = gate !== null && gate.decision !== "unknown";
+
+  return (
+    <div className="space-y-3">
+      {gate && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={GATE_TONE[gate.decision]} size="sm">
+            {GATE_WORD[gate.decision]}
+          </Badge>
+          {gate.overrode && (
+            <Badge tone="warning" size="sm">
+              Overridden, on the record
+            </Badge>
+          )}
+        </div>
+      )}
+
+      {measured && gate && (
+        <dl className="space-y-1.5 text-sm">
+          <FigureRow
+            label="Credit limit"
+            value={gate.limitSet ? gateMoney(gate.creditLimitMinor, cur) : "Never assessed"}
+            hint={gate.limitSet && gate.limitEffectiveFrom ? `in force from ${gate.limitEffectiveFrom}` : undefined}
+          />
+          <FigureRow label="Owed now" value={gateMoney(gate.exposureMinor, cur)} hint="ledger, plus orders taken and not yet billed" />
+          <FigureRow label="This document" value={gateMoney(gate.additionalMinor, cur)} />
+          <FigureRow label="Would be owed" value={gateMoney(gate.wouldBeMinor, cur)} />
+          {gate.overByMinor && gate.overByMinor !== "0" ? (
+            <FigureRow label="Over the limit by" value={gateMoney(gate.overByMinor, cur)} tone="bad" />
+          ) : (
+            <FigureRow label="Left after this" value={gateMoney(gate.headroomMinor, cur)} />
+          )}
+        </dl>
+      )}
+
+      {gate && gate.reasons.length === 0 && <p className="text-xs text-muted-foreground">{gate.headline}</p>}
+
+      {gate && gate.reasons.length > 0 && (
+        <ul className="space-y-2">
+          {gate.reasons.map((r) => (
+            <li key={r.code} className="text-xs text-muted-foreground">
+              <Badge tone={r.blocking ? "error" : "warning"} size="sm" className="me-1.5 align-middle">
+                {r.blocking ? "stops it" : "worth knowing"}
+              </Badge>
+              {r.message}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {gate?.caveat && <p className="text-xs text-muted-foreground">{gate.caveat}</p>}
+      {/* Shown unless it is the headline again. A refusal answers with the
+          gate's own sentence, which the grounds above already carry; anything
+          else — a permission the person does not hold, a request that never
+          arrived — is news and has to be said. */}
+      {error && error !== gate?.headline && <p className="text-xs text-destructive">{error}</p>}
+
+      {override && (
+        <div className="space-y-2 rounded-lg border border-destructive/25 bg-destructive/[0.06] p-3">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-destructive">
+            <ShieldAlert className="size-3.5" /> Finalise anyway
+          </p>
+          <p className="text-xs text-muted-foreground">
+            An override is allowed and is never silent: the reason, the limit, what the customer already carries
+            and the grounds above all go onto this invoice&rsquo;s timeline. It needs the grant that places and
+            releases credit holds, which is deliberately not the grant that raises an invoice — so whoever raised
+            this one cannot clear their own refusal.
+          </p>
+          <textarea
+            className="w-full rounded-lg border border-input bg-background p-2 text-sm"
+            rows={2}
+            value={override.reason}
+            onChange={(e) => override.setReason(e.target.value)}
+            placeholder="Cash on delivery agreed with the customer"
+            aria-label="Why this credit refusal is being overridden"
+          />
+          <Button
+            size="sm"
+            variant="destructive"
+            icon={<ShieldAlert />}
+            loading={override.busy}
+            disabled={!override.reason.trim()}
+            onClick={override.onConfirm}
+          >
+            Override &amp; finalise
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FigureRow({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "bad";
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-muted-foreground">
+        {label}
+        {hint && <span className="block text-[11px] opacity-80">{hint}</span>}
+      </dt>
+      <dd className={cn("font-medium tnum", tone === "bad" && "text-destructive")}>{value}</dd>
     </div>
   );
 }

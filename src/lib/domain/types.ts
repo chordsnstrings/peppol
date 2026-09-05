@@ -149,7 +149,19 @@ export interface InvoiceTotals {
   taxInclusiveMinor: number;
   payableMinor: number;
   perCategory: CategoryBreakdown[];
+  /**
+   * The tax total converted to AED, in fils, at the rate the document states.
+   *
+   * Article 69 of Federal Decree-Law 8/2017 requires the tax on a document
+   * issued in another currency to be converted to AED, and Article 59(1)(k) of
+   * the Executive Regulation requires the converted amount to appear on the
+   * document beside the rate used. Recorded by `computeTotals` when it is given
+   * the document's currency and rate; absent on an AED document, and absent
+   * where no usable rate has been captured yet, because a nought here would
+   * read as a conversion that was made and came to nothing.
+   */
   vatMinorAED?: number;
+  /** The payable total converted to AED, in fils, at the same rate. */
   payableMinorAED?: number;
   /**
    * The tax inside the margin on profit-margin-scheme lines, which the supplier

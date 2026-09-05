@@ -96,6 +96,53 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** The receivables control account. Mirrors `AR_CONTROL` in ar.ts. */
 const AR_CONTROL = "1100";
 
+/**
+ * How many document ids go into one `in (…)`.
+ *
+ * PostgreSQL's wire protocol carries a hard limit of 65,535 bind parameters,
+ * and past it a query does not slow down — it fails. Every sales document a
+ * business has ever raised opens an item on the control account and is one id
+ * here, so a shop billing eleven hundred customers a month crosses that line
+ * inside five years and credit control stops answering altogether. The ledger
+ * export and counterparties.ts chunk at the same 5,000 and for the same reason.
+ */
+export const ID_CHUNK = 5_000;
+
+/**
+ * The document ids to look up, in batches no `in (…)` will choke on.
+ *
+ * A named function rather than a loop inline in the read, because the invariant
+ * it holds — no batch is ever larger than the protocol will carry — is the
+ * whole of the bug, and an invariant nothing can assert is an invariant that
+ * comes back. Order is preserved and every id appears exactly once, so the
+ * batched read answers what the single read answered.
+ */
+export function documentIdBatches(ids: string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += ID_CHUNK) out.push(ids.slice(i, i + ID_CHUNK));
+  return out;
+}
+
+/**
+ * The most movements one credit read may carry.
+ *
+ * Exposure is netted from every movement on the receivables control account
+ * since the books were opened, and it has to be: an invoice raised four years
+ * ago and never paid is exactly the exposure a limit exists to catch, so the
+ * read cannot be windowed by date the way `counterpartyStatement` windows its
+ * own — a statement carries what it left out in an opening balance, and a
+ * credit check has nowhere to put it.
+ *
+ * What is left is a ceiling. Past it the process is killed by the kernel with
+ * no explanation and the screen reports nothing at all; below it, the answer is
+ * exact. This turns that into a sentence that says which entity and how many.
+ * It is an order of magnitude above a busy decade, so reaching it means
+ * something else is wrong — a control account being used as a suspense
+ * account, most likely — and that is worth being told about rather than
+ * absorbing silently.
+ */
+export const MAX_LEDGER_MOVEMENTS = 200_000;
+
 /** A party that can be sold to. A supplier-only record cannot. */
 const sells = (kind: string) => kind === "CUSTOMER" || kind === "BOTH";
 
@@ -217,6 +264,8 @@ async function salesLedger(opts: {
     );
   }
 
+  // One more than the ceiling, so the overflow is detected rather than
+  // guessed at from a row count that happens to equal the limit.
   const rows = await prisma.journalLine.findMany({
     where: {
       accountId: account.id,
@@ -230,7 +279,18 @@ async function salesLedger(opts: {
         },
       },
     },
+    orderBy: [{ entry: { entryDate: "asc" } }, { lineNo: "asc" }],
+    take: MAX_LEDGER_MOVEMENTS + 1,
   });
+  if (rows.length > MAX_LEDGER_MOVEMENTS) {
+    throw new LedgerError(
+      `The receivables control account ${AR_CONTROL} carries more than ${MAX_LEDGER_MOVEMENTS.toLocaleString("en")} ` +
+        `movements up to ${iso(opts.to)}, which is more than a credit check reads in one go. Exposure is netted ` +
+        `from all of them and cannot be cut short without understating what a customer owes, so nothing is ` +
+        `answered rather than something wrong. An account this size is usually a control account being posted to ` +
+        `by hand — check what is landing on ${AR_CONTROL} that is not an invoice or a receipt.`,
+    );
+  }
 
   // A statement is read down the page, so the order has to be total: two
   // documents on one day must come out in the same sequence every time, or this
@@ -279,19 +339,28 @@ async function salesLedger(opts: {
     }
   }
 
-  const ids = [...docs.keys()];
-  const stored = ids.length
-    ? await prisma.record.findMany({ where: { orgId: opts.orgId, store: "invoices", id: { in: ids } } })
-    : [];
+  /*
+   * Whose each open item is, read from the document store in chunks.
+   *
+   * Every open item is one id in an `in (…)`, one bind parameter each, and
+   * PostgreSQL refuses past 65,535 of them — so written in one go this query
+   * stops working, not slowly but at all, on exactly the businesses with the
+   * longest sales history and therefore the most reason to be checking credit.
+   */
   const idx = partyIndex(opts.parties);
-  for (const row of stored) {
-    const doc = docs.get(row.id);
-    if (!doc) continue;
-    let inv: Invoice | undefined;
-    try { inv = JSON.parse(row.data) as Invoice; } catch { inv = undefined; }
-    if (!inv || inv.direction !== "OUTBOUND") continue;
-    doc.partyId = attributeDocument(inv, idx, "buyer");
-    if (inv.number) doc.number = inv.number.trim();
+  for (const batch of documentIdBatches([...docs.keys()])) {
+    const stored = await prisma.record.findMany({
+      where: { orgId: opts.orgId, store: "invoices", id: { in: batch } },
+    });
+    for (const row of stored) {
+      const doc = docs.get(row.id);
+      if (!doc) continue;
+      let inv: Invoice | undefined;
+      try { inv = JSON.parse(row.data) as Invoice; } catch { inv = undefined; }
+      if (!inv || inv.direction !== "OUTBOUND") continue;
+      doc.partyId = attributeDocument(inv, idx, "buyer");
+      if (inv.number) doc.number = inv.number.trim();
+    }
   }
 
   return { movements, docs };
@@ -1024,11 +1093,14 @@ function decide(
  * **Where this belongs.** Call it from the point where the *commitment* is
  * made — accepting an order, or issuing an invoice — before the document goes
  * to the customer, so the answer can be shown to the person raising it while
- * they can still do something about it. It is deliberately not called from
- * `postInvoice` in ar.ts and it must not be: by the time an invoice reaches the
- * ledger it has been issued, and refusing to post it would leave the books
- * denying a document the customer is holding. Credit control decides whether to
- * sell; the ledger records what was sold.
+ * they can still do something about it. Two callers enforce it, and between
+ * them they cover both ways a sale is committed to in this product: `creditGate`
+ * in sales-orders.ts when an order is accepted or an instalment billed, and
+ * `invoiceCreditGate` below when an invoice is finalised. It is deliberately
+ * not called from `postInvoice` in ar.ts and it must not be: by the time an
+ * invoice reaches the ledger it has been issued, and refusing to post it would
+ * leave the books denying a document the customer is holding. Credit control
+ * decides whether to sell; the ledger records what was sold.
  *
  * Every reason is returned separately, and each says whether it blocks on its
  * own. A single collapsed boolean makes the answer un-appealable: the person in
@@ -1097,6 +1169,294 @@ export async function creditCheck(opts: {
     standing,
     summary: [head, ...reasons.map((r) => r.message)].join(" "),
   };
+}
+
+/* --------------------------------------------- the gate on an invoice */
+
+/**
+ * Who may let a refused sale through.
+ *
+ * The same permission that places and releases a hold, because it is the same
+ * power: a refusal says this customer should not be sold to today, and an
+ * override says they may be after all. Naming it here rather than in the route
+ * is what lets a refusal tell the person reading it who to go and ask — and it
+ * matters that this is not `ar.manage`. The shipped Bookkeeper raises invoices
+ * and cannot release a hold, so the person who raised the invoice cannot wave
+ * through their own credit refusal. That separation is the whole of the
+ * control; a gate the raiser can clear on their own is a formality.
+ */
+export const CREDIT_OVERRIDE_PERMISSION = "ar.credit_hold";
+
+export interface InvoiceCreditGate {
+  /** What the check said. `unknown` where there was nothing to check against. */
+  decision: CreditDecision | "unknown";
+  /** False only where something blocking was found that nobody overrode. */
+  allowed: boolean;
+  /** Whether a refusal was let through, and on whose word. */
+  overrode: boolean;
+  override: { reason: string; actorId: string | null } | null;
+  /** The whole answer in a sentence, already carrying the figures. */
+  headline: string;
+  /** Every ground separately, each saying whether it blocks on its own. */
+  reasons: CreditReason[];
+  documentId: string;
+  documentNumber: string;
+  /** The customer as the check resolved them, not as the document spells them. */
+  partyKey: string | null;
+  name: string;
+  currency: string;
+  /** What this document adds, in the functional currency the limit is held in. */
+  additionalMinor: string;
+  /** Null through and through where there was nothing to check against. */
+  exposureMinor: string | null;
+  wouldBeMinor: string | null;
+  creditLimitMinor: string | null;
+  limitSet: boolean;
+  limitEffectiveFrom: string | null;
+  headroomMinor: string | null;
+  overByMinor: string | null;
+  pastDueMinor: string | null;
+  oldestPastDueDays: number | null;
+  /** The permission a route has to hold to override this. */
+  overridePermission: string;
+  /**
+   * What this gate did not manage to check, where it could not. Null where the
+   * answer is complete. It is never a reason to refuse — a check that could not
+   * run is not evidence against the customer — but a screen that stayed silent
+   * about it would be reporting "allowed" for a check that never happened.
+   */
+  caveat: string | null;
+}
+
+/**
+ * The document's gross in the currency the limit is held in.
+ *
+ * A limit is compared against a balance, and the balance is kept in the book's
+ * functional currency, so the amount checked has to be in that currency too. A
+ * foreign-currency invoice carries the rate it was issued at and `postInvoice`
+ * books it at that rate — so the same rate is used here, and the figure the
+ * gate checks is the figure that will later land on the control account rather
+ * than a second opinion about it.
+ *
+ * Where no rate can be had, this returns null rather than a guess. A made-up
+ * rate in a credit limit is a made-up limit, which is the reasoning
+ * `committedOrders` already applies to a foreign-currency order.
+ */
+function grossInFunctional(inv: Invoice, functional: string): { amountMinor: bigint | null; why: string | null } {
+  const gross = minor(inv.totals?.payableMinor ?? 0, "The invoice total");
+  const currency = (inv.currency || functional).trim();
+  if (currency === functional) return { amountMinor: gross, why: null };
+
+  // `fx.rateToAED` is a rate to dirhams and says so in its name, so it converts
+  // only into a book kept in dirhams. A book kept in anything else would need a
+  // rate nobody on this document has stated.
+  const rate = functional === "AED" ? Number(inv.fx?.rateToAED ?? 0) : 0;
+  if (!(rate > 0) || !Number.isFinite(rate)) {
+    return {
+      amountMinor: null,
+      why:
+        `${inv.number || "This document"} is in ${currency} and the books are kept in ${functional}, and it ` +
+        `carries no rate between the two — so how much it would add to the limit is not something this check can ` +
+        `say. Where the customer stands below is exact; this document is not in it.`,
+    };
+  }
+  // Scale the rate to an integer so the multiplication is exact, then round
+  // once, half-up — the same conversion post() makes when it books the entry.
+  const SCALE = 1_000_000_000n;
+  return { amountMinor: divHalfUp(gross * BigInt(Math.round(rate * 1e9)), SCALE), why: null };
+}
+
+/**
+ * The gate at the moment an invoice is finalised.
+ *
+ * **Why here and nowhere else.** `creditCheck` had exactly one enforcing caller
+ * — `creditGate` in sales-orders.ts — so a business that raises invoices
+ * without raising orders first had a credit limit that nothing ever consulted:
+ * limits set, holds placed, and every one of them advisory. This is the other
+ * commitment point. Finalising is the moment a draft stops being something the
+ * business is thinking about and becomes a document it will send, and it is the
+ * last moment at which not sending it costs a conversation rather than a credit
+ * note.
+ *
+ * It is deliberately not `postInvoice`, and it must not become it. The
+ * reasoning is written at `creditCheck` above and stands: by the time an
+ * invoice reaches the ledger it has been issued, and refusing to record it
+ * would leave the books denying a document the customer is holding. Refusing to
+ * post does not un-issue anything; refusing to finalise stops the sale.
+ *
+ * **Three things it does not do**, the same three the order gate does not do,
+ * because a second stance about the same customer would be a second answer.
+ *
+ * It does not refuse a customer the check cannot resolve. An invoice names a
+ * buyer in free text, so "no such counterparty" means somebody typed a name,
+ * not that the customer is bad for the money.
+ *
+ * It does not refuse because the books are not open. An entity with no
+ * receivables control account has no exposure to measure and no limits to
+ * measure it against; blocking every invoice in a workspace that has not opened
+ * its ledger would be a credit control that fires hardest where there is no
+ * credit information at all.
+ *
+ * And it does not block on `review`. Review is what a person is for, and the
+ * sentence goes back so the screen can put it in front of them.
+ */
+export async function invoiceCreditGate(opts: {
+  orgId: string;
+  entityId: string;
+  invoice: Invoice;
+  asOf?: Date | string;
+  pastDueDays?: number | null;
+  /** Finalise anyway, on the record, when the check refuses. */
+  override?: { reason?: string | null; actorId?: string | null } | null;
+}): Promise<InvoiceCreditGate> {
+  const inv = opts.invoice;
+  const currency = await functionalCurrency(opts.orgId, opts.entityId);
+  const number = (inv.number ?? "").trim() || "this draft";
+  const named = (inv.buyer?.nameEn ?? "").trim();
+
+  const blank: InvoiceCreditGate = {
+    decision: "unknown",
+    allowed: true,
+    overrode: false,
+    override: null,
+    headline: "",
+    reasons: [],
+    documentId: inv.id,
+    documentNumber: number,
+    partyKey: null,
+    name: named || "the customer",
+    currency,
+    additionalMinor: "0",
+    exposureMinor: null,
+    wouldBeMinor: null,
+    creditLimitMinor: null,
+    limitSet: false,
+    limitEffectiveFrom: null,
+    headroomMinor: null,
+    overByMinor: null,
+    pastDueMinor: null,
+    oldestPastDueDays: null,
+    overridePermission: CREDIT_OVERRIDE_PERMISSION,
+    caveat: null,
+  };
+
+  if (inv.direction !== "OUTBOUND") {
+    return {
+      ...blank,
+      headline:
+        "This is a purchase document, so it puts the business in debt rather than the customer. A credit limit " +
+        "checks nothing on it.",
+    };
+  }
+  // A credit note reduces what the customer owes, so there is no commitment to
+  // gate: refusing to finalise one because the customer is over their limit
+  // would block the very document that brings them back under it. `creditCheck`
+  // refuses a negative amount for the same reason.
+  if (inv.docType === "TAX_CREDIT_NOTE") {
+    return {
+      ...blank,
+      headline:
+        `${number} is a credit note, so it reduces what the customer owes rather than adding to it. There is ` +
+        `nothing here for a credit limit to stop.`,
+    };
+  }
+
+  // The same ladder `attributeDocument` walks — the explicit link first, then
+  // the buyer's TRN, then the name — so the customer this gate checks and the
+  // customer the ageing later files the invoice under are the same one.
+  const key =
+    (inv.customerId ?? "").trim() ||
+    (inv.buyer?.trn ?? "").trim() ||
+    named;
+  if (!key) {
+    return {
+      ...blank,
+      headline:
+        `${number} names no customer at all, so there is nobody to check credit against. That is a document to ` +
+        `finish rather than a credit decision.`,
+    };
+  }
+
+  const { amountMinor, why } = grossInFunctional(inv, currency);
+
+  let check: CreditCheck;
+  try {
+    check = await creditCheck({
+      orgId: opts.orgId,
+      entityId: opts.entityId,
+      partyKey: key,
+      additionalMinor: amountMinor ?? 0n,
+      // Today, not the date on the document. The commitment is being made now,
+      // and a draft dated last quarter would otherwise be checked against last
+      // quarter's exposure — which is a way round the gate, not a nicety.
+      asOf: opts.asOf,
+      pastDueDays: opts.pastDueDays,
+    });
+  } catch (e) {
+    // An unmatched code, an ambiguous name, or books that have never been
+    // opened. All three are things to fix about the setup, and none of them is
+    // evidence about whether this customer pays.
+    return {
+      ...blank,
+      headline:
+        `Credit could not be checked for ${named || key}: ${e instanceof Error ? e.message : "the customer could not be resolved."} ` +
+        `${number} is not blocked by that — a check that could not run says nothing about the customer.`,
+      caveat: why,
+    };
+  }
+
+  const reason = (opts.override?.reason ?? "").trim();
+  const refused = check.decision === "refuse";
+  const overrode = refused && reason.length > 0;
+
+  return {
+    decision: check.decision,
+    allowed: !refused || overrode,
+    overrode,
+    override: overrode ? { reason, actorId: opts.override?.actorId ?? null } : null,
+    headline: check.summary,
+    reasons: check.reasons,
+    documentId: inv.id,
+    documentNumber: number,
+    partyKey: check.code,
+    name: check.name,
+    currency: check.currency,
+    additionalMinor: check.additionalMinor,
+    exposureMinor: check.exposureMinor,
+    wouldBeMinor: check.wouldBeMinor,
+    creditLimitMinor: check.creditLimitMinor,
+    limitSet: check.limitSet,
+    limitEffectiveFrom: check.limitEffectiveFrom,
+    headroomMinor: check.headroomMinor,
+    overByMinor: check.overByMinor,
+    pastDueMinor: check.pastDueMinor,
+    oldestPastDueDays: check.oldestPastDueDays,
+    overridePermission: CREDIT_OVERRIDE_PERMISSION,
+    caveat: why,
+  };
+}
+
+/**
+ * The sentence that goes on the document's own timeline when a refusal is
+ * let through.
+ *
+ * It carries the figures rather than "credit override": whoever reads this
+ * record in six months is trying to decide whether the decision was reasonable,
+ * and "over their limit" without the limit and the exposure is not something
+ * anybody can weigh. The grounds are copied in whole for the same reason — the
+ * check that produced them will answer differently by then, because the
+ * exposure will have moved.
+ */
+export function overrideNarrative(gate: InvoiceCreditGate, actorId: string | null): string {
+  const cur = gate.currency;
+  const at = (v: string | null) => (v === null ? null : money(BigInt(v), cur));
+  const limit = gate.creditLimitMinor === null ? "no limit assessed" : `a limit of ${at(gate.creditLimitMinor)}`;
+  return (
+    `Credit refused and overridden${actorId ? ` by ${actorId}` : ""}: ${gate.override?.reason ?? ""} ` +
+    `${gate.name} carried ${at(gate.exposureMinor) ?? "an exposure this check could not read"} against ${limit}, ` +
+    `and ${gate.documentNumber} takes them to ${at(gate.wouldBeMinor) ?? "more"}. ` +
+    `Grounds: ${gate.reasons.filter((r) => r.blocking).map((r) => r.message).join(" ")}`
+  );
 }
 
 /* ------------------------------------------------------------------ dunning */

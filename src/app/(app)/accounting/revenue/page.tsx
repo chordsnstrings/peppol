@@ -222,13 +222,19 @@ export default function RevenuePage() {
             )}
           </Panel>
 
+          <ContractBalances assetMinor={rec.ledgerAssetMinor} liabilityMinor={rec.ledgerLiabilityMinor} />
+
           <Panel className="mb-4 p-4">
             <div className="sw-label">Across every contract</div>
             <dl className="mt-3 grid gap-4 sm:grid-cols-4">
               <Stat label="Transaction price" minor={data.totals.priceMinor} />
               <Stat label="Billed" minor={data.totals.billedMinor} />
               <Stat label="Earned" minor={data.totals.earnedMinor} />
-              <Stat label="Still to earn" minor={data.totals.unearnedMinor} hint="The backlog — promises not yet kept." />
+              <Stat
+                label="Still to earn"
+                minor={data.totals.unearnedMinor}
+                hint="Price not yet earned, across every contract on the register — a cancelled or completed one included."
+              />
             </dl>
           </Panel>
 
@@ -326,6 +332,116 @@ function positionWord(c: Contract): string {
   if (BigInt(c.contractAssetMinor) > 0n) return "Contract asset — earned, not yet billed";
   if (BigInt(c.contractLiabilityMinor) > 0n) return "Contract liability — billed, not yet earned";
   return "Billing and delivery are level";
+}
+
+/**
+ * The contract-balance disclosure, IFRS 15.116.
+ *
+ * These two accounts are the note an auditor asks to see supported, and until
+ * now they appeared on this screen only inside a reconciliation — a control,
+ * not a disclosure, and nobody preparing a note would think to read it there.
+ *
+ * Both figures come off the ledger rather than off the contract rows, which is
+ * what makes them the disclosure rather than a summary of the register: 1310
+ * and 2310 are what the balance sheet carries, and a note that agreed with the
+ * register but not with the balance sheet would be supporting the wrong number.
+ * They are the same two figures the reconciliation above compares, taken from
+ * the same response, so the note and the control cannot tell different stories.
+ *
+ * What is deliberately NOT drawn here, and why, is the second half of the
+ * panel. Everything else 15.116 asks for is missing, and for four different
+ * reasons:
+ *
+ *   the opening balances — computable, and computed: `contractBalancesNote` in
+ *     the revenue subledger reads both accounts at the day before a period and
+ *     at its end, with the liability negated to read as a note does. Nothing
+ *     serves it to a browser yet, so this screen states today's position and
+ *     says so rather than inventing an opening figure;
+ *   the movement out of the opening contract liability, and revenue from
+ *     obligations satisfied in earlier periods — not computable at all. The
+ *     recognition run corrects each contract to a target rather than posting
+ *     increments, so a single entry can carry a billing, a delivery and a
+ *     variation at once and no posting says which of the three it was. The
+ *     subledger names both of these in its own `notDerivable`;
+ *   receivables from contracts with customers — not separated anywhere. 1100
+ *     holds every trade debt and nothing marks which of them arose from a
+ *     contract on this page;
+ *   and 15.120's remaining transaction price, which is deliberately not
+ *     restated from the "still to earn" total above it. That total is every
+ *     contract on the register; `remainingObligations` leaves out the
+ *     cancelled and the completed, because neither has anything left to
+ *     deliver. Putting a paragraph number against the wrong one of those two
+ *     figures is how a note stops being a note.
+ */
+function ContractBalances({ assetMinor, liabilityMinor }: { assetMinor: string; liabilityMinor: string }) {
+  return (
+    <Panel className="mb-4 p-4">
+      <div className="sw-label">Contract balances — IFRS 15.116</div>
+      <table className="sw-table mt-3" style={{ maxWidth: "48rem" }}>
+        <caption className="sr-only">Contract assets and contract liabilities as the ledger stands</caption>
+        <thead>
+          <tr>
+            <th />
+            <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>As the ledger stands</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
+              Contract assets <span className="sw-code sw-sub">1310</span> — earned, not yet billed
+            </th>
+            <td className="sw-num" data-testid="note-contract-asset">
+              <Figure minor={assetMinor} zero="zero" colour={false} />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row" style={{ textAlign: "start", fontWeight: 400 }}>
+              Contract liabilities <span className="sw-code sw-sub">2310</span> — billed, not yet earned
+            </th>
+            <td className="sw-num" data-testid="note-contract-liability">
+              <Figure minor={liabilityMinor} zero="zero" colour={false} />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p className="sw-sub mt-3 max-w-[78ch]">
+        Read from accounts 1310 and 2310 themselves, so these are the figures the balance sheet carries rather than a
+        summary of the register above them. Both are stated as the ledger stands today.
+      </p>
+
+      <div className="sw-label mt-4">What this note does not yet carry</div>
+      <ul className="sw-sub mt-2 max-w-[78ch]" data-testid="note-gaps">
+        <li className="mt-1">
+          <strong>Opening balances, and the movement to these ones.</strong> IFRS 15.116(a) asks for both ends of the
+          reporting period. This screen has no period on it, so it states today&rsquo;s position; an opening figure
+          worked backwards from today would be an invention rather than a disclosure.
+        </li>
+        <li className="mt-1">
+          <strong>Revenue recognised in the period that was in the opening contract liability</strong> (IFRS 15.116(b)).
+          Not derivable from these books at all. Recognition corrects each contract to what it should carry rather than
+          posting an increment for each cause, so one entry can be a billing, a delivery and a variation at once and no
+          posting says which of them it was.
+        </li>
+        <li className="mt-1">
+          <strong>Revenue from obligations satisfied in earlier periods</strong> (IFRS 15.116(c)). Not derivable, for
+          the same reason.
+        </li>
+        <li className="mt-1">
+          <strong>Receivables from contracts with customers</strong>, which 15.116(a) asks for beside the two accounts
+          above. Trade receivables are not split between contract and non-contract customers anywhere in these books,
+          so nothing here can say which part of 1100 belongs in this note.
+        </li>
+        <li className="mt-1">
+          <strong>The transaction price allocated to obligations not yet satisfied</strong> (IFRS 15.120). The
+          &ldquo;still to earn&rdquo; figure above is not it: that is every contract on the register, and this
+          disclosure leaves out the cancelled and the completed, because neither has anything left to deliver. And
+          15.120(b) asks when the remainder becomes revenue, in time bands &mdash; nothing records an expected
+          completion date, so a band would be a guess wearing a disclosure&rsquo;s clothes.
+        </li>
+      </ul>
+    </Panel>
+  );
 }
 
 function Stat({ label, minor, hint }: { label: string; minor: string; hint?: string }) {

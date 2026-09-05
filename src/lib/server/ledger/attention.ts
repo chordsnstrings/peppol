@@ -4,13 +4,26 @@ import { LedgerError } from "./post";
 import { receivablesAgeing } from "./ar";
 import { payablesAgeing } from "./ap";
 import { reconcile } from "./bank";
-import { vatReturn } from "./vat";
+import {
+  vatReturn,
+  registrationThreshold,
+  MANDATORY_REGISTRATION_THRESHOLD_MINOR,
+  VOLUNTARY_REGISTRATION_THRESHOLD_MINOR,
+  REGISTRATION_APPLICATION_DAYS,
+  REGISTRATION_LOOKBACK_YEARS,
+} from "./vat";
 import { lastCompletedPeriod } from "./tax-periods";
 import { templateStatus } from "./recurring";
 import { assetRegister } from "./assets";
 import { claimList } from "./expenses";
 import { grniReport } from "./procurement";
 import { trialBalance } from "./reports";
+// Neither of these is read by a check on this list. They are here because the
+// shared reads below are what stops the month-end checklist and the
+// notification centre from reading them twice on one page, and the object that
+// holds them has to live in the module the other two both import.
+import { contractRegister } from "./revenue";
+import { contingentLiabilities } from "./trade-finance";
 
 /**
  * What is waiting for somebody, read out of the books rather than out of a
@@ -76,6 +89,14 @@ export interface Finding {
   amountMinor?: string;
   /** The screen where the work actually gets done. */
   href: string;
+  /**
+   * The day it has to be done by, where the check knows one. Never invented: a
+   * deadline this list made up is how a queue teaches people that its dates
+   * mean nothing.
+   */
+  dueOn?: string;
+  /** True where that deadline is set by law rather than by terms or by habit. */
+  statutory?: boolean;
 }
 
 /** A check that could not run, named rather than silently dropped. */
@@ -157,12 +178,97 @@ function money(minor: bigint, currency: string): string {
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
+/* ------------------------------------------------------- the shared reads --- */
+
+/**
+ * The reads this list, the month-end checklist and the notification centre make
+ * in common, made once.
+ *
+ * The notification centre fans out to twelve sources; two of them are this
+ * module and the checklist, and every source calls the module that already owns
+ * its fact. That rule is right, and it was costing one page load the same tax
+ * period looked up three times, the same quarter's VAT return computed twice,
+ * and the revenue register read twice inside the checklist alone. Each of those
+ * reads was made from inside a different check of a different module, so
+ * nothing could see the duplication — which is exactly why the answer is not a
+ * cache inside each of them. The duplication was always ACROSS them.
+ *
+ * So the checks still call the module that owns the fact, and the call goes
+ * through this object: one of them for the life of one request, holding the
+ * promise of each read against the arguments it was made with. A second caller
+ * asking the same question waits on the first read instead of starting another.
+ *
+ * A caller asking with different arguments gets its own read, and that is a
+ * decision rather than a shortcoming. The receivables ageing at today and the
+ * receivables ageing at a month end are two different facts; answering one with
+ * the other would make the checklist agree with the dashboard by being wrong.
+ * So the ageings, the reconciliations and the guarantee register are still read
+ * once per date they are asked about — what has gone is asking the same date
+ * twice.
+ *
+ * Nothing is remembered beyond the request. There is no invalidation to get
+ * wrong because the object is gone before anything can change under it, which
+ * is what lets this list keep its promise that every row is a live fact about
+ * the books.
+ *
+ * A read that rejects is shared exactly as one that resolves. Every caller runs
+ * its checks under `allSettled`, so a failing read costs the rows that needed
+ * it and nothing else — the behaviour each module already had when it made the
+ * failing call itself.
+ */
+export interface SharedReads {
+  trialBalance(periodLabel: string): Promise<Awaited<ReturnType<typeof trialBalance>>>;
+  receivables(asOf: Date): Promise<Awaited<ReturnType<typeof receivablesAgeing>>>;
+  payables(asOf: Date): Promise<Awaited<ReturnType<typeof payablesAgeing>>>;
+  reconcile(accountCode: string, asOf: Date): Promise<Awaited<ReturnType<typeof reconcile>>>;
+  /** The last tax period that has ended, on the registration's own stagger. */
+  vatPeriod(asOf: Date): Promise<Awaited<ReturnType<typeof lastCompletedPeriod>>>;
+  vatReturn(from: string, to: string): Promise<Awaited<ReturnType<typeof vatReturn>>>;
+  /** The recurring templates, judged against a month label. */
+  templates(month: string): Promise<Awaited<ReturnType<typeof templateStatus>>>;
+  /** The fixed asset register; without a date, as it stands. */
+  assets(asOf?: Date): Promise<Awaited<ReturnType<typeof assetRegister>>>;
+  contracts(): Promise<Awaited<ReturnType<typeof contractRegister>>>;
+  /** Guarantees and letters of credit, and the margin held against them. */
+  facilities(asOf: Date): Promise<Awaited<ReturnType<typeof contingentLiabilities>>>;
+}
+
+export function sharedReads(scope: { orgId: string; entityId: string }): SharedReads {
+  const inFlight = new Map<string, Promise<unknown>>();
+  const once = <T>(key: string, read: () => Promise<T>): Promise<T> => {
+    const running = inFlight.get(key);
+    if (running) return running as Promise<T>;
+    const started = read();
+    inFlight.set(key, started);
+    return started;
+  };
+  // The day is the whole of what distinguishes two reads of the same report, so
+  // it is the whole of the key. "-" is a date nobody asked for, which is a
+  // different question from any date somebody did.
+  const at = (d?: Date) => (d ? isoDay(d) : "-");
+
+  return {
+    trialBalance: (periodLabel) => once(`trial-balance:${periodLabel}`, () => trialBalance({ ...scope, periodLabel })),
+    receivables: (asOf) => once(`receivables:${at(asOf)}`, () => receivablesAgeing({ ...scope, asOf })),
+    payables: (asOf) => once(`payables:${at(asOf)}`, () => payablesAgeing({ ...scope, asOf })),
+    reconcile: (accountCode, asOf) =>
+      once(`bank:${accountCode}:${at(asOf)}`, () => reconcile({ ...scope, accountCode, asOf })),
+    vatPeriod: (asOf) => once(`vat-period:${at(asOf)}`, () => lastCompletedPeriod({ ...scope, regime: "VAT", asOf })),
+    vatReturn: (from, to) => once(`vat-return:${from}:${to}`, () => vatReturn({ ...scope, from, to })),
+    templates: (month) => once(`recurring:${month}`, () => templateStatus({ ...scope, asOf: month })),
+    assets: (asOf) => once(`assets:${at(asOf)}`, () => assetRegister({ ...scope, ...(asOf ? { asOf } : {}) })),
+    contracts: () => once("contracts", () => contractRegister(scope)),
+    facilities: (asOf) => once(`facilities:${at(asOf)}`, () => contingentLiabilities({ ...scope, asOf })),
+  };
+}
 
 interface Ctx {
   orgId: string;
   entityId: string;
   asOf: Date;
   currency: string;
+  /** Every report a check reads goes through this. See `SharedReads` above. */
+  reads: SharedReads;
 }
 
 interface Check {
@@ -185,7 +291,7 @@ interface Check {
 const trialBalanceCheck: Check = {
   key: "trial_balance",
   label: "The trial balance",
-  async run({ orgId, entityId, asOf, currency }) {
+  async run({ orgId, entityId, asOf, currency, reads }) {
     const period =
       (await prisma.accountingPeriod.findFirst({
         where: { orgId, entityId, isAdjustment: false, startsOn: { lte: asOf }, endsOn: { gte: asOf } },
@@ -196,7 +302,7 @@ const trialBalanceCheck: Check = {
       }));
     if (!period) return null;
 
-    const tb = await trialBalance({ orgId, entityId, periodLabel: period.label });
+    const tb = await reads.trialBalance(period.label);
     if (tb.balanced) return null;
 
     return {
@@ -217,8 +323,8 @@ const trialBalanceCheck: Check = {
 const overdueReceivables: Check = {
   key: "ar_overdue",
   label: "Overdue receivables",
-  async run({ orgId, entityId, asOf, currency }) {
-    const ageing = await receivablesAgeing({ orgId, entityId, asOf });
+  async run({ asOf, currency, reads }) {
+    const ageing = await reads.receivables(asOf);
     // Positive only: a credit note sits in the same ageing as a negative open
     // item, and netting it into "what customers owe" would understate the
     // chase list rather than the balance.
@@ -249,8 +355,8 @@ const overdueReceivables: Check = {
 const payablesDueSoon: Check = {
   key: "ap_due_soon",
   label: "Payables falling due",
-  async run({ orgId, entityId, asOf, currency }) {
-    const ageing = await payablesAgeing({ orgId, entityId, asOf });
+  async run({ asOf, currency, reads }) {
+    const ageing = await reads.payables(asOf);
     const window = ageing.open.filter((o) => {
       const days = dueIn(o, asOf);
       return BigInt(o.outstandingMinor) > 0n && days >= 0 && days <= DUE_SOON_DAYS;
@@ -282,7 +388,7 @@ const payablesDueSoon: Check = {
 const unreconciledBank: Check = {
   key: "bank_unmatched",
   label: "Unreconciled bank lines",
-  async run({ orgId, entityId, asOf, currency }) {
+  async run({ orgId, entityId, asOf, currency, reads }) {
     // Only the accounts that actually carry an unmatched line are reconciled.
     // A reconciliation reads every journal line on its account, so running one
     // per bank account on a dashboard would cost the whole cash ledger to
@@ -300,9 +406,7 @@ const unreconciledBank: Check = {
       orderBy: { code: "asc" },
     });
 
-    const statements = await Promise.all(
-      accounts.map((a) => reconcile({ orgId, entityId, accountCode: a.code, asOf })),
-    );
+    const statements = await Promise.all(accounts.map((a) => reads.reconcile(a.code, asOf)));
 
     const lines = statements.flatMap((s) => s.unmatchedBank);
     if (lines.length === 0) return null;
@@ -331,24 +435,19 @@ const unreconciledBank: Check = {
 const vatReturnOutstanding: Check = {
   key: "vat_return",
   label: "The VAT return",
-  async run({ orgId, entityId, asOf, currency }) {
+  async run({ orgId, entityId, asOf, currency, reads }) {
     // The FTA's own period, not the calendar's. This used to be
     // `Math.floor(month / 3)` here and in two other modules, which told a
     // taxpayer on the February stagger what was payable for the wrong three
     // months against a due date a month late — from the check whose entire
     // purpose is stopping somebody missing a VAT deadline.
-    const period = await lastCompletedPeriod({ orgId, entityId, regime: "VAT", asOf });
+    const period = await reads.vatPeriod(asOf);
     const quarter = {
       from: new Date(`${period.from}T00:00:00.000Z`),
       to: new Date(`${period.to}T00:00:00.000Z`),
       label: period.label,
     };
-    const ret = await vatReturn({
-      orgId,
-      entityId,
-      from: period.from,
-      to: period.to,
-    });
+    const ret = await reads.vatReturn(period.from, period.to);
 
     // A quarter with no VAT either way has nothing to file from these books. A
     // registered person may still owe a nil return, but nagging an entity that
@@ -400,6 +499,104 @@ const vatReturnOutstanding: Check = {
           : ""),
       amountMinor: ret.netVatMinor,
       href: "/accounting/vat",
+      dueOn: period.dueOn,
+      statutory: true,
+    };
+  },
+};
+
+/**
+ * Turnover crossing the line at which registering for VAT stops being a choice.
+ *
+ * This is the one obligation on the list that arrives before any of the
+ * machinery for it exists. There is no return to be late for and no period to
+ * be open, because the business is not registered — so every other VAT check
+ * here is silent by construction, and the first thing that happens is a
+ * liability for tax on supplies already made at prices that did not include it.
+ * The corporate tax module has watched a threshold since it was written; this
+ * one, which arrives years earlier for a growing business, was not watched at
+ * all.
+ *
+ * The measure is the law's and not the accounts': a rolling twelve months,
+ * which is why it cannot be read off a return or a financial year, and every
+ * such window rather than only the one ending today — a business that crossed
+ * during a good year and has been quiet since was required to register then and
+ * applies to deregister now, which is a different thing from never having had
+ * to. `vat.ts` owns all of it, including what counts towards the figure and
+ * what does not.
+ */
+const registrationThresholdNear: Check = {
+  key: "vat_registration",
+  label: "The VAT registration threshold",
+  async run({ orgId, entityId, asOf, currency }) {
+    const t = await registrationThreshold({ orgId, entityId, asOf });
+    if (t.standing !== "over_mandatory" && t.standing !== "approaching_mandatory") return null;
+
+    // The ledger is only read for an entity with no registration in force, and
+    // both of those standings are ones it was read for, so the figures are
+    // there to be quoted.
+    const total = BigInt(t.totalMinor ?? "0");
+    const mandatory = `AED ${fmtMinor(MANDATORY_REGISTRATION_THRESHOLD_MINOR, "AED")}`;
+    const voluntary = `AED ${fmtMinor(VOLUNTARY_REGISTRATION_THRESHOLD_MINOR, "AED")}`;
+
+    // What the figure is made of, so nobody has to guess whether an exempt
+    // supply or an import is inside it.
+    const composition =
+      `Over ${t.from} to ${t.to} that is ${money(BigInt(t.suppliesMinor ?? "0"), currency)} of taxable supplies ` +
+      `made` +
+      (BigInt(t.concernedMinor ?? "0") === 0n
+        ? ""
+        : ` and ${money(BigInt(t.concernedMinor ?? "0"), currency)} of goods and services imported and ` +
+          `self-accounted, which Article 19 counts towards the same threshold`) +
+      `. Exempt and out-of-scope supplies are not taxable supplies and are not in it; neither is a sale of ` +
+      `capital assets, which Article 20 excludes and which these books cannot tell from trading revenue.`;
+    const currencyNote = t.currencyDiffers
+      ? ` These books are kept in ${currency} and the threshold is a dirham figure, so the two are not directly ` +
+        `comparable — work the twelve months out in dirhams before acting on this.`
+      : "";
+
+    if (t.standing === "approaching_mandatory") {
+      return {
+        key: "vat_registration",
+        severity: "soon",
+        title: "Turnover is close to the VAT registration threshold",
+        detail:
+          `Taxable supplies over the last twelve months come to ${money(total, currency)}, within a tenth of the ` +
+          `${mandatory} mandatory registration threshold, and no twelve months in the last ` +
+          `${REGISTRATION_LOOKBACK_YEARS} years has been over it. Nothing is required yet. The test is ` +
+          `the previous twelve months measured on the day it is asked — not a financial year and not a tax ` +
+          `period — so a month like the last one crosses it, and the application then has to reach the FTA ` +
+          `within ${REGISTRATION_APPLICATION_DAYS} days of the day it does. Registering is already available: ` +
+          `the voluntary threshold is ${voluntary}. ${composition}${currencyNote}`,
+        amountMinor: total.toString(),
+        href: "/accounting/vat",
+      };
+    }
+
+    const late = t.applyBy !== null && isoDay(asOf) > t.applyBy;
+    const stillOver = total > MANDATORY_REGISTRATION_THRESHOLD_MINOR;
+    return {
+      key: "vat_registration",
+      severity: "urgent",
+      title: late ? "VAT registration was required and has not been applied for" : "VAT registration is now required",
+      detail:
+        `The twelve months to ${t.crossedOn} came to ${money(BigInt(t.crossedTotalMinor ?? "0"), currency)}, over ` +
+        `the ${mandatory} mandatory registration threshold. Article 13 of Federal Decree-Law 8/2017 requires ` +
+        `registration once the previous twelve months exceed it, and the application has to reach the FTA within ` +
+        `${REGISTRATION_APPLICATION_DAYS} days — by ${t.applyBy}` +
+        (late ? `, ${plural(daysBetween(new Date(`${t.applyBy}T00:00:00Z`), asOf), "day", "days")} ago. ` : `. `) +
+        (stillOver
+          ? ""
+          : `The last twelve months come to ${money(total, currency)}, which is under the threshold — that does ` +
+            `not undo it. Every twelve-month window is tested, and a business that has fallen back applies to ` +
+            `deregister under Article 21 rather than never having had to register. `) +
+        `Registering late does not move the liability: tax is due on supplies made from the day registration ` +
+        `should have taken effect, and it cannot be added to invoices already sent. ${composition} The threshold ` +
+        `is also crossed by supplies expected in the next 30 days, which is a fact about the order book rather ` +
+        `than about the ledger and is not in this figure.${currencyNote}`,
+      amountMinor: (stillOver ? total : BigInt(t.crossedTotalMinor ?? "0")).toString(),
+      href: "/accounting/vat",
+      ...(t.applyBy === null ? {} : { dueOn: t.applyBy, statutory: true }),
     };
   },
 };
@@ -436,8 +633,8 @@ const periodsStillOpen: Check = {
 const recurringBehind: Check = {
   key: "recurring_behind",
   label: "Recurring journals",
-  async run({ orgId, entityId, asOf, currency }) {
-    const status = await templateStatus({ orgId, entityId, asOf: monthLabel(asOf) });
+  async run({ asOf, currency, reads }) {
+    const status = await reads.templates(monthLabel(asOf));
     const behind = status.templates.filter((t) => t.behind);
     if (behind.length === 0) return null;
 
@@ -521,7 +718,7 @@ const receivedNotInvoiced: Check = {
 const assetsNotDepreciated: Check = {
   key: "depreciation_due",
   label: "Fixed asset depreciation",
-  async run({ orgId, entityId, asOf }) {
+  async run({ asOf, reads }) {
     // The last month that has fully ended, not the last month a period was
     // closed for. Depreciation is what you run *before* closing a month, so
     // waiting for the close to decide whether depreciation is due would be
@@ -529,7 +726,7 @@ const assetsNotDepreciated: Check = {
     const lastMonthEnd = new Date(Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), 0));
     const month = monthLabel(lastMonthEnd);
 
-    const register = await assetRegister({ orgId, entityId });
+    const register = await reads.assets();
     const behind = register.assets.filter(
       (a) =>
         a.status === "active" &&
@@ -563,6 +760,7 @@ const assetsNotDepreciated: Check = {
 const CHECKS: Check[] = [
   trialBalanceCheck,
   vatReturnOutstanding,
+  registrationThresholdNear,
   overdueReceivables,
   payablesDueSoon,
   periodsStillOpen,
@@ -588,6 +786,14 @@ export async function attentionList(opts: {
   entityId: string;
   /** Defaults to now. Passing it makes the whole list reproducible. */
   asOf?: Date | string;
+  /**
+   * The reads this list shares with whatever else is on the page. Left out, it
+   * makes its own and nothing is shared — which is right for the attention
+   * screen, where this list is the only thing being read. The notification
+   * centre passes its own, because there this list is one source of twelve and
+   * two of the others ask the same reports the same questions.
+   */
+  reads?: SharedReads;
 }): Promise<AttentionList> {
   const asOf = asDate(opts.asOf);
 
@@ -602,7 +808,13 @@ export async function attentionList(opts: {
     .then((b) => b?.functionalCurrency ?? "AED")
     .catch(() => "AED");
 
-  const ctx: Ctx = { orgId: opts.orgId, entityId: opts.entityId, asOf, currency };
+  const ctx: Ctx = {
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    asOf,
+    currency,
+    reads: opts.reads ?? sharedReads({ orgId: opts.orgId, entityId: opts.entityId }),
+  };
 
   // allSettled, not all: see the note at the top of this file. One check
   // throwing must cost its own row and nothing else.

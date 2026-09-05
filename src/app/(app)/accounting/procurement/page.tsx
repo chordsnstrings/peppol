@@ -31,6 +31,8 @@ interface Grni {
   orders: GrniOrder[];
   totals: { outstandingMinor: string };
   ledger: { account: string; outstandingMinor: string; differenceMinor: string; agrees: boolean };
+  /** What the report read, and what it did not. Shown rather than assumed. */
+  note: string;
 }
 interface ListResponse { orders: OrderRow[]; grni: Grni }
 
@@ -436,6 +438,8 @@ function GrniPanel({ grni }: { grni: Grni }) {
           an unbilled delivery and a delivery that never happened leave the same trace here.
         </p>
       )}
+
+      <p className="sw-sub mt-2 max-w-[80ch]" data-testid="grni-note">{grni.note}</p>
 
       {grni.orders.length > 0 && (
         <>

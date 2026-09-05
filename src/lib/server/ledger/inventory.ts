@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
-import { post, LedgerError } from "./post";
+import { Prisma } from "@prisma/client";
+import { post, LedgerError, type PostInput } from "./post";
 import { planConsumption, settleTakes, effectiveUnitCost, layerValue, oldestFirst, type LayerTake } from "./inventory-fifo";
 import {
   apportion, batchPut, batchTake, daysUntil, expiryHorizon, readBatchKind, reorderVerdict,
@@ -71,6 +72,28 @@ import {
  *  - Expired stock still on the shelf is worth nothing. Carrying it at cost
  *    overstates the balance sheet, so the sweep writes it off through the
  *    ledger like any other loss instead of merely relabelling it.
+ *
+ * Two clerks at one SKU is the case every one of those opinions is decided
+ * against, and it used to be the case none of them survived:
+ *
+ *  - Every movement read the item, worked out what the item would hold
+ *    afterwards, posted, and then SET `quantityMilli` and `valueMinor` to the
+ *    figures it had worked out. Two issues from one SKU both posted real cost
+ *    of goods sold and the item card ended at one of the two answers, so the
+ *    stock ledger and account 1200 disagreed permanently while the journal
+ *    still balanced — the worst shape a defect can take here, because nothing
+ *    on any screen says anything is wrong.
+ *  - Equal quantities were worse still. Both issues computed the same closing
+ *    balance, the posting key was made out of that balance, so the second
+ *    posting was recognised as a retry of the first and never happened: two
+ *    despatch notes, one charge to cost of sales.
+ *
+ * So the item's own row is the lock, and every figure a movement is settled
+ * against is read while holding it (see `record`). The write is an INCREMENT of
+ * what the row already holds rather than a SET of what the caller expected it
+ * to hold, `InventoryItem_quantity_check` is what actually refuses an overdraw,
+ * and a posting is keyed on the movement's own identity — which is unique to it
+ * however many identical movements there are.
  *
  * Quantities are thousandths, so 1.5 kg is 1500. Money is minor units. Neither
  * is ever a float.
@@ -196,6 +219,23 @@ export interface MovementResult {
 
 type ItemRow = Awaited<ReturnType<typeof loadItem>>;
 
+/**
+ * Either the client or a transaction of it.
+ *
+ * Every read a movement is settled against takes one of these, because those
+ * reads have to happen inside the transaction that holds the item's row — see
+ * `record`. The same helpers still serve the reports, which pass `prisma` and
+ * hold nothing.
+ */
+type Db = Prisma.TransactionClient;
+
+/** What the item holds, as its own row states it. */
+interface Held {
+  quantityMilli: bigint;
+  valueMinor: bigint;
+  nrvMinor: bigint | null;
+}
+
 async function loadItem(orgId: string, entityId: string, sku: string) {
   const item = await prisma.inventoryItem.findFirst({ where: { orgId, entityId, sku } });
   if (!item) throw new LedgerError(`SKU ${sku} is not on the item list.`);
@@ -203,9 +243,22 @@ async function loadItem(orgId: string, entityId: string, sku: string) {
   return item;
 }
 
+/**
+ * Take the item's row, and hold it until the transaction ends.
+ *
+ * The update is what takes the lock; the row it hands back is what the row
+ * actually holds now, which is the whole point. A second clerk moving the same
+ * SKU waits here and then settles against what the first one left, rather than
+ * against the copy their own request read a moment earlier.
+ */
+async function lockItem(tx: Db, item: ItemRow): Promise<Held> {
+  const row = await tx.inventoryItem.update({ where: { id: item.id }, data: { updatedAt: new Date() } });
+  return { quantityMilli: row.quantityMilli, valueMinor: row.valueMinor, nrvMinor: row.nrvMinor };
+}
+
 /** The open layers of a FIFO item, oldest first. Scoped by org as well as item. */
-async function openLayers(item: ItemRow) {
-  const rows = await prisma.inventoryLayer.findMany({
+async function openLayers(tx: Db, item: ItemRow) {
+  const rows = await tx.inventoryLayer.findMany({
     where: { orgId: item.orgId, itemId: item.id, remainingMilli: { gt: 0n } },
     orderBy: [{ receivedOn: "asc" }, { seq: "asc" }],
   });
@@ -233,9 +286,12 @@ async function openLayers(item: ItemRow) {
  * Where a reference is NOT given the module cannot tell a retry from a genuine
  * second movement, and does not guess: two issues of 50 on one day are
  * ordinarily two issues, and refusing the second would be worse than repeating
- * it. The posting is still keyed (see `balanceKey`), so the half-failed case —
- * posted but not recorded — cannot double-post; only a complete, successful act
- * repeated in full moves stock twice, and a reference is what prevents that.
+ * it. So a reference is the only thing that stops a complete, successful act
+ * repeated in full from moving stock twice.
+ *
+ * The half-failed case — the stock moved and the posting did not — is not left
+ * to this. The movement is written before the entry, keyed on it, and taken
+ * back out if the entry is refused; see `record` and `postForMovement`.
  */
 async function priorMovement(
   item: ItemRow,
@@ -286,15 +342,19 @@ async function replay(item: ItemRow, m: NonNullable<Awaited<ReturnType<typeof pr
 /**
  * The idempotency key for a movement's posting.
  *
- * It names the position the item is being moved *to*, not the moment it moved —
- * the same shape as `revenue.ts`. Two genuine receipts of the same item on one
- * day move it to two different balances and so carry two different keys, while a
- * retry of an act whose posting landed but whose movement did not lands on the
- * same balances again and is recognised as the same posting. Dating the key
- * instead would collapse the first pair and miss the second.
+ * It names the movement, and nothing else. The key used to name the position
+ * the item was being moved *to* — item, kind and the two closing balances —
+ * which is exactly the guess that fails when two people move one SKU at once:
+ * two issues of 50 from a shelf of 200 both compute a closing balance of 150,
+ * so they carry the same key, so only one of them ever posts. Two despatch
+ * notes, one charge to cost of sales, and the difference sits in 1200 for good.
+ *
+ * The movement's row id cannot collide, because the database made it. It is
+ * available because the movement is now written before the entry is posted
+ * rather than after — see `record`, and `postForMovement` for what happens when
+ * the posting is refused.
  */
-const balanceKey = (item: ItemRow, kind: string, newQty: bigint, newValue: bigint) =>
-  `inventory:${kind.toLowerCase()}:${item.id}:${newQty}:${newValue}`;
+const movementKey = (kind: string, movementId: string) => `inventory:${kind.toLowerCase()}:${movementId}`;
 
 /* --------------------------------------------- where the goods actually are */
 
@@ -361,8 +421,8 @@ async function movementLocation(item: ItemRow, explicit?: string): Promise<Locat
 }
 
 /** What one location holds of one item, from the movements that named it. */
-async function heldAt(item: ItemRow, locationId: string): Promise<bigint> {
-  const g = await prisma.inventoryMovement.aggregate({
+async function heldAt(tx: Db, item: ItemRow, locationId: string): Promise<bigint> {
+  const g = await tx.inventoryMovement.aggregate({
     where: { orgId: item.orgId, itemId: item.id, locationId },
     _sum: { quantityMilli: true },
   });
@@ -370,8 +430,8 @@ async function heldAt(item: ItemRow, locationId: string): Promise<bigint> {
 }
 
 /** Has this item ever been recorded anywhere in particular? */
-async function everLocated(item: ItemRow): Promise<boolean> {
-  const n = await prisma.inventoryMovement.count({
+async function everLocated(tx: Db, item: ItemRow): Promise<boolean> {
+  const n = await tx.inventoryMovement.count({
     where: { orgId: item.orgId, itemId: item.id, locationId: { not: null } },
   });
   return n > 0;
@@ -386,9 +446,9 @@ async function everLocated(item: ItemRow): Promise<boolean> {
  * everywhere; it is sitting somewhere nobody has said, and refusing every issue
  * of it would punish the business for having opened a warehouse.
  */
-async function refuseOverdraw(item: ItemRow, location: LocationRow, qty: bigint) {
-  if (!(await everLocated(item))) return;
-  const held = await heldAt(item, location.id);
+async function refuseOverdraw(tx: Db, item: ItemRow, location: LocationRow, qty: bigint) {
+  if (!(await everLocated(tx, item))) return;
+  const held = await heldAt(tx, item, location.id);
   if (qty > held) {
     throw new LedgerError(
       `${location.code} holds ${fmtQty(held)} ${item.uom} of ${item.sku}, and ${fmtQty(qty)} was taken out of it. ` +
@@ -398,8 +458,8 @@ async function refuseOverdraw(item: ItemRow, location: LocationRow, qty: bigint)
 }
 
 /** An item is tracked by batch once anything has ever been booked into one. */
-async function isBatchTracked(item: ItemRow): Promise<boolean> {
-  const n = await prisma.stockBatch.count({
+async function isBatchTracked(tx: Db, item: ItemRow): Promise<boolean> {
+  const n = await tx.stockBatch.count({
     where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id },
   });
   return n > 0;
@@ -413,8 +473,8 @@ async function isBatchTracked(item: ItemRow): Promise<boolean> {
  * existence inside the same transaction as the movement (see the note there).
  */
 async function intoBatch(
-  item: ItemRow, ref: BatchRef, qty: bigint, on: string, locationId: string | null,
-): Promise<{ batchId?: string; openBatch?: RecordInput["openBatch"]; batchDelta: bigint }> {
+  tx: Db, item: ItemRow, ref: BatchRef, qty: bigint, on: string, locationId: string | null,
+): Promise<{ batchId?: string; openBatch?: Settled["openBatch"]; batchDelta: bigint }> {
   const code = ref.code?.trim();
   if (!code) throw new LedgerError("A tracked lot needs a code — that is the whole of what a batch number is for.");
 
@@ -426,7 +486,7 @@ async function intoBatch(
     throw new LedgerError(`Batch ${code} of ${item.sku} would expire on ${iso(expiresOn)}, before it arrived on ${on}.`);
   }
 
-  const existing = await prisma.stockBatch.findFirst({
+  const existing = await tx.stockBatch.findFirst({
     where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id, code },
   });
 
@@ -489,7 +549,7 @@ function serialRefusal(item: ItemRow, code: string, reason: "serial-split" | "se
  * system knowing "some of them" is the same as it knowing nothing.
  */
 async function outOfBatch(
-  item: ItemRow, code: string | undefined, qty: bigint, act: string,
+  tx: Db, item: ItemRow, code: string | undefined, qty: bigint, act: string,
   /**
    * Quarantined goods still have to be moved — usually into a quarantine bay,
    * which is the whole point of having one. Refusing to move them leaves them
@@ -499,14 +559,14 @@ async function outOfBatch(
 ): Promise<{ batchId: string | null; batchDelta: bigint; batch: BatchRow | null }> {
   const named = code?.trim();
   if (!named) {
-    if (!(await isBatchTracked(item))) return { batchId: null, batchDelta: 0n, batch: null };
+    if (!(await isBatchTracked(tx, item))) return { batchId: null, batchDelta: 0n, batch: null };
     throw new LedgerError(
       `${item.sku} is tracked by batch, so ${act} has to say which batch it came out of. ` +
         `Guessing which lot went out is how a recall becomes impossible to trace.`,
     );
   }
 
-  const batch = await prisma.stockBatch.findFirst({
+  const batch = await tx.stockBatch.findFirst({
     where: { orgId: item.orgId, entityId: item.entityId, itemId: item.id, code: named },
   });
   if (!batch) throw new LedgerError(`There is no batch ${named} of ${item.sku}.`);
@@ -615,45 +675,42 @@ export async function receive(opts: {
   if (seen) return replay(item, seen);
 
   const location = await movementLocation(item, opts.location);
-  if (!opts.batch && (await isBatchTracked(item))) {
+  if (!opts.batch && (await isBatchTracked(prisma, item))) {
     throw new LedgerError(
       `${item.sku} is tracked by batch, so a receipt has to say which batch arrived. ` +
         `Stock booked into no batch is stock that no later issue could name.`,
     );
   }
-  const lot = opts.batch ? await intoBatch(item, opts.batch, qty, opts.movedOn, location?.id ?? null) : null;
 
-  const newQty = item.quantityMilli + qty;
-  const newValue = item.valueMinor + value;
-
-  let entryId: string | null = null;
-  let reference: string | null = null;
-  if (!opts.alreadyPosted && value > 0n) {
-    const entry = await post({
+  const fifo = item.costMethod === "FIFO";
+  return record({
+    item, movedOn: opts.movedOn, ref: opts.reference, memo: opts.memo, actorId: opts.actorId,
+    // A receipt's own quantity and cost are the caller's, not the item's, so
+    // nothing here depends on what the shelf held — but the batch it goes into
+    // does, and a serial number already on the shelf has to be refused against
+    // the register as it stands rather than as this request read it.
+    settle: async (tx) => ({
+      kind: "RECEIPT",
+      qty,
+      value,
+      locationId: location?.id ?? null,
+      ...(opts.batch ? await intoBatch(tx, item, opts.batch, qty, opts.movedOn, location?.id ?? null) : {}),
+      // Under FIFO the receipt's own rate is the movement's rate; a running
+      // average would describe stock this receipt is not part of.
+      rate: fifo ? effectiveUnitCost(value, qty) : undefined,
+      openLayer: fifo ? { receivedOn: opts.movedOn, quantityMilli: qty, unitCostMinor: effectiveUnitCost(value, qty) } : undefined,
+    }),
+    entryFor: opts.alreadyPosted || value === 0n ? undefined : (s, movementId) => ({
       orgId: opts.orgId, entityId: opts.entityId, entryDate: opts.movedOn,
       memo: opts.memo ?? `Stock received — ${item.sku}`,
       source: "inventory", sourceType: "RECEIPT", sourceId: item.id,
-      externalKey: balanceKey(item, "RECEIPT", newQty, newValue),
+      externalKey: movementKey(s.kind, movementId),
       actorType: "HUMAN", actorId: opts.actorId, series: "IN",
       lines: [
         { account: item.stockAccount, debit: value, memo: `${item.sku} ${item.name}` },
         { account: opts.contraAccount ?? "2000", credit: value, memo: `${item.sku} received` },
       ],
-    });
-    entryId = entry.id;
-    reference = `${entry.series}-${entry.number}`;
-  }
-
-  const fifo = item.costMethod === "FIFO";
-  return record({
-    item, kind: "RECEIPT", movedOn: opts.movedOn, qty, value,
-    newQty, newValue, entryId, reference, ref: opts.reference, memo: opts.memo,
-    actorId: opts.actorId, locationId: location?.id ?? null,
-    batchId: lot?.batchId, openBatch: lot?.openBatch, batchDelta: lot?.batchDelta,
-    // Under FIFO the receipt's own rate is the movement's rate; a running
-    // average would describe stock this receipt is not part of.
-    rate: fifo ? effectiveUnitCost(value, qty) : undefined,
-    openLayer: fifo ? { receivedOn: opts.movedOn, quantityMilli: qty, unitCostMinor: effectiveUnitCost(value, qty) } : undefined,
+    }),
   });
 }
 
@@ -694,47 +751,50 @@ export async function issue(opts: {
   const seen = await priorMovement(item, ["ISSUE"], opts.reference, { movedOn: opts.movedOn, quantityMilli: -qty });
   if (seen) return replay(item, seen);
 
-  if (qty > item.quantityMilli) {
-    throw new LedgerError(
-      `There are only ${fmtQty(item.quantityMilli)} ${item.uom} of ${item.sku} in stock, and ${fmtQty(qty)} was issued. ` +
-        `A receipt is probably missing — issuing stock the system has no cost for would mean inventing one.`,
-    );
-  }
-
   const location = await movementLocation(item, opts.location);
-  if (location) await refuseOverdraw(item, location, qty);
-  const lot = await outOfBatch(item, opts.batch, qty, "an issue");
 
-  const consumed = await consume(item, qty);
-  const value = consumed.costMinor;
-  const newQty = item.quantityMilli - qty;
-  // The last issue takes the whole remaining value, so rounding cannot strand
-  // a few fils of cost against zero quantity.
-  const newValue = newQty === 0n ? 0n : item.valueMinor - value;
-
-  let entryId: string | null = null;
-  let reference: string | null = null;
-  if (value > 0n) {
-    const entry = await post({
+  return record({
+    item, movedOn: opts.movedOn, ref: opts.reference, memo: opts.memo, actorId: opts.actorId,
+    // Everything an issue costs depends on what the item holds, so all of it is
+    // worked out here, against the row this transaction is holding. The
+    // refusal below is the sentence a stock controller reads when they are the
+    // only one issuing; `InventoryItem_quantity_check` is what refuses the
+    // loser when they are not.
+    settle: async (tx, held) => {
+      if (qty > held.quantityMilli) {
+        throw new LedgerError(
+          `There are only ${fmtQty(held.quantityMilli)} ${item.uom} of ${item.sku} in stock, and ${fmtQty(qty)} was issued. ` +
+            `A receipt is probably missing — issuing stock the system has no cost for would mean inventing one.`,
+        );
+      }
+      if (location) await refuseOverdraw(tx, item, location, qty);
+      const lot = await outOfBatch(tx, item, opts.batch, qty, "an issue");
+      const consumed = await consume(tx, item, held, qty);
+      return {
+        kind: "ISSUE",
+        qty: -qty,
+        value: -consumed.costMinor,
+        rate: consumed.rate,
+        takes: consumed.takes,
+        locationId: location?.id ?? null,
+        batchId: lot.batchId,
+        batchDelta: lot.batchDelta,
+      };
+    },
+    // Stock that cost nothing raises no entry, and what it cost is only known
+    // once the item has been asked — so the decision is made on the settled
+    // figure rather than on anything read beforehand.
+    entryFor: (s, movementId) => s.value === 0n ? null : {
       orgId: opts.orgId, entityId: opts.entityId, entryDate: opts.movedOn,
       memo: opts.memo ?? `Stock issued — ${item.sku}`,
       source: "inventory", sourceType: "ISSUE", sourceId: item.id,
-      externalKey: balanceKey(item, "ISSUE", newQty, newValue),
+      externalKey: movementKey(s.kind, movementId),
       actorType: "HUMAN", actorId: opts.actorId, series: "IN",
       lines: [
-        { account: item.cogsAccount, debit: value, memo: `${item.sku} ${item.name}` },
-        { account: item.stockAccount, credit: value, memo: `${item.sku} issued` },
+        { account: item.cogsAccount, debit: -s.value, memo: `${item.sku} ${item.name}` },
+        { account: item.stockAccount, credit: -s.value, memo: `${item.sku} issued` },
       ],
-    });
-    entryId = entry.id;
-    reference = `${entry.series}-${entry.number}`;
-  }
-
-  return record({
-    item, kind: "ISSUE", movedOn: opts.movedOn, qty: -qty, value: -value,
-    newQty, newValue, entryId, reference, ref: opts.reference, memo: opts.memo,
-    actorId: opts.actorId, rate: consumed.rate, takes: consumed.takes,
-    locationId: location?.id ?? null, batchId: lot.batchId, batchDelta: lot.batchDelta,
+    },
   });
 }
 
@@ -777,68 +837,67 @@ export async function adjust(opts: {
     { movedOn: opts.movedOn, balanceQtyMilli: counted });
   if (seen) return replay(item, seen);
 
-  const delta = counted - item.quantityMilli;
-  const kind = delta < 0n ? "WRITE_OFF" : "ADJUSTMENT";
-  if (delta === 0n) throw new LedgerError(`The count agrees with the system: ${fmtQty(counted)} ${item.uom}. Nothing to adjust.`);
-
   const location = await movementLocation(item, opts.location);
-  const named = opts.batch?.trim();
-  const lot = !named
-    ? null
-    : delta < 0n
-      ? await outOfBatch(item, named, -delta, "a count")
-      : await intoBatch(item, { code: named }, delta, opts.movedOn, location?.id ?? null);
+  const fifo = item.costMethod === "FIFO";
 
-  const rate = unitCost(item.valueMinor, item.quantityMilli);
-  // A surplus is valued at the current average — it has no receipt behind it, so
-  // it has no cost of its own. A shortfall removes what that quantity was
-  // carried at: oldest first under FIFO, at the average otherwise, and the last
-  // unit takes the remainder either way.
-  const shortfall = delta < 0n ? await consume(item, -delta) : null;
-  const value = shortfall ? -shortfall.costMinor : (rate * delta) / MILLI;
+  return record({
+    item, movedOn: opts.movedOn, ref: opts.reference, memo: opts.reason, actorId: opts.actorId,
+    // A count is a statement about the shelf, so the difference it closes is
+    // the difference against what the system says NOW. Working it out from a
+    // figure read a moment earlier would post a variance for stock that has
+    // since been issued, and issue that stock a second time.
+    settle: async (tx, held) => {
+      const delta = counted - held.quantityMilli;
+      if (delta === 0n) {
+        throw new LedgerError(`The count agrees with the system: ${fmtQty(counted)} ${item.uom}. Nothing to adjust.`);
+      }
+      const named = opts.batch?.trim();
+      const lot = !named
+        ? null
+        : delta < 0n
+          ? await outOfBatch(tx, item, named, -delta, "a count")
+          : await intoBatch(tx, item, { code: named }, delta, opts.movedOn, location?.id ?? null);
 
-  const newQty = counted;
-  const newValue = newQty === 0n ? 0n : item.valueMinor + value;
-
-  let entryId: string | null = null;
-  let reference: string | null = null;
-  if (value !== 0n) {
-    const entry = await post({
+      const rate = unitCost(held.valueMinor, held.quantityMilli);
+      // A surplus is valued at the current average — it has no receipt behind it, so
+      // it has no cost of its own. A shortfall removes what that quantity was
+      // carried at: oldest first under FIFO, at the average otherwise, and the last
+      // unit takes the remainder either way.
+      const shortfall = delta < 0n ? await consume(tx, item, held, -delta) : null;
+      return {
+        kind: delta < 0n ? "WRITE_OFF" : "ADJUSTMENT",
+        qty: delta,
+        value: shortfall ? -shortfall.costMinor : (rate * delta) / MILLI,
+        rate: fifo ? (shortfall ? shortfall.rate : rate) : undefined,
+        takes: shortfall?.takes,
+        locationId: location?.id ?? null,
+        batchId: lot?.batchId,
+        openBatch: lot && "openBatch" in lot ? lot.openBatch : undefined,
+        batchDelta: lot?.batchDelta,
+        // A counted surplus takes its place as the newest layer: the system has no
+        // evidence it arrived earlier, and dating it earlier would put a cost in
+        // front of receipts that really were earlier.
+        openLayer: fifo && delta > 0n
+          ? { receivedOn: opts.movedOn, quantityMilli: delta, unitCostMinor: rate }
+          : undefined,
+      };
+    },
+    entryFor: (s, movementId) => s.value === 0n ? null : {
       orgId: opts.orgId, entityId: opts.entityId, entryDate: opts.movedOn,
       memo: opts.reason ?? `Stock adjustment — ${item.sku}`,
       source: "inventory", sourceType: "ADJUSTMENT", sourceId: item.id,
-      externalKey: balanceKey(item, kind, newQty, newValue),
+      externalKey: movementKey(s.kind, movementId),
       actorType: "HUMAN", actorId: opts.actorId, series: "IA",
-      lines: value > 0n
+      lines: s.value > 0n
         ? [
-            { account: item.stockAccount, debit: value, memo: `${item.sku} surplus on count` },
-            { account: item.varianceAccount, credit: value, memo: `${item.sku} surplus` },
+            { account: item.stockAccount, debit: s.value, memo: `${item.sku} surplus on count` },
+            { account: item.varianceAccount, credit: s.value, memo: `${item.sku} surplus` },
           ]
         : [
-            { account: item.varianceAccount, debit: -value, memo: `${item.sku} shortfall` },
-            { account: item.stockAccount, credit: -value, memo: `${item.sku} shortfall on count` },
+            { account: item.varianceAccount, debit: -s.value, memo: `${item.sku} shortfall` },
+            { account: item.stockAccount, credit: -s.value, memo: `${item.sku} shortfall on count` },
           ],
-    });
-    entryId = entry.id;
-    reference = `${entry.series}-${entry.number}`;
-  }
-
-  const fifo = item.costMethod === "FIFO";
-  return record({
-    item, kind, movedOn: opts.movedOn,
-    qty: delta, value, newQty, newValue, entryId, reference,
-    ref: opts.reference, memo: opts.reason, actorId: opts.actorId,
-    rate: fifo ? (shortfall ? shortfall.rate : rate) : undefined,
-    takes: shortfall?.takes,
-    locationId: location?.id ?? null,
-    batchId: lot?.batchId, openBatch: lot && "openBatch" in lot ? lot.openBatch : undefined,
-    batchDelta: lot?.batchDelta,
-    // A counted surplus takes its place as the newest layer: the system has no
-    // evidence it arrived earlier, and dating it earlier would put a cost in
-    // front of receipts that really were earlier.
-    openLayer: fifo && delta > 0n
-      ? { receivedOn: opts.movedOn, quantityMilli: delta, unitCostMinor: rate }
-      : undefined,
+    },
   });
 }
 
@@ -849,10 +908,12 @@ export async function adjust(opts: {
  * chooses one — so this is the single place the choice is made, and everything
  * that takes stock out goes through it.
  */
-async function consume(item: ItemRow, qtyMilli: bigint): Promise<{ costMinor: bigint; rate?: bigint; takes?: LayerTake[] }> {
-  if (item.costMethod !== "FIFO") return { costMinor: issueValue(item, qtyMilli) };
+async function consume(
+  tx: Db, item: ItemRow, held: Held, qtyMilli: bigint,
+): Promise<{ costMinor: bigint; rate?: bigint; takes?: LayerTake[] }> {
+  if (item.costMethod !== "FIFO") return { costMinor: issueValue(held, qtyMilli) };
 
-  const layers = await openLayers(item);
+  const layers = await openLayers(tx, item);
   const plan = planConsumption(layers, qtyMilli);
   if (plan.shortMilli > 0n) {
     // The item says it holds stock the layers cannot account for. That is a
@@ -867,7 +928,7 @@ async function consume(item: ItemRow, qtyMilli: bigint): Promise<{ costMinor: bi
   // The item's carried value is the authority on what the stock cost, so the
   // issue that empties it takes the whole remainder and the layers are settled to
   // match rather than left a few fils apart.
-  const costMinor = qtyMilli >= item.quantityMilli ? item.valueMinor : plan.costMinor;
+  const costMinor = qtyMilli >= held.quantityMilli ? held.valueMinor : plan.costMinor;
   return {
     costMinor,
     rate: effectiveUnitCost(costMinor, qtyMilli),
@@ -875,19 +936,22 @@ async function consume(item: ItemRow, qtyMilli: bigint): Promise<{ costMinor: bi
   };
 }
 
-interface RecordInput {
-  item: ItemRow;
+/**
+ * What a movement comes to, once the item's own row has said what it holds.
+ *
+ * Everything here is decided inside the transaction that holds that row, which
+ * is why it is a return value rather than an argument: a caller cannot know an
+ * issue's cost, a count's difference or a surplus's rate before the item has
+ * been asked, and every attempt to know them beforehand is a figure that some
+ * other clerk's movement can invalidate between the reading and the writing.
+ */
+interface Settled {
+  /** RECEIPT, ISSUE, ADJUSTMENT, WRITE_OFF or LANDED_COST — a count picks between two. */
   kind: string;
-  movedOn: string;
+  /** Signed thousandths: a receipt is positive, an issue negative. */
   qty: bigint;
+  /** Signed minor units, matching the quantity's direction. */
   value: bigint;
-  newQty: bigint;
-  newValue: bigint;
-  entryId: string | null;
-  reference: string | null;
-  ref?: string;
-  memo?: string;
-  actorId?: string;
   /** The effective unit cost of this movement, where the running average is not the answer. */
   rate?: bigint;
   openLayer?: { receivedOn: string; quantityMilli: bigint; unitCostMinor: bigint };
@@ -913,64 +977,137 @@ interface RecordInput {
   addToLayer?: { movementId: string; addMinor: bigint };
 }
 
-async function record(a: RecordInput): Promise<MovementResult> {
-  // Weighted average records the running average after the movement, because
-  // that is what the remaining stock is worth. FIFO has no such number, so the
-  // caller supplies the effective unit cost of the movement itself.
-  const rate = a.rate ?? unitCost(a.newValue, a.newQty);
+/** A settled movement, and the balances the item was left at. */
+interface Recorded extends Settled {
+  movementId: string;
+  itemId: string;
+  /** The item as the transaction found it — what the write-down moves from. */
+  before: Held;
+  newQty: bigint;
+  newValue: bigint;
+  unitCostMinor: bigint;
+  /** What has to be taken back if the posting is refused. */
+  openedLayerId: string | null;
+  openedBatchId: string | null;
+  /** The lot's status before this movement settled it, so an undo can restore it. */
+  batchWasStatus: string | null;
+  /** The landed-cost layer's rate before the charge was spread onto it. */
+  layerWasCost: { id: string; unitCostMinor: bigint } | null;
+}
 
-  // The item, its movement, its layers and its batches commit together. An item
-  // updated without a movement is stock with no history; a movement without the
-  // update is history that does not add up; a consumed layer that outlived a
-  // rolled-back issue would hand the next sale someone else's cost; and a batch
-  // that outlived one would send a recall to a shelf that was never emptied.
-  const movement = await prisma.$transaction(async (tx) => {
+interface RecordInput {
+  item: ItemRow;
+  movedOn: string;
+  /**
+   * What this movement is, worked out against the item's own row inside the
+   * transaction that holds it. Refusals that depend on what is in stock belong
+   * here rather than in the caller, because a check made outside the lock is a
+   * check made against a figure somebody else is free to change.
+   */
+  settle: (tx: Db, held: Held) => Promise<Settled>;
+  /** The entry the movement raises, given what it settled at. Nil raises none. */
+  entryFor?: (settled: Settled, movementId: string) => PostInput | null;
+  /** An entry the caller has already posted for this movement — see `capitaliseCost`. */
+  given?: { entryId: string | null; reference: string | null };
+  ref?: string;
+  memo?: string;
+  actorId?: string;
+}
+
+/**
+ * Move the stock, then post for it.
+ *
+ * That order is the fix for the defect described at the top of this file, and
+ * it is worth saying why it is the order rather than the other one.
+ *
+ * The item's row is taken first and held for the whole transaction, so the
+ * figures the movement is settled against are the committed ones and a second
+ * clerk moving the same SKU waits rather than overwriting. The item is then
+ * INCREMENTED by what this movement moves rather than SET to what the caller
+ * expected the total to become — so even if the lock were somehow not held, two
+ * movements would add up instead of one erasing the other, and
+ * `InventoryItem_quantity_check` would refuse the result if it went negative.
+ * The balances written onto the movement row are read back out of that
+ * increment, so the row says what the database ended up holding rather than
+ * what this request predicted.
+ *
+ * The posting cannot join that transaction — `post()` opens one of its own, on
+ * its own connection, and an entry written inside this one would commit
+ * separately anyway — so it happens after, keyed on the movement's row id,
+ * which is unique to it however many identical movements there are. A posting
+ * that is then refused takes the movement back out with it (see
+ * `postForMovement`): a movement that changed the stock and reached no ledger
+ * is exactly the disagreement between the register and account 1200 that this
+ * whole arrangement exists to prevent.
+ *
+ * The item, its movement, its layers and its batches still commit together. An
+ * item updated without a movement is stock with no history; a movement without
+ * the update is history that does not add up; a consumed layer that outlived a
+ * rolled-back issue would hand the next sale someone else's cost; and a batch
+ * that outlived one would send a recall to a shelf that was never emptied.
+ */
+async function record(a: RecordInput): Promise<MovementResult> {
+  const done = await prisma.$transaction(async (tx): Promise<Recorded> => {
+    const before = await lockItem(tx, a.item);
+    const s = await a.settle(tx, before);
+
     // The batch is opened before the movement so the movement can name it. A
     // batch created outside this transaction and left behind by a failed
     // movement would make the item batch-tracked on the strength of a receipt
     // that never happened, and every later issue would be refused for naming no
     // batch of a register that holds nothing.
-    let batchId = a.batchId ?? null;
-    if (a.openBatch) {
+    let batchId = s.batchId ?? null;
+    let openedBatchId: string | null = null;
+    if (s.openBatch) {
       const opened = await tx.stockBatch.create({
         data: {
           orgId: a.item.orgId, entityId: a.item.entityId, itemId: a.item.id,
-          code: a.openBatch.code, kind: a.openBatch.kind,
-          receivedOn: new Date(a.openBatch.receivedOn),
-          expiresOn: a.openBatch.expiresOn,
-          locationId: a.openBatch.locationId,
+          code: s.openBatch.code, kind: s.openBatch.kind,
+          receivedOn: new Date(s.openBatch.receivedOn),
+          expiresOn: s.openBatch.expiresOn,
+          locationId: s.openBatch.locationId,
           quantityMilli: 0n,
         },
       });
       batchId = opened.id;
+      openedBatchId = opened.id;
     }
+
+    const moved = await tx.inventoryItem.update({
+      where: { id: a.item.id },
+      data: { quantityMilli: { increment: s.qty }, valueMinor: { increment: s.value } },
+    });
+    // Weighted average records the running average after the movement, because
+    // that is what the remaining stock is worth. FIFO has no such number, so the
+    // caller supplies the effective unit cost of the movement itself.
+    const rate = s.rate ?? unitCost(moved.valueMinor, moved.quantityMilli);
+
     const created = await tx.inventoryMovement.create({
       data: {
         orgId: a.item.orgId, itemId: a.item.id, movedOn: new Date(a.movedOn),
-        kind: a.kind, quantityMilli: a.qty, valueMinor: a.value,
-        unitCostMinor: rate, balanceQtyMilli: a.newQty, balanceValueMinor: a.newValue,
-        reference: a.ref?.trim() || null, memo: a.memo ?? null, entryId: a.entryId,
-        locationId: a.locationId ?? null, batchId,
+        kind: s.kind, quantityMilli: s.qty, valueMinor: s.value,
+        unitCostMinor: rate, balanceQtyMilli: moved.quantityMilli, balanceValueMinor: moved.valueMinor,
+        reference: a.ref?.trim() || null, memo: a.memo ?? null, entryId: a.given?.entryId ?? null,
+        locationId: s.locationId ?? null, batchId,
       },
     });
-    await tx.inventoryItem.update({
-      where: { id: a.item.id },
-      data: { quantityMilli: a.newQty, valueMinor: a.newValue },
-    });
-    if (a.openLayer) {
+
+    let openedLayerId: string | null = null;
+    if (s.openLayer) {
       const top = await tx.inventoryLayer.aggregate({ where: { itemId: a.item.id }, _max: { seq: true } });
-      await tx.inventoryLayer.create({
+      const layer = await tx.inventoryLayer.create({
         data: {
           orgId: a.item.orgId, itemId: a.item.id, seq: (top._max.seq ?? 0) + 1,
-          receivedOn: new Date(a.openLayer.receivedOn),
-          quantityMilli: a.openLayer.quantityMilli,
-          remainingMilli: a.openLayer.quantityMilli,
-          unitCostMinor: a.openLayer.unitCostMinor,
+          receivedOn: new Date(s.openLayer.receivedOn),
+          quantityMilli: s.openLayer.quantityMilli,
+          remainingMilli: s.openLayer.quantityMilli,
+          unitCostMinor: s.openLayer.unitCostMinor,
           movementId: created.id,
         },
       });
+      openedLayerId = layer.id;
     }
-    for (const t of a.takes ?? []) {
+    for (const t of s.takes ?? []) {
       // The database refuses a layer with less than nothing left, so an issue that
       // somehow took more than a layer holds fails rather than borrowing.
       await tx.inventoryLayer.update({
@@ -978,9 +1115,11 @@ async function record(a: RecordInput): Promise<MovementResult> {
         data: { remainingMilli: { decrement: t.quantityMilli } },
       });
     }
-    if (a.addToLayer) {
+
+    let layerWasCost: Recorded["layerWasCost"] = null;
+    if (s.addToLayer) {
       const layer = await tx.inventoryLayer.findFirst({
-        where: { orgId: a.item.orgId, itemId: a.item.id, movementId: a.addToLayer.movementId },
+        where: { orgId: a.item.orgId, itemId: a.item.id, movementId: s.addToLayer.movementId },
       });
       if (!layer || layer.remainingMilli <= 0n) {
         throw new LedgerError(
@@ -994,53 +1133,153 @@ async function record(a: RecordInput): Promise<MovementResult> {
       // standing arrangement here — the item is the authority on the total and
       // the issue that empties it takes the whole remainder.
       const heldMinor = layerValue(layer);
+      layerWasCost = { id: layer.id, unitCostMinor: layer.unitCostMinor };
       await tx.inventoryLayer.update({
         where: { id: layer.id },
-        data: { unitCostMinor: ((heldMinor + a.addToLayer.addMinor) * MILLI) / layer.remainingMilli },
+        data: { unitCostMinor: ((heldMinor + s.addToLayer.addMinor) * MILLI) / layer.remainingMilli },
       });
     }
-    if (batchId && a.batchDelta) {
-      const moved = await tx.stockBatch.update({
+
+    let batchWasStatus: string | null = null;
+    if (batchId && s.batchDelta) {
+      const lot = await tx.stockBatch.update({
         where: { id: batchId },
-        data: { quantityMilli: { increment: a.batchDelta } },
+        data: { quantityMilli: { increment: s.batchDelta } },
       });
+      batchWasStatus = lot.status;
       // A batch with nothing left is not stock any more, and a register that
       // still lists it sends a picker to an empty shelf. It comes back if a
       // later count puts something into it.
-      const settled = moved.quantityMilli === 0n ? "consumed" : "active";
-      if ((moved.status === "active" || moved.status === "consumed") && moved.status !== settled) {
+      const settled = lot.quantityMilli === 0n ? "consumed" : "active";
+      if ((lot.status === "active" || lot.status === "consumed") && lot.status !== settled) {
         await tx.stockBatch.update({ where: { id: batchId }, data: { status: settled } });
       }
     }
-    return created;
+
+    return {
+      ...s,
+      movementId: created.id,
+      itemId: a.item.id,
+      // The lot the movement actually named, which is the one this act opened
+      // where it opened one.
+      batchId,
+      before,
+      newQty: moved.quantityMilli,
+      newValue: moved.valueMinor,
+      unitCostMinor: rate,
+      openedLayerId,
+      openedBatchId,
+      batchWasStatus,
+      layerWasCost,
+    };
   });
+
+  const entry = await postForMovement(a, done);
 
   // Cost has moved, so the allowance against it has to move with it, in the same
   // act — see the header. An issue of written-down stock releases its share,
   // which is IAS 2.34: the carrying amount is what reaches the expense.
-  const held = writeDownHeld(a.item.valueMinor, a.item.quantityMilli, a.item.nrvMinor);
-  const required = writeDownHeld(a.newValue, a.newQty, a.item.nrvMinor);
+  //
+  // Both figures are taken from the row rather than from the caller's copy of
+  // it, so two movements landing one after the other move the allowance in two
+  // contiguous steps — the second from where the first left it — instead of
+  // both moving it from the same starting point and posting the difference
+  // twice.
+  const held = writeDownHeld(done.before.valueMinor, done.before.quantityMilli, done.before.nrvMinor);
+  const required = writeDownHeld(done.newValue, done.newQty, done.before.nrvMinor);
   await applyWriteDown({
     item: a.item, held, required, on: a.movedOn,
-    qtyAfter: a.newQty, costAfter: a.newValue,
-    nrvFrom: a.item.nrvMinor, nrvTo: a.item.nrvMinor,
+    qtyAfter: done.newQty, costAfter: done.newValue,
+    nrvFrom: done.before.nrvMinor, nrvTo: done.before.nrvMinor,
     memo: `Write-down released as stock moved — ${a.item.sku}`,
     actorId: a.actorId,
   });
 
   return {
-    movementId: movement.id,
-    entryId: a.entryId,
-    reference: a.reference,
-    quantityMilli: a.qty.toString(),
-    valueMinor: a.value.toString(),
-    unitCostMinor: rate.toString(),
-    balanceQtyMilli: a.newQty.toString(),
-    balanceValueMinor: a.newValue.toString(),
+    movementId: done.movementId,
+    entryId: entry.entryId,
+    reference: entry.reference,
+    quantityMilli: done.qty.toString(),
+    valueMinor: done.value.toString(),
+    unitCostMinor: done.unitCostMinor.toString(),
+    balanceQtyMilli: done.newQty.toString(),
+    balanceValueMinor: done.newValue.toString(),
     writeDownMinor: required.toString(),
-    carryingValueMinor: (a.newValue - required).toString(),
-    layers: (a.takes ?? []).map(showTake),
+    carryingValueMinor: (done.newValue - required).toString(),
+    layers: (done.takes ?? []).map(showTake),
   };
+}
+
+/**
+ * Post the entry a movement raises, and take the movement back out if the
+ * posting is refused.
+ *
+ * A refusal here is not a race — it is a closed period, a missing account, a
+ * control account refusing a manual source — and it will refuse the retry
+ * exactly as it refused this attempt. So leaving the movement behind would
+ * leave stock that has moved on the item card, on the shelf report and in the
+ * batch register, and nothing at all in account 1200, permanently, with an
+ * error message on the screen as the only evidence. The unwind is the same
+ * arrangement `trade-finance.ts` uses for a drawing whose posting fails, and
+ * for the same reason.
+ *
+ * The unwind is written as the reverse of what was done rather than as a
+ * restore of what was read: the item is decremented by this movement's own
+ * figures, so a movement that committed in between is not undone with it.
+ */
+async function postForMovement(
+  a: RecordInput, done: Recorded,
+): Promise<{ entryId: string | null; reference: string | null }> {
+  if (a.given) return { entryId: a.given.entryId, reference: a.given.reference };
+  const input = a.entryFor?.(done, done.movementId);
+  if (!input) return { entryId: null, reference: null };
+
+  let entry: Awaited<ReturnType<typeof post>>;
+  try {
+    entry = await post(input);
+  } catch (e) {
+    // The error the caller sees has to be the one that says what to do about
+    // it, so a failure to unwind must not replace it.
+    await unwind(done).catch(() => undefined);
+    throw e;
+  }
+
+  await prisma.inventoryMovement.update({ where: { id: done.movementId }, data: { entryId: entry.id } });
+  return { entryId: entry.id, reference: `${entry.series}-${entry.number}` };
+}
+
+/** Take a movement back out, in the reverse of the order it went in. */
+async function unwind(done: Recorded): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    if (done.batchId && done.batchDelta) {
+      await tx.stockBatch.update({
+        where: { id: done.batchId },
+        data: {
+          quantityMilli: { decrement: done.batchDelta },
+          ...(done.batchWasStatus ? { status: done.batchWasStatus } : {}),
+        },
+      });
+    }
+    if (done.layerWasCost) {
+      await tx.inventoryLayer.update({
+        where: { id: done.layerWasCost.id },
+        data: { unitCostMinor: done.layerWasCost.unitCostMinor },
+      });
+    }
+    for (const t of done.takes ?? []) {
+      await tx.inventoryLayer.update({
+        where: { id: t.layerId },
+        data: { remainingMilli: { increment: t.quantityMilli } },
+      });
+    }
+    if (done.openedLayerId) await tx.inventoryLayer.delete({ where: { id: done.openedLayerId } });
+    await tx.inventoryMovement.delete({ where: { id: done.movementId } });
+    if (done.openedBatchId) await tx.stockBatch.delete({ where: { id: done.openedBatchId } });
+    await tx.inventoryItem.update({
+      where: { id: done.itemId },
+      data: { quantityMilli: { decrement: done.qty }, valueMinor: { decrement: done.value } },
+    });
+  });
 }
 
 const showTake = (t: LayerTake) => ({
@@ -1140,31 +1379,61 @@ export async function assessNrv(opts: {
   }
 
   const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
-  const held = writeDownHeld(item.valueMinor, item.quantityMilli, item.nrvMinor);
-  const required = writeDownHeld(item.valueMinor, item.quantityMilli, nrv);
 
-  const applied = await applyWriteDown({
-    item, held, required, qtyAfter: item.quantityMilli, costAfter: item.valueMinor,
-    nrvFrom: item.nrvMinor, nrvTo: nrv,
-    on: opts.on, memo: opts.memo ?? nrvMemo(item.sku, required - held), actorId: opts.actorId,
+  /*
+   * The assessment is taken under the item's own lock, exactly as a movement
+   * is, and for the same reason: the allowance is the difference between what
+   * is held and what this assessment requires, so both figures have to come
+   * from the row rather than from a copy of it. Two assessments recorded at
+   * once against one item would otherwise both measure their difference from
+   * the same starting allowance and both post it, moving 1200 twice for one
+   * change in opinion.
+   *
+   * `nrvMinor` is written inside the same transaction, so the second assessment
+   * finds the first one's opinion in `nrvFrom` and posts only the step from it.
+   * The two steps are contiguous, so they add up whatever order they post in.
+   */
+  const assessed = await prisma.$transaction(async (tx) => {
+    const before = await lockItem(tx, item);
+    // The assessment is recorded whether or not it changed anything: IAS 2.33 asks
+    // for one every period, and an item nobody has looked at must not read the same
+    // as one looked at and found sound.
+    await tx.inventoryItem.update({ where: { id: item.id }, data: { nrvMinor: nrv } });
+    return before;
   });
 
-  // The assessment is recorded whether or not it changed anything: IAS 2.33 asks
-  // for one every period, and an item nobody has looked at must not read the same
-  // as one looked at and found sound.
-  await prisma.inventoryItem.update({ where: { id: item.id }, data: { nrvMinor: nrv } });
+  const held = writeDownHeld(assessed.valueMinor, assessed.quantityMilli, assessed.nrvMinor);
+  const required = writeDownHeld(assessed.valueMinor, assessed.quantityMilli, nrv);
+
+  let applied: { entryId: string | null; reference: string | null };
+  try {
+    applied = await applyWriteDown({
+      item, held, required, qtyAfter: assessed.quantityMilli, costAfter: assessed.valueMinor,
+      nrvFrom: assessed.nrvMinor, nrvTo: nrv,
+      on: opts.on, memo: opts.memo ?? nrvMemo(item.sku, required - held), actorId: opts.actorId,
+    });
+  } catch (e) {
+    // An assessment on file that never reached the ledger is an item whose
+    // carrying amount on the screen and in 1200 disagree, which is the one
+    // thing this module refuses to leave behind. The opinion goes back to what
+    // it was and the caller gets the refusal that says why.
+    await prisma.inventoryItem
+      .updateMany({ where: { id: item.id, nrvMinor: nrv }, data: { nrvMinor: assessed.nrvMinor } })
+      .catch(() => undefined);
+    throw e;
+  }
 
   return {
     sku: item.sku,
     assessedOn: opts.on,
     entryId: applied.entryId,
     reference: applied.reference,
-    quantityMilli: item.quantityMilli.toString(),
+    quantityMilli: assessed.quantityMilli.toString(),
     nrvMinor: nrv.toString(),
-    nrvTotalMinor: ((nrv * item.quantityMilli) / MILLI).toString(),
-    costMinor: item.valueMinor.toString(),
+    nrvTotalMinor: ((nrv * assessed.quantityMilli) / MILLI).toString(),
+    costMinor: assessed.valueMinor.toString(),
     writeDownMinor: required.toString(),
-    carryingMinor: (item.valueMinor - required).toString(),
+    carryingMinor: (assessed.valueMinor - required).toString(),
     /** True where cost stood below net realisable value and nothing was written down. */
     atCost: required === 0n,
   };
@@ -1337,14 +1606,49 @@ export async function stockValuation(opts: {
   };
 }
 
-/** The movement history for one item — where a valuation came from. */
+/** How many movements one read of an item's history lists, and the ceiling on asking for more. */
+const HISTORY_PAGE = 200;
+const HISTORY_MAX_PAGE = 2_000;
+
+/**
+ * The movement history for one item — where a valuation came from.
+ *
+ * The page is taken from the NEWEST end, the same way the general ledger's is
+ * and for the same reason. It used to take the OLDEST 200 movements and print
+ * them under a header carrying the item's quantity and value as at today, with
+ * nothing saying the two did not belong together: on any item with a year of
+ * trading behind it the table stopped somewhere in its first month while the
+ * figures above it were current, and the reader was left to conclude that the
+ * one had produced the other.
+ *
+ * So the newest movements are listed, `truncated` says when there are older
+ * ones that are not, and `movementCount` says how many there are altogether.
+ * The header's figures are the item's own and always were; what has changed is
+ * that the screen can now say so.
+ */
 export async function itemHistory(opts: { orgId: string; entityId: string; sku: string; limit?: number }) {
   const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
-  const movements = await prisma.inventoryMovement.findMany({
-    where: { orgId: opts.orgId, itemId: item.id },
-    orderBy: [{ movedOn: "asc" }, { createdAt: "asc" }],
-    take: opts.limit ?? 200,
-  });
+
+  // A limit arriving from a query string is whatever the caller typed, so it is
+  // clamped rather than trusted — `Number("all")` is NaN, and NaN reaches
+  // Prisma as `take: NaN`, which fails the read rather than the parameter.
+  const asked = Number(opts.limit ?? HISTORY_PAGE);
+  const limit = Number.isFinite(asked) ? Math.min(Math.max(Math.trunc(asked), 1), HISTORY_MAX_PAGE) : HISTORY_PAGE;
+
+  const [movementCount, page] = await Promise.all([
+    prisma.inventoryMovement.count({ where: { orgId: opts.orgId, itemId: item.id } }),
+    prisma.inventoryMovement.findMany({
+      where: { orgId: opts.orgId, itemId: item.id },
+      // Newest first so the page is the newest movements; `createdAt` and the
+      // row id break the ties within a day, so a movement cannot swap places
+      // with its neighbour between two reads and land on a different page.
+      orderBy: [{ movedOn: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+      take: limit,
+    }),
+  ]);
+  // Read newest-first, presented oldest-first: a stock card is read down the
+  // page, and its running balance only makes sense in the order it happened.
+  const movements = page.reverse();
   // Where the goods went, and which lot they were. A transfer reads as the pair
   // it is — a leg out of one location and a leg into another, both at nil value
   // with the running balance unmoved — which is the honest picture of an event
@@ -1392,6 +1696,11 @@ export async function itemHistory(opts: { orgId: string; entityId: string; sku: 
       writeDownMinor: writeDown.toString(),
       carryingMinor: (item.valueMinor - writeDown).toString(),
     },
+    /** How many movements this item has, listed or not. */
+    movementCount,
+    listed: movements.length,
+    /** True when there are older movements this read did not list. */
+    truncated: movementCount > movements.length,
     layers: layers.map((l) => ({
       seq: l.seq,
       receivedOn: l.receivedOn.toISOString().slice(0, 10),
@@ -1802,26 +2111,32 @@ export async function transferStock(opts: {
     : null;
 
   if (!seen) {
-    const held = await heldAt(item, from.id);
-    if (qty > held) {
-      throw new LedgerError(
-        `${from.code} ${from.name} holds ${fmtQty(held)} ${item.uom} of ${item.sku}, and ${fmtQty(qty)} was moved out of it. ` +
-          `Stock recorded before any location existed is unassigned, not sitting here — receive or count it in first.`,
-      );
-    }
-
-    // The same reasoning as an issue: a batch that is recorded in the wrong
-    // place is a recall sent to the wrong shelf, which is no better than a
-    // recall with no shelf at all.
-    const lot = await outOfBatch(item, opts.batch, qty, "a transfer", true);
-
-    const rate = unitCost(item.valueMinor, item.quantityMilli);
     const note = opts.memo?.trim();
+    // A transfer changes no total, but both legs carry the item's balances so a
+    // movement can be read on its own — and a balance copied from a row read
+    // before the lock was taken is a figure that was true a moment ago. The
+    // shelf and batch checks are inside for the same reason as an issue's: what
+    // a location holds is the sum of its movements, and another one can land
+    // between a check outside the transaction and the write inside it.
     await prisma.$transaction(async (tx) => {
+      const state = await lockItem(tx, item);
+      const held = await heldAt(tx, item, from.id);
+      if (qty > held) {
+        throw new LedgerError(
+          `${from.code} ${from.name} holds ${fmtQty(held)} ${item.uom} of ${item.sku}, and ${fmtQty(qty)} was moved out of it. ` +
+            `Stock recorded before any location existed is unassigned, not sitting here — receive or count it in first.`,
+        );
+      }
+
+      // The same reasoning as an issue: a batch that is recorded in the wrong
+      // place is a recall sent to the wrong shelf, which is no better than a
+      // recall with no shelf at all.
+      const lot = await outOfBatch(tx, item, opts.batch, qty, "a transfer", true);
+
       const common = {
         orgId: opts.orgId, itemId: item.id, movedOn: new Date(opts.on),
-        valueMinor: 0n, unitCostMinor: rate,
-        balanceQtyMilli: item.quantityMilli, balanceValueMinor: item.valueMinor,
+        valueMinor: 0n, unitCostMinor: unitCost(state.valueMinor, state.quantityMilli),
+        balanceQtyMilli: state.quantityMilli, balanceValueMinor: state.valueMinor,
         reference: ref, entryId: null, batchId: lot.batchId,
       };
       await tx.inventoryMovement.create({
@@ -1841,6 +2156,14 @@ export async function transferStock(opts: {
     });
   }
 
+  // What the item holds is reported from the row rather than from the copy this
+  // call started with, because a transfer takes long enough for somebody else's
+  // issue to land inside it — and "unchanged" is only worth saying about a
+  // figure that is current.
+  const now = await prisma.inventoryItem.findUnique({
+    where: { id: item.id }, select: { quantityMilli: true, valueMinor: true },
+  });
+
   return {
     sku: item.sku,
     from: from.code,
@@ -1849,11 +2172,11 @@ export async function transferStock(opts: {
     quantityMilli: qty.toString(),
     quantity: fmtQty(qty),
     batch: opts.batch?.trim() || null,
-    fromHoldsMilli: (await heldAt(item, from.id)).toString(),
-    toHoldsMilli: (await heldAt(item, to.id)).toString(),
-    /** Unchanged, and that is the point: nothing left the business. */
-    balanceQtyMilli: item.quantityMilli.toString(),
-    balanceValueMinor: item.valueMinor.toString(),
+    fromHoldsMilli: (await heldAt(prisma, item, from.id)).toString(),
+    toHoldsMilli: (await heldAt(prisma, item, to.id)).toString(),
+    /** Unchanged by this, and that is the point: nothing left the business. */
+    balanceQtyMilli: (now?.quantityMilli ?? item.quantityMilli).toString(),
+    balanceValueMinor: (now?.valueMinor ?? item.valueMinor).toString(),
     /** A transfer never posts. Nil here is the assertion, not an omission. */
     entryId: null,
     posted: false,
@@ -2154,51 +2477,61 @@ async function writeOffBatch(opts: {
   const item = await loadItem(opts.orgId, opts.entityId, opts.sku);
   const batch = await prisma.stockBatch.findFirst({ where: { id: opts.batchId, orgId: opts.orgId } });
   if (!batch) throw new LedgerError("That batch does not exist.");
-  const qty = batch.quantityMilli;
-  if (qty <= 0n) throw new LedgerError(`Batch ${batch.code} of ${item.sku} holds nothing, so there is nothing to write off.`);
-
-  // The batch's own reference, so a sweep run twice writes each batch off once.
-  const reference = `EXP/${batch.code}`;
-  const seen = await priorMovement(item, ["WRITE_OFF"], reference, { movedOn: opts.on, quantityMilli: -qty });
-  if (seen) return replay(item, seen);
-
-  if (qty > item.quantityMilli) {
-    throw new LedgerError(
-      `Batch ${batch.code} says it holds ${fmtQty(qty)} ${item.uom} of ${item.sku} but the item only holds ` +
-        `${fmtQty(item.quantityMilli)}. The batch register and the item disagree; settle that before writing anything off, ` +
-        `because writing off stock the system has no cost for would mean inventing one.`,
-    );
+  if (batch.quantityMilli <= 0n) {
+    throw new LedgerError(`Batch ${batch.code} of ${item.sku} holds nothing, so there is nothing to write off.`);
   }
 
-  const consumed = await consume(item, qty);
-  const value = consumed.costMinor;
-  const newQty = item.quantityMilli - qty;
-  const newValue = newQty === 0n ? 0n : item.valueMinor - value;
+  // The batch's own reference, so a sweep run twice writes each batch off once.
+  // What is on the reference is the batch and the day, not the quantity: how
+  // much was in the batch is settled under the item's lock now, so a retry
+  // whose first attempt already emptied it would no longer match on a figure.
+  const reference = `EXP/${batch.code}`;
+  const seen = await priorMovement(item, ["WRITE_OFF"], reference, { movedOn: opts.on });
+  if (seen) return replay(item, seen);
 
-  let entryId: string | null = null;
-  let reported: string | null = null;
-  if (value > 0n) {
-    const entry = await post({
+  const out = await record({
+    item, movedOn: opts.on, ref: reference,
+    memo: opts.reason ?? `Expired — batch ${batch.code}`,
+    actorId: opts.actorId,
+    settle: async (tx, held) => {
+      // The lot is read again inside the lock: an issue out of it between the
+      // sweep listing it and this writing it off would leave the quantity above
+      // taking more off the item than the batch has left.
+      const lot = await tx.stockBatch.findFirst({ where: { id: batch.id, orgId: opts.orgId } });
+      if (!lot || lot.quantityMilli <= 0n) {
+        throw new LedgerError(`Batch ${batch.code} of ${item.sku} holds nothing, so there is nothing to write off.`);
+      }
+      const qty = lot.quantityMilli;
+      if (qty > held.quantityMilli) {
+        throw new LedgerError(
+          `Batch ${batch.code} says it holds ${fmtQty(qty)} ${item.uom} of ${item.sku} but the item only holds ` +
+            `${fmtQty(held.quantityMilli)}. The batch register and the item disagree; settle that before writing anything off, ` +
+            `because writing off stock the system has no cost for would mean inventing one.`,
+        );
+      }
+      const consumed = await consume(tx, item, held, qty);
+      return {
+        kind: "WRITE_OFF",
+        qty: -qty,
+        value: -consumed.costMinor,
+        rate: consumed.rate,
+        takes: consumed.takes,
+        locationId: lot.locationId,
+        batchId: lot.id,
+        batchDelta: -qty,
+      };
+    },
+    entryFor: (s, movementId) => s.value === 0n ? null : {
       orgId: opts.orgId, entityId: opts.entityId, entryDate: opts.on,
       memo: opts.reason ?? `Expired stock written off — ${item.sku} batch ${batch.code}`,
       source: "inventory", sourceType: "EXPIRY", sourceId: item.id,
-      externalKey: balanceKey(item, "WRITE_OFF", newQty, newValue),
+      externalKey: movementKey(s.kind, movementId),
       actorType: "HUMAN", actorId: opts.actorId, series: "IA",
       lines: [
-        { account: item.varianceAccount, debit: value, memo: `${item.sku} batch ${batch.code} expired` },
-        { account: item.stockAccount, credit: value, memo: `${item.sku} batch ${batch.code} written off` },
+        { account: item.varianceAccount, debit: -s.value, memo: `${item.sku} batch ${batch.code} expired` },
+        { account: item.stockAccount, credit: -s.value, memo: `${item.sku} batch ${batch.code} written off` },
       ],
-    });
-    entryId = entry.id;
-    reported = `${entry.series}-${entry.number}`;
-  }
-
-  const out = await record({
-    item, kind: "WRITE_OFF", movedOn: opts.on, qty: -qty, value: -value,
-    newQty, newValue, entryId, reference: reported, ref: reference,
-    memo: opts.reason ?? `Expired — batch ${batch.code}`,
-    actorId: opts.actorId, rate: consumed.rate, takes: consumed.takes,
-    locationId: batch.locationId, batchId: batch.id, batchDelta: -qty,
+    },
   });
 
   // `record` settles an emptied batch to "consumed", which is the right word
@@ -2572,13 +2905,6 @@ export async function capitaliseCost(opts: {
   const seen = await priorMovement(item, ["LANDED_COST"], opts.reference, { movedOn: opts.movedOn, valueMinor: value });
   if (seen) return replay(item, seen);
 
-  if (item.quantityMilli <= 0n) {
-    throw new LedgerError(
-      `${item.sku} holds no stock, so there is nothing left for that cost to be carried on. ` +
-        `A charge on goods that have all been sold is an expense of the period they were sold in.`,
-    );
-  }
-
   const fifo = item.costMethod === "FIFO";
   if (fifo && !opts.ontoMovementId) {
     throw new LedgerError(
@@ -2589,20 +2915,32 @@ export async function capitaliseCost(opts: {
 
   return record({
     item,
-    kind: "LANDED_COST",
     movedOn: opts.movedOn,
-    qty: 0n,
-    value,
-    newQty: item.quantityMilli,
-    newValue: item.valueMinor + value,
-    entryId: opts.entryId ?? null,
-    reference: opts.entryReference ?? null,
     ref: opts.reference,
     memo: opts.memo,
     actorId: opts.actorId,
-    // No rate is supplied on purpose. A movement of nil quantity has no
-    // effective unit cost of its own, so the row carries the item's average
-    // after the cost landed, which is the figure a reader of that row wants.
-    addToLayer: fifo && opts.ontoMovementId ? { movementId: opts.ontoMovementId, addMinor: value } : undefined,
+    settle: async (_tx, held) => {
+      // Asked of the row rather than of the copy this call read: the last unit
+      // can be issued while a freight invoice is being landed on it, and a
+      // charge capitalised onto nothing is cost stranded in 1200 for good.
+      if (held.quantityMilli <= 0n) {
+        throw new LedgerError(
+          `${item.sku} holds no stock, so there is nothing left for that cost to be carried on. ` +
+            `A charge on goods that have all been sold is an expense of the period they were sold in.`,
+        );
+      }
+      return {
+        kind: "LANDED_COST",
+        qty: 0n,
+        value,
+        // No rate is supplied on purpose. A movement of nil quantity has no
+        // effective unit cost of its own, so the row carries the item's average
+        // after the cost landed, which is the figure a reader of that row wants.
+        addToLayer: fifo && opts.ontoMovementId ? { movementId: opts.ontoMovementId, addMinor: value } : undefined,
+      };
+    },
+    // The charge reached the ledger as one entry raised by whoever landed it,
+    // so this movement names that entry rather than raising one of its own.
+    given: { entryId: opts.entryId ?? null, reference: opts.entryReference ?? null },
   });
 }

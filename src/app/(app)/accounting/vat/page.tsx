@@ -2,8 +2,19 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
+import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading } from "@/components/ledger/primitives";
+import {
+  RegistrationPanel,
+  type RecordedRegistration,
+  type RegistrationToRecord,
+} from "@/components/ledger/vat-registration";
+import {
+  ReturnsPanel,
+  filingRecorded,
+  type FilingToRecord,
+  type OutstandingPeriod,
+} from "@/components/ledger/vat-filing";
 
 interface Box { box: string; label: string; amountMinor: string; vatMinor: string | null; adjustmentMinor: string | null }
 interface Outside { taxCode: string; label: string; amountMinor: string; note: string }
@@ -38,8 +49,19 @@ interface VoluntaryDisclosure {
 
 interface Choice { label: string; from: string; to: string }
 interface Periods {
-  registration: { frequency: string; firstPeriodEndMonth: number; trn: string | null } | null;
+  registration: RecordedRegistration | null;
   periods: { label: string; from: string; to: string; dueOn: string }[];
+  /**
+   * Which returns have ended with no filing recorded, and the server's own
+   * sentence about why that list is what it is. Both are read here rather than
+   * derived, because `recordFiling` accepts exactly these period labels and a
+   * list assembled on this side would drift from the one it validates against.
+   */
+  outstanding: {
+    registered: boolean;
+    periods: OutstandingPeriod[];
+    note: string;
+  };
 }
 
 /**
@@ -79,7 +101,7 @@ export default function VatReturnPage() {
 
   // The registration first, because it decides what the picker may offer. A
   // year either side, so the period that straddles a year end is on the list.
-  const { data: periodData } = useLedgerQuery<Periods>(
+  const { data: periodData, reload: reloadPeriods } = useLedgerQuery<Periods>(
     entityId
       ? `/api/ledger/tax-periods?entityId=${entityId}&regime=VAT&from=${year - 1}-01-01&to=${year}-12-31`
       : null,
@@ -98,13 +120,55 @@ export default function VatReturnPage() {
   const [sel, setSel] = React.useState<string | null>(null);
   const period = choices.find((p) => p.label === sel) ?? lastEnded(choices, today);
 
-  const { data, error, loading } = useLedgerQuery<Ret>(
+  const { data, error, loading, reload: reloadReturn } = useLedgerQuery<Ret>(
     entityId ? `/api/ledger/vat?entityId=${entityId}&from=${period.from}&to=${period.to}` : null,
   );
+
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [err, setErr] = React.useState<string | null>(null);
+  const [msg, setMsg] = React.useState<string | null>(null);
+
+  /**
+   * The two writes this screen makes, both to the same route.
+   *
+   * Both reads are reloaded afterwards and not only the one that changed: a
+   * registration decides which periods exist, and a filing decides whether the
+   * return on screen is one that has already gone in, so either write can
+   * change what the other read says.
+   */
+  const act = async (label: string, body: Record<string, unknown>, describe: string): Promise<boolean> => {
+    setBusy(label); setErr(null); setMsg(null);
+    try {
+      await api("/api/ledger/tax-periods", {
+        method: "POST",
+        body: JSON.stringify({ entityId, ...body }),
+      });
+      setMsg(describe);
+      reloadPeriods();
+      reloadReturn();
+      return true;
+    } catch (e) {
+      // The route's refusals name the thing that is wrong — a TRN a digit
+      // short, a period still running, a return already filed and by whom — so
+      // they are shown as they stand.
+      setErr(e instanceof ApiError ? e.message : "That did not work.");
+      // False, so the form that asked stays open with what was typed in it —
+      // a refusal is a thing to correct, not a thing to retype.
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
 
   if (!entityId) return <Loading label="Choosing an entity…" />;
 
   const calendar = !registration;
+  /* The currency of the figure a filing records is the book's own, which only
+   * the computed return publishes. Where it has not arrived the forms fall back
+   * to dirhams, exactly as the receipt forms do and for the same reason: every
+   * book this product opens is opened in AED, and it is an assumption rather
+   * than a fact the ledger has stated here. */
+  const currency = data?.currency ?? "AED";
 
   return (
     <>
@@ -112,42 +176,101 @@ export default function VatReturnPage() {
         title="VAT return"
         sub="The VAT 201 boxes, computed from the same journal lines as the trial balance rather than from a second pass over the invoices — so the return and the books cannot disagree. Review it, then file with the FTA."
         actions={
-          <label className="flex items-center gap-2">
-            <span className="sw-label">Period</span>
-            <select
-              className="sw-select"
-              style={{ width: "11rem" }}
-              value={period.label}
-              onChange={(e) => setSel(e.target.value)}
+          <>
+            <label className="flex items-center gap-2">
+              <span className="sw-label">Period</span>
+              <select
+                className="sw-select"
+                style={{ width: "11rem" }}
+                value={period.label}
+                onChange={(e) => setSel(e.target.value)}
+              >
+                {calendar ? (
+                  <>
+                    <optgroup label="Quarters">
+                      {choices.slice(0, 4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                    </optgroup>
+                    <optgroup label="Months">
+                      {choices.slice(4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                    </optgroup>
+                  </>
+                ) : (
+                  <optgroup label="Your tax periods">
+                    {choices.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+            {/* Whether the list above is a fact or a guess, said where the list
+                is — a screen that shows both kinds of period identically is how
+                somebody files for the wrong three months. Nothing is claimed
+                until the read lands: "assumed" on a registered entity, for the
+                moment before its registration arrives, would be a lie the
+                screen tells every time it opens. */}
+            {periodData && <span
+              className={`sw-chip ${calendar ? "sw-chip-warn" : "sw-chip-ok"}`}
+              title={
+                calendar
+                  ? "No FTA registration is recorded, so these are calendar quarters and months rather than the periods the Authority assigned"
+                  : "These are the periods the recorded registration implies"
+              }
+              data-testid="period-source"
             >
-              {calendar ? (
-                <>
-                  <optgroup label="Quarters">
-                    {choices.slice(0, 4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
-                  </optgroup>
-                  <optgroup label="Months">
-                    {choices.slice(4).map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
-                  </optgroup>
-                </>
-              ) : (
-                <optgroup label="Your tax periods">
-                  {choices.map((p) => <option key={p.label} value={p.label}>{p.label}</option>)}
-                </optgroup>
-              )}
-            </select>
-          </label>
+              {calendar ? "assumed" : "recorded"}
+            </span>}
+          </>
         }
       />
 
+      {err && <ErrorNote>{err}</ErrorNote>}
+      {msg && <div className="sw-note mb-3" role="status" data-testid="vat-result">{msg}</div>}
       {error && <ErrorNote>{error}</ErrorNote>}
       {loading && <Loading />}
 
+      {/* Ahead of everything the return says, because a warning about a return
+          computed for the wrong period is worth reading before the boxes. */}
+      {data?.warnings.map((w, i) => (
+        <div key={i} className="sw-error mb-3" role="alert" data-testid="vat-warning">{w}</div>
+      ))}
+
+      {/* Outside the block below: the registration is exactly what somebody
+          needs when the return itself could not be computed. */}
+      {periodData && (
+        <>
+          <RegistrationPanel
+            registration={periodData.registration}
+            busy={busy === "register"}
+            onRecord={(r: RegistrationToRecord) =>
+              act(
+                "register",
+                { action: "register", ...r },
+                periodData.registration
+                  ? "The registration is amended. The periods from here on come from it."
+                  : "The registration is recorded. Every VAT period and deadline now comes from it rather than from the calendar.",
+              )
+            }
+          />
+          <ReturnsPanel
+            registered={periodData.outstanding.registered}
+            note={periodData.outstanding.note}
+            periods={periodData.outstanding.periods}
+            computed={
+              data?.taxPeriod
+                ? { periodLabel: data.taxPeriod.label, netVatMinor: data.netVatMinor, payable: data.payable }
+                : null
+            }
+            currency={currency}
+            today={today}
+            busy={busy === "file"}
+            onFile={(f: FilingToRecord) =>
+              act("file", { action: "file", ...f }, filingRecorded(f, currency))
+            }
+          />
+        </>
+      )}
+
       {data && (
         <>
-          {data.warnings.map((w, i) => (
-            <div key={i} className="sw-error mb-3" role="alert" data-testid="vat-warning">{w}</div>
-          ))}
-
           <TaxPeriodPanel period={data.taxPeriod} from={data.periodFrom} to={data.periodTo} />
 
           <DisclosurePanel vd={data.voluntaryDisclosure} currency={data.currency} />
@@ -353,8 +476,8 @@ function TaxPeriodPanel({ period, from, to }: { period: TaxPeriod | null; from: 
           No FTA tax period is recorded for this entity, so this return covers exactly the dates chosen above —
           {" "}{from} to {to} — and the periods offered are calendar quarters and months. The Authority assigns a
           tax period on registration and does not give everybody the same one: a registrant on the
-          February, May, August and November stagger has no calendar quarter at all. Record the registration and
-          the periods, the deadline and the reminders all come from it instead.
+          February, May, August and November stagger has no calendar quarter at all. Record it in the FTA
+          registration panel above and the periods, the deadline and the reminders all come from it instead.
         </p>
       </Panel>
     );

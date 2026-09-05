@@ -4,6 +4,7 @@ import * as React from "react";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty, StatusChip } from "@/components/ledger/primitives";
 import { useAsk } from "@/components/ledger/ask";
+import { OrderEditor, whyNotEditable, toMilli, fromMilli, toBps, pct } from "@/components/ledger/order-edit";
 import { parseAmount } from "@/lib/ledger/format";
 import { TAX_PROFILE_LIST } from "@/lib/domain/tax";
 
@@ -50,34 +51,13 @@ interface ExpireResult { asOf: string; expired: number; quotes: { number: string
 
 /* ---------------------------------------------------------------- numbers --- */
 
-/** Quantities are thousandths. "1.5" is 1500, and a float would lose the edges. */
-function toMilli(text: string): bigint | null {
-  const t = text.trim();
-  if (!t) return null;
-  if (!/^\d+(\.\d{1,3})?$/.test(t)) return null;
-  const [whole, frac = ""] = t.split(".");
-  return BigInt(whole) * 1000n + BigInt(frac.padEnd(3, "0"));
-}
+/*
+ * The quantity, discount and percentage helpers live beside the editor in
+ * order-edit.tsx, and this screen reads them from there. Two parsers that
+ * disagreed about what "1.5" means would disagree in the one place it matters:
+ * between what a person typed into the editor and what this list then shows.
+ */
 
-/** Thousandths back out as a human reads them. */
-function fromMilli(milli: string | bigint): string {
-  const m = BigInt(milli);
-  const neg = m < 0n;
-  const abs = neg ? -m : m;
-  const frac = (abs % 1000n).toString().padStart(3, "0").replace(/0+$/, "");
-  return `${neg ? "-" : ""}${abs / 1000n}${frac ? "." + frac : ""}`;
-}
-
-/** A discount as it is typed — "12.5" percent — into the basis points stored. */
-function toBps(text: string): number | null {
-  const t = text.trim();
-  if (!t) return 0;
-  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
-  const [whole, frac = ""] = t.split(".");
-  return Number(whole) * 100 + Number(frac.padEnd(2, "0"));
-}
-
-const pct = (b: number) => `${(b / 100).toFixed(b % 100 === 0 ? 0 : 2)}%`;
 const today = () => new Date().toISOString().slice(0, 10);
 
 const TABS = [
@@ -431,6 +411,18 @@ function DetailPanel({ open, busy, act, onDone }: {
   onDone: (m: string) => void;
 }) {
   const billable = open.kind === "ORDER" && (open.status === "accepted" || open.status === "part_invoiced");
+  const [editing, setEditing] = React.useState(false);
+  const closed = whyNotEditable(open);
+
+  /* A document that has just moved on stops being editable underneath an open
+   * editor — invoicing the last of an order takes it to `invoiced`, which
+   * `updateOrder` refuses. Closing the editor when that happens is the honest
+   * answer: the alternative is a form that still accepts typing and can no
+   * longer be saved. */
+  React.useEffect(() => {
+    if (closed) setEditing(false);
+  }, [closed]);
+
   return (
     <Panel className="mt-4 overflow-hidden">
       <div
@@ -444,8 +436,28 @@ function DetailPanel({ open, busy, act, onDone }: {
         <span className="flex items-center gap-2">
           <span className="sw-chip">{open.kind === "QUOTE" ? "quote" : "order"}</span>
           <StatusChip status={open.status} />
+          <button
+            type="button"
+            className="sw-btn sw-btn-sm"
+            aria-disabled={closed ? true : undefined}
+            aria-expanded={editing}
+            title={closed ?? undefined}
+            data-testid="edit-order"
+            onClick={() => {
+              if (closed) return;
+              setEditing((v) => !v);
+            }}
+          >
+            {editing ? "Stop editing" : "Edit"}
+          </button>
         </span>
       </div>
+
+      {closed && (
+        <p className="sw-sub px-3 py-2" style={{ borderBottom: "1px solid var(--sw-line)" }} data-testid="edit-closed">
+          {closed} What it says is the whole of its value now.
+        </p>
+      )}
 
       <div className="sw-scroll">
         <table className="sw-table">
@@ -515,16 +527,39 @@ function DetailPanel({ open, busy, act, onDone }: {
         <p className="sw-sub p-3" style={{ borderTop: "1px solid var(--sw-line)", whiteSpace: "pre-line" }}>{open.notes}</p>
       )}
 
+      {/* One thing at a time in this footer. Invoicing an order while its
+          lines are half rewritten would be billing against a document neither
+          party has agreed, so the editor takes the space rather than sitting
+          beside the form. */}
       <div className="p-4" style={{ borderTop: "1px solid var(--sw-line)" }}>
-        {billable
-          ? <InvoiceForm order={open} busy={busy} act={act} onDone={onDone} />
-          : (
-            <p className="sw-sub max-w-[78ch]">
-              {open.kind === "QUOTE"
-                ? "A quotation is not invoiced. Once the customer accepts it, convert it into an order — the quotation then stays exactly as they agreed it, and the order carries the lines forward."
-                : `Nothing can be invoiced against ${open.number} while it is ${open.status.replace(/_/g, " ")}.`}
-            </p>
-          )}
+        {editing ? (
+          <OrderEditor
+            order={open}
+            busy={busy}
+            onCancel={() => setEditing(false)}
+            onSave={async (patch) => {
+              const r = await act<{ order: { number: string; status: string } }>("update", {
+                action: "update",
+                orderId: open.id,
+                patch,
+              });
+              if (!r) return;
+              setEditing(false);
+              onDone(
+                `${r.order.number} changed, and it keeps its number and its ${r.order.status.replace(/_/g, " ")} status. ` +
+                  `Nothing has been posted — the entry is still made when the invoice is raised.`,
+              );
+            }}
+          />
+        ) : billable ? (
+          <InvoiceForm order={open} busy={busy} act={act} onDone={onDone} />
+        ) : (
+          <p className="sw-sub max-w-[78ch]">
+            {open.kind === "QUOTE"
+              ? "A quotation is not invoiced. Once the customer accepts it, convert it into an order — the quotation then stays exactly as they agreed it, and the order carries the lines forward."
+              : `Nothing can be invoiced against ${open.number} while it is ${open.status.replace(/_/g, " ")}.`}
+          </p>
+        )}
       </div>
     </Panel>
   );

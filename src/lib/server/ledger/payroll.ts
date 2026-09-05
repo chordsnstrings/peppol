@@ -683,6 +683,20 @@ async function existingEntry(orgId: string, externalKey: string) {
   });
 }
 
+/**
+ * What one journal entry actually charged to a set of accounts, in the book's
+ * own currency. Used to ask the ledger what it holds rather than assuming it
+ * holds what the payslips say — which is the whole difference between a control
+ * and a restatement.
+ */
+async function chargedTo(orgId: string, entryId: string, codes: string[]): Promise<bigint> {
+  const lines = await prisma.journalLine.findMany({
+    where: { orgId, entryId, account: { code: { in: codes } } },
+    select: { functionalAmountMinor: true },
+  });
+  return lines.reduce((a, l) => a + l.functionalAmountMinor, 0n);
+}
+
 function figuresOf(p: {
   employeeId: string;
   basicMinor: bigint;
@@ -968,6 +982,12 @@ export interface PostPayrollResult {
   entryId: string;
   reference: string;
   alreadyPosted: boolean;
+  /**
+   * True where this entry is a second journal for a month already posted,
+   * raised for payslips that reached draft after the first one. The figures
+   * below are that entry's, not the month's — the month is `payrollSummary`.
+   */
+  supplementary: boolean;
   payslips: number;
   grossMinor: string;
   deductionsMinor: string;
@@ -976,7 +996,8 @@ export interface PostPayrollResult {
 }
 
 /**
- * Post one journal for the month.
+ * Post the month's payroll — one journal for the run, and one more for anything
+ * that reaches draft after it.
  *
  *   Dr  6000  Salaries and wages          gross — the cost of employing people
  *   Dr  6050  End-of-service benefits     the gratuity this month earned
@@ -1000,25 +1021,45 @@ export async function postPayroll(opts: {
 }): Promise<PostPayrollResult> {
   const decimal = decimalIn(await bookCurrency(opts.orgId, opts.entityId));
   const period = assertPeriod(opts.period);
-  const externalKey = payrollKey(opts.entityId, period);
+  const monthKey = payrollKey(opts.entityId, period);
 
-  const already = await existingEntry(opts.orgId, externalKey);
-  if (already) {
-    const rows = await prisma.payslip.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId, period } });
-    const t = totalsOf(rows);
+  const month = await existingEntry(opts.orgId, monthKey);
+
+  /*
+   * Only a payslip the ledger has not received is waiting to be posted, and the
+   * month's first journal is no longer treated as the end of the matter.
+   *
+   * It used to be: an entry under the month's key meant the month was done, and
+   * the totals reported back were taken from every payslip carrying that month
+   * — drafts included. So a payslip that reached draft after the run was posted
+   * was stranded twice over. The figure quoted back included an employee the
+   * ledger had never heard of, and `payPayroll` pays a posted payslip and
+   * nothing else, so that person was never paid. Salaries payable was
+   * understated by their net pay and nothing anywhere said so: the journal that
+   * existed balanced, and the trial balance tied on it.
+   */
+  const drafts = await prisma.payslip.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId, period, status: "draft" },
+    orderBy: { id: "asc" },
+  });
+
+  if (month && drafts.length === 0) {
+    // The month is on the books and nothing is outstanding. What is reported is
+    // what actually reached the ledger, which is what "already posted" means.
+    const reached = await prisma.payslip.findMany({
+      where: { orgId: opts.orgId, entityId: opts.entityId, period, status: { in: ["posted", "paid"] } },
+    });
     return {
       period,
-      entryId: already.id,
-      reference: `${already.series}-${already.number}`,
+      entryId: month.id,
+      reference: `${month.series}-${month.number}`,
       alreadyPosted: true,
-      payslips: rows.length,
-      ...t,
+      supplementary: false,
+      payslips: reached.length,
+      ...totalsOf(reached),
     };
   }
 
-  const drafts = await prisma.payslip.findMany({
-    where: { orgId: opts.orgId, entityId: opts.entityId, period, status: "draft" },
-  });
   if (drafts.length === 0) {
     throw new LedgerError(`There are no draft payslips for ${period}. Run the payroll for that month before posting it.`);
   }
@@ -1029,6 +1070,55 @@ export async function postPayroll(opts: {
   const gratuity = drafts.reduce((a, p) => a + p.gratuityMinor, 0n);
   const pensionEmployee = drafts.reduce((a, p) => a + p.pensionEmployeeMinor, 0n);
   const pensionEmployer = drafts.reduce((a, p) => a + p.pensionEmployerMinor, 0n);
+
+  /*
+   * A posted month with drafts still against it happened one of two ways, and
+   * they need opposite answers, so they are told apart before anything is
+   * written.
+   *
+   * If not one payslip in the month names that entry, the run was cut off
+   * between `post()` committing and the payslips being marked: the journal is
+   * on the books and the register does not know it. The drafts in hand are then
+   * the ones the entry was raised from — and the way to be sure is to ask the
+   * entry what it charged. Where the two agree, the link is repaired and
+   * nothing further is posted; the cost is already in the ledger, and the
+   * payslips have to say so or the month can never be paid.
+   *
+   * Where they do not agree, something has happened this function cannot name —
+   * a late payslip on top of an interrupted run is the likely one — and it says
+   * so instead of guessing which of the drafts the entry already covers.
+   */
+  if (month) {
+    const linked = await prisma.payslip.count({
+      where: { orgId: opts.orgId, entityId: opts.entityId, period, entryId: month.id },
+    });
+    if (linked === 0) {
+      const charged = await chargedTo(opts.orgId, month.id, [SALARY_EXPENSE, EOSB_EXPENSE]);
+      const outstanding = gross + pensionEmployer + gratuity;
+      if (charged !== outstanding) {
+        throw new LedgerError(
+          `${period} is posted as ${month.series}-${month.number}, which charged ${decimal(charged)} to salaries and ` +
+            `end of service, but no payslip for the month is linked to it and the ${drafts.length} still in draft come ` +
+            `to ${decimal(outstanding)}. The run was interrupted between the journal and the payslips, and the two no ` +
+            `longer describe the same month — reconcile them against ${month.series}-${month.number} before anything ` +
+            `else is posted for ${period}.`,
+        );
+      }
+      await prisma.payslip.updateMany({
+        where: { id: { in: drafts.map((p) => p.id) } },
+        data: { status: "posted", entryId: month.id },
+      });
+      return {
+        period,
+        entryId: month.id,
+        reference: `${month.series}-${month.number}`,
+        alreadyPosted: true,
+        supplementary: false,
+        payslips: drafts.length,
+        ...totalsOf(drafts),
+      };
+    }
+  }
 
   const lines: PostLine[] = [];
   if (gross > 0n) lines.push({ account: SALARY_EXPENSE, debit: gross, memo: `Payroll ${period} — ${drafts.length} employee${drafts.length === 1 ? "" : "s"}` });
@@ -1060,6 +1150,21 @@ export async function postPayroll(opts: {
   }
 
   /*
+   * What is being posted, and under which key.
+   *
+   * The month's first journal keeps the month's own key, which is what every
+   * other reader of a posted month looks it up by. A payslip that reaches draft
+   * after that gets a journal of its own, keyed on the last of the drafts it
+   * covers — the same derivation `reimburse()` uses for the same reason. A
+   * retry finds the same set of drafts, computes the same key and is handed the
+   * entry it already posted; once those payslips are marked, they are out of
+   * the set and the key of the next supplement is a different one.
+   */
+  const supplementary = Boolean(month);
+  const externalKey = month ? `${monthKey}:${drafts[drafts.length - 1].id}` : monthKey;
+  const already = supplementary ? await existingEntry(opts.orgId, externalKey) : null;
+
+  /*
    * The organisation's own approval rules, before a payslip becomes a payment.
    *
    * PAYROLL is one of the five subjects `approvals.ts` takes rules for, and it
@@ -1070,23 +1175,26 @@ export async function postPayroll(opts: {
    * The subject id is the period, which is what `sourceId` and the idempotency
    * key already use — so a signature is given for March's payroll and covers
    * March's payroll, not the next month's. The amount is the GROSS cost of
-   * employing people for the month, employer pension included: that is the
-   * figure an approval limit is written against, and net pay would understate
-   * it by every deduction withheld.
+   * what is being posted, employer pension included: that is the figure an
+   * approval limit is written against, and net pay would understate it by every
+   * deduction withheld. A supplement is asked about separately and at its own
+   * size, because it is a further charge and nobody signed for it.
    *
-   * This sits after the `externalKey` return above, so re-posting an already
-   * posted month still hands back the original entry. A rule written today
-   * cannot turn last month's harmless retry into a refusal.
+   * This is skipped only where the entry already exists, so re-posting hands
+   * back the original. A rule written today cannot turn last month's harmless
+   * retry into a refusal.
    */
-  await assertApproved({
-    orgId: opts.orgId,
-    entityId: opts.entityId,
-    subjectType: "PAYROLL",
-    subjectId: period,
-    amountMinor: gross + gratuity + pensionEmployer,
-    reference: period,
-    currency: await bookCurrency(opts.orgId, opts.entityId),
-  });
+  if (!already) {
+    await assertApproved({
+      orgId: opts.orgId,
+      entityId: opts.entityId,
+      subjectType: "PAYROLL",
+      subjectId: period,
+      amountMinor: gross + gratuity + pensionEmployer,
+      reference: period,
+      currency: await bookCurrency(opts.orgId, opts.entityId),
+    });
+  }
 
   // Payroll is a period-end measurement of a whole month, so it lands on the
   // last day of that month unless a caller has a reason to date it otherwise.
@@ -1096,7 +1204,9 @@ export async function postPayroll(opts: {
     orgId: opts.orgId,
     entityId: opts.entityId,
     entryDate,
-    memo: `Payroll for ${period}`,
+    memo: supplementary
+      ? `Payroll for ${period} — ${drafts.length} payslip${drafts.length === 1 ? "" : "s"} posted after the month's run`
+      : `Payroll for ${period}`,
     source: "payroll",
     sourceType: "PAYROLL_RUN",
     sourceId: period,
@@ -1118,7 +1228,8 @@ export async function postPayroll(opts: {
     period,
     entryId: entry.id,
     reference: `${entry.series}-${entry.number}`,
-    alreadyPosted: false,
+    alreadyPosted: Boolean(already),
+    supplementary,
     payslips: drafts.length,
     grossMinor: gross.toString(),
     deductionsMinor: deductions.toString(),
@@ -1134,6 +1245,8 @@ export interface PayPayrollResult {
   entryId: string;
   reference: string;
   alreadyPaid: boolean;
+  /** True where this transfer settles payslips posted after the month was paid. */
+  supplementary: boolean;
   payslips: number;
   paidMinor: string;
 }
@@ -1159,24 +1272,28 @@ export async function payPayroll(opts: {
   actorType?: "HUMAN" | "RULE" | "MODEL" | "AGENT" | "INTEGRATION";
 }): Promise<PayPayrollResult> {
   const period = assertPeriod(opts.period);
-  const externalKey = paymentKey(opts.entityId, period);
+  const monthKey = paymentKey(opts.entityId, period);
 
-  const already = await existingEntry(opts.orgId, externalKey);
-  if (already) {
+  const month = await existingEntry(opts.orgId, monthKey);
+
+  const posted = await prisma.payslip.findMany({
+    where: { orgId: opts.orgId, entityId: opts.entityId, period, status: "posted" },
+    orderBy: { id: "asc" },
+  });
+
+  if (month && posted.length === 0) {
     const paid = await prisma.payslip.findMany({ where: { orgId: opts.orgId, entityId: opts.entityId, period, status: "paid" } });
     return {
       period,
-      entryId: already.id,
-      reference: `${already.series}-${already.number}`,
+      entryId: month.id,
+      reference: `${month.series}-${month.number}`,
       alreadyPaid: true,
+      supplementary: false,
       payslips: paid.length,
       paidMinor: paid.reduce((a, p) => a + p.netMinor, 0n).toString(),
     };
   }
 
-  const posted = await prisma.payslip.findMany({
-    where: { orgId: opts.orgId, entityId: opts.entityId, period, status: "posted" },
-  });
   if (posted.length === 0) {
     throw new LedgerError(`No posted payroll for ${period} is waiting to be paid. Post the month before paying it.`);
   }
@@ -1184,11 +1301,48 @@ export async function payPayroll(opts: {
   const net = posted.reduce((a, p) => a + p.netMinor, 0n);
   if (net <= 0n) throw new LedgerError(`The net pay for ${period} is zero, so there is nothing to transfer.`);
 
+  /*
+   * A month already paid, with payslips still waiting on it. Two ways again,
+   * and here the two answers are "move money" and "do not", so the ambiguity
+   * has to fall the safe way.
+   *
+   * Where the month's transfer already discharged exactly what is outstanding,
+   * this is the same run reaching the bank and then dying before the payslips
+   * were marked: the money has gone, and repeating it would send it twice. The
+   * payslips are marked and nothing is posted.
+   *
+   * Otherwise these are payslips posted after the month was paid — a
+   * supplementary run from `postPayroll` — and they are transferred on their
+   * own entry. The one case this reads wrongly is a late payslip whose net
+   * happens to equal the whole of the first transfer, and it reads it as money
+   * already sent, which is the direction that cannot overpay anybody.
+   * `payrollSummary` shows it, because 2200 then holds a net no posted payslip
+   * accounts for.
+   */
+  if (month && (await chargedTo(opts.orgId, month.id, [SALARY_PAYABLE])) === net) {
+    await prisma.payslip.updateMany({ where: { id: { in: posted.map((p) => p.id) } }, data: { status: "paid" } });
+    return {
+      period,
+      entryId: month.id,
+      reference: `${month.series}-${month.number}`,
+      alreadyPaid: true,
+      supplementary: false,
+      payslips: posted.length,
+      paidMinor: net.toString(),
+    };
+  }
+
+  const supplementary = Boolean(month);
+  const externalKey = month ? `${monthKey}:${posted[posted.length - 1].id}` : monthKey;
+  const already = supplementary ? await existingEntry(opts.orgId, externalKey) : null;
+
   const entry = await post({
     orgId: opts.orgId,
     entityId: opts.entityId,
     entryDate: opts.paidOn ?? iso(monthEnd(period)),
-    memo: `Salaries paid for ${period}`,
+    memo: supplementary
+      ? `Salaries paid for ${period} — ${posted.length} payslip${posted.length === 1 ? "" : "s"} posted after the month's transfer`
+      : `Salaries paid for ${period}`,
     source: "payroll",
     sourceType: "PAYROLL_PAYMENT",
     sourceId: period,
@@ -1208,7 +1362,8 @@ export async function payPayroll(opts: {
     period,
     entryId: entry.id,
     reference: `${entry.series}-${entry.number}`,
-    alreadyPaid: false,
+    alreadyPaid: Boolean(already),
+    supplementary,
     payslips: posted.length,
     paidMinor: net.toString(),
   };

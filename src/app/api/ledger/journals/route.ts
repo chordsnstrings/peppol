@@ -82,6 +82,19 @@ export async function GET(req: Request) {
   }
 }
 
+/**
+ * The shape a journal's idempotency token has to take.
+ *
+ * It is a token, not a name: the client mints one when the form is opened and
+ * sends the same one for every attempt at that form, so a retry is recognisable
+ * as the same journal. A colon is excluded deliberately — the key below is
+ * namespaced `journal:<entity>:<token>` and every other module keys its entries
+ * the same way (`payroll:…`, `petty-cash-reimburse:…`), so a token allowed to
+ * contain a colon could be crafted to collide with one of theirs and be handed
+ * back somebody else's entry.
+ */
+const IDEMPOTENCY_TOKEN = /^[A-Za-z0-9_-]{8,64}$/;
+
 /** Post a manual journal. */
 export async function POST(req: Request) {
   try {
@@ -94,11 +107,55 @@ export async function POST(req: Request) {
        * See the guard below for why the client has to name it.
        */
       approvalId?: string;
+      /**
+       * One token per opened form, so the second arrival of the same journal is
+       * recognised as the same journal. See the guard below.
+       */
+      idempotencyKey?: string;
     };
     if (!b.entityId || !b.entryDate || !Array.isArray(b.lines)) {
       return json({ error: "A journal needs an entity, a date and at least two lines." }, 400);
     }
     await requirePermission({ orgId, userId, entityId: b.entityId, permission: "ledger.post" });
+
+    /*
+     * Idempotency, which a manual journal needs more than any other posting
+     * path and was the only one without it.
+     *
+     * Everything else that reaches post() has a document behind it — an invoice
+     * id, a fund and a receipt, a payroll period — and keys on that. A manual
+     * journal has nothing: two identical balanced entries with two gapless
+     * numbers are indistinguishable from two legitimate journals keyed on
+     * purpose, which is why nothing downstream can catch it and why the figure
+     * is simply wrong. A double-submitted form or a browser retrying a slow
+     * POST is enough on its own; it does not need a second person.
+     *
+     * The token has to be minted when the form is OPENED. One minted at submit
+     * time is a different token on every attempt, which is no token at all.
+     *
+     * A request that sends no token still posts. The entry grid does not mint
+     * one yet, and refusing here would take the New journal screen out of
+     * service to close a hole it has not been taught to close; every request
+     * that does carry a token gets the guarantee.
+     */
+    const token = (b.idempotencyKey ?? "").trim();
+    if (token && !IDEMPOTENCY_TOKEN.test(token)) {
+      return json({ error: "That idempotency token is not one this journal can be keyed on — use the one the form was opened with." }, 400);
+    }
+    const externalKey = token ? `journal:${b.entityId}:${token}` : undefined;
+
+    // A journal already posted under this token is handed straight back, before
+    // the approval rules are consulted. post() would return the same entry
+    // anyway; asking first is what stops a rule written since — or an approval
+    // that has since been withdrawn — from turning a harmless retry into a
+    // refusal for a journal that is already on the books.
+    if (externalKey) {
+      const already = await prisma.journalEntry.findFirst({
+        where: { orgId, externalKey },
+        include: { lines: { include: { account: { select: { code: true, name: true } } }, orderBy: { lineNo: "asc" } } },
+      });
+      if (already) return json(ledgerJson({ entry: already, alreadyPosted: true }));
+    }
 
     // The entity's approval rules for journals, enforced before anything is
     // written. Permission and approval are different questions and both have to
@@ -164,9 +221,9 @@ export async function POST(req: Request) {
 
     const entry = await post({
       orgId, entityId: b.entityId, entryDate: b.entryDate, memo: b.memo,
-      source: "manual", actorType: "HUMAN", actorId: userId, lines: b.lines,
+      source: "manual", actorType: "HUMAN", actorId: userId, externalKey, lines: b.lines,
     });
-    return json(ledgerJson({ entry }));
+    return json(ledgerJson({ entry, alreadyPosted: false }));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);
     if (e instanceof LedgerError) return json({ error: e.message }, 422);

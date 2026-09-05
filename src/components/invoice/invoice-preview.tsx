@@ -3,12 +3,62 @@
 import * as React from "react";
 import { cn, formatDate } from "@/lib/utils";
 import { formatMoney } from "@/lib/domain/money";
-import { DOC_TYPE_LABEL, getProfile } from "@/lib/domain/tax";
+import { EMIRATES } from "@/lib/domain/peppol";
+import { aedTaxTotals, documentTaxStatements, DOC_TYPE_LABEL, getProfile } from "@/lib/domain/tax";
 import { LogoMark } from "@/components/shell/logo";
-import type { Invoice } from "@/lib/domain/types";
+import type { Address, CategoryBreakdown, Invoice } from "@/lib/domain/types";
+
+/**
+ * Only the AE code is spelled out. Every address this product records is a UAE
+ * one — the entity, customer and onboarding forms all write the country
+ * themselves — and a table of two hundred country names for a field that is
+ * currently always the same would be furniture. An unrecognised code prints as
+ * itself rather than being dropped.
+ */
+const COUNTRY_NAME: Record<string, string> = { AE: "United Arab Emirates" };
+
+/**
+ * An address as a reader expects to see it.
+ *
+ * Article 59(1)(b) and (c) of the Executive Regulation require the address of
+ * both the supplier and the recipient on a tax invoice. This product collected
+ * the supplier's at onboarding and then printed none of it, and printed only
+ * the buyer's emirate — so every document it rendered was short two particulars
+ * the law names.
+ */
+function addressLines(address?: Address): string[] {
+  if (!address) return [];
+  const emirate = EMIRATES.find((e) => e.code === address.emirate)?.name ?? address.emirate;
+  const locality = [address.city, emirate].filter(Boolean).join(", ");
+  return [
+    address.street,
+    address.additional,
+    address.poBox ? `P.O. Box ${address.poBox}` : undefined,
+    locality || undefined,
+    address.country ? (COUNTRY_NAME[address.country] ?? address.country) : undefined,
+  ].filter((l): l is string => Boolean(l && l.trim()));
+}
+
+/**
+ * What a breakdown row is called.
+ *
+ * A row reading "VAT 0%" says a rate and hides a treatment: zero-rated, exempt
+ * and reverse-charged all foot to nothing and mean entirely different things to
+ * the buyer. Where the rate is nil the treatment is what the reader needs.
+ */
+function categoryLabel(c: CategoryBreakdown): string {
+  if (c.ratePercent > 0) return `VAT ${c.ratePercent}%`;
+  return `${getProfile(c.profileCode).label} (VAT 0%)`;
+}
 
 export function InvoicePreview({ invoice, className }: { invoice: Invoice; className?: string }) {
   const { seller, buyer, lines, totals, currency } = invoice;
+  const sellerAddress = addressLines(seller.address);
+  const buyerAddress = addressLines(buyer.address);
+  // The same derivation the UBL uses, so the printed document and the exchanged
+  // one state the same AED figure at the same rate.
+  const aed = aedTaxTotals(invoice);
+  const statements = documentTaxStatements(totals);
   return (
     <div
       className={cn(
@@ -18,7 +68,7 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-4 border-b border-black/[0.06] p-6 dark:border-white/[0.06]">
-        <div className="flex items-center gap-3">
+        <div className="flex items-start gap-3">
           <LogoMark size={40} />
           <div>
             <p className="text-sm font-bold">{seller.nameEn || "Your company"}</p>
@@ -27,6 +77,11 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
                 {seller.nameAr}
               </p>
             )}
+            {sellerAddress.map((l, i) => (
+              <p key={`${i}-${l}`} className="text-xs opacity-60">
+                {l}
+              </p>
+            ))}
             {seller.trn && <p className="text-xs opacity-60">TRN {seller.trn}</p>}
             {seller.peppolId && <p className="font-mono text-[11px] opacity-50">{seller.peppolId}</p>}
           </div>
@@ -49,8 +104,12 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
               {buyer.nameAr}
             </p>
           )}
+          {buyerAddress.map((l, i) => (
+            <p key={`${i}-${l}`} className="text-xs opacity-60">
+              {l}
+            </p>
+          ))}
           {buyer.trn && <p className="text-xs opacity-60">TRN {buyer.trn}</p>}
-          {buyer.address?.emirate && <p className="text-xs opacity-60">{buyer.address.emirate}, UAE</p>}
         </div>
         <div className="space-y-1 text-end">
           <Meta label="Issue date" value={formatDate(invoice.issueDate)} />
@@ -81,10 +140,19 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
             ) : (
               lines.map((l) => {
                 const profile = getProfile(l.taxProfileCode);
+                // The treatment sits under the description on any line that is
+                // not plain standard-rated. A mixed document otherwise shows
+                // several lines at 0% with nothing to say which of them is the
+                // reverse-charged one the statement below refers to.
+                const treatment =
+                  profile.code === "STANDARD_5" && !l.exemptionReason
+                    ? undefined
+                    : [profile.label, l.exemptionReason?.trim()].filter(Boolean).join(" — ");
                 return (
                   <tr key={l.id}>
                     <td className="py-2.5 pe-2">
                       <p className="font-medium">{l.description || "—"}</p>
+                      {treatment && <p className="text-[11px] opacity-50">{treatment}</p>}
                     </td>
                     <td className="py-2.5 text-end tnum">{l.qty}</td>
                     <td className="py-2.5 text-end tnum">{formatMoney(l.unitPriceMinor, currency, { withSymbol: false })}</td>
@@ -106,8 +174,11 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
           <Row label="Subtotal" value={formatMoney(totals.taxExclusiveMinor, currency)} />
           {totals.perCategory.map((c) => (
             <Row
-              key={c.categoryCode + c.ratePercent}
-              label={`VAT ${c.ratePercent}%`}
+              // Not the category code: a reverse charge and an import both
+              // carry AE at nought, and the two subtotals are deliberately
+              // separate.
+              key={c.profileCode + c.ratePercent}
+              label={categoryLabel(c)}
               value={formatMoney(c.vatMinor, currency)}
               muted
             />
@@ -118,13 +189,51 @@ export function InvoicePreview({ invoice, className }: { invoice: Invoice; class
             value={formatMoney(totals.taxInclusiveMinor, currency)}
             strong
           />
-          {invoice.fx && (
-            <p className="pt-1 text-end text-[11px] opacity-50">
-              AED tax total at CBUAE rate {invoice.fx.rateToAED}
+          {/*
+            Article 69 of Federal Decree-Law 8/2017 requires the tax on a
+            foreign-currency document to be converted to AED, and Article
+            59(1)(k) requires the converted figure and the rate to be ON the
+            document. What was here printed the rate and no figure — the
+            multiplication instead of the answer.
+          */}
+          {aed && (
+            <>
+              <Row label="VAT in AED" value={formatMoney(aed.vatMinorAED, "AED")} muted />
+              <Row label="Total due in AED" value={formatMoney(aed.payableMinorAED, "AED")} muted />
+              <p className="pt-1 text-end text-[11px] opacity-50">
+                Converted at {aed.source === "CBUAE" ? "the CBUAE rate" : "a manually entered rate"}{" "}
+                of {aed.rateToAED} on {formatDate(aed.rateDate)}
+              </p>
+            </>
+          )}
+          {/*
+            Said rather than left blank. A foreign-currency document that
+            charges tax and cannot state it in AED is missing a particular the
+            law names, and the person looking at this preview is the only one
+            who can supply the rate.
+          */}
+          {!aed && currency !== "AED" && totals.vatMinor !== 0 && (
+            <p className="pt-1 text-end text-[11px] opacity-70">
+              The VAT still has to be stated in AED — no usable rate has been captured for{" "}
+              {formatDate(invoice.supplyDate)}.
             </p>
           )}
         </div>
       </div>
+
+      {/*
+        Article 59(1)(l) requires a reverse-charge document to say the recipient
+        must account for the tax and to cite the provision that puts it on them;
+        Article 43 requires a margin-scheme document to say the scheme was
+        applied. Neither is optional and neither was here.
+      */}
+      {statements.length > 0 && (
+        <div className="space-y-1 border-t border-black/[0.06] px-6 py-4 text-xs opacity-70 dark:border-white/[0.06]">
+          {statements.map((s) => (
+            <p key={s}>{s}</p>
+          ))}
+        </div>
+      )}
 
       {invoice.notes && (
         <div className="border-t border-black/[0.06] p-6 text-xs opacity-60 dark:border-white/[0.06]">

@@ -363,6 +363,44 @@ d("petty cash on the imprest system", () => {
     expect(await balanceOf("1000", OTHER_ORG)).toBe(10_000n);
   });
 
+  it("dates a movement by the business day here, not by the clock the server keeps", async () => {
+    // Entry dates and period bounds are plain dates, and the office is at
+    // UTC+4. Both halves of that used to be wrong, and both at a period end.
+    const evening = await float("PC-TZ-EVENING", 100_000);
+    await spend(evening.fundId, 20_000, { description: "Courier, month end", movedOn: "2026-06-29" });
+
+    // Nine in the evening on the last day of June is 17:00 UTC — still the
+    // 30th, but with a time on it, and June's period is held as midnight on
+    // the 30th. `startsOn <= date <= endsOn` therefore matched NO period at
+    // all, and the reimbursement was refused outright on the one evening of
+    // the month when the tin is always being emptied.
+    const late = await reimburse({ ...scope, fundId: evening.fundId, movedOn: new Date("2026-06-30T17:00:00.000Z") });
+    const lateEntry = await db.journalEntry.findUniqueOrThrow({ where: { id: late.entryId }, include: { period: true } });
+    expect(lateEntry.entryDate.toISOString().slice(0, 10)).toBe("2026-06-30");
+    expect(lateEntry.period.label).toBe("2026-06");
+
+    // And the other direction: one in the morning on 1 July is still 30 June in
+    // UTC, so the entry was dated into the previous VAT quarter.
+    const small = await float("PC-TZ-SMALL-HOURS", 100_000);
+    const back = await returnCash({
+      ...scope, fundId: small.fundId, amountMinor: 30_000, movedOn: new Date("2026-06-30T21:00:00.000Z"),
+    });
+    const backEntry = await db.journalEntry.findUniqueOrThrow({ where: { id: back.entryId }, include: { period: true } });
+    expect(backEntry.entryDate.toISOString().slice(0, 10)).toBe("2026-07-01");
+    expect(backEntry.period.label).toBe("2026-07");
+
+    // The movement in the subledger says the same day as the journal, or the
+    // register and the ledger would disagree about the day the money moved.
+    const detail = await fundDetail({ ...scope, fundId: small.fundId });
+    expect(detail.movements.find((m) => m.kind === "RETURN")?.movedOn).toBe("2026-07-01");
+
+    // A date somebody wrote down is a day already, and is taken as written.
+    const opened = await db.journalEntry.findFirstOrThrow({
+      where: { orgId: ORG, externalKey: `petty-cash-open:${small.fundId}` },
+    });
+    expect(opened.entryDate.toISOString().slice(0, 10)).toBe("2026-04-01");
+  });
+
   it("lists every float with the one figure that matters, and ties to the ledger", async () => {
     const list = await fundList(scope);
     const byCode = new Map(list.funds.map((f) => [f.code, f]));

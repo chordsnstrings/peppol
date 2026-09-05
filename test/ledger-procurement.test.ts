@@ -314,7 +314,11 @@ d("purchase orders, goods receipts and three-way matching", () => {
 
     const report = await grniReport({ orgId: ORG, entityId: ENT, asOf: "2026-04-30" });
     expect(report.orders.find((o) => o.number === "PO-A")).toBeUndefined();
-    expect(report.allOrders.find((o) => o.number === "PO-A")?.outstandingMinor).toBe("0");
+    // And it has left the report altogether rather than sitting in it at zero:
+    // a line invoiced for everything it received holds nothing in 1250, so the
+    // report no longer reads the order at all.
+    const detail = await orderDetail({ orgId: ORG, orderId: order.id });
+    expect(detail.lines[0].grniMinor).toBe("0");
   });
 
   it("does not post the same supplier invoice twice", async () => {
@@ -593,6 +597,52 @@ d("purchase orders, goods receipts and three-way matching", () => {
     const list = await orderList({ orgId: ORG, entityId: ENT });
     expect(list.orders.find((o) => o.number === "PO-A")?.status).toBe("received");
     expect(list.orders.find((o) => o.number === "PO-CANCEL")?.status).toBe("cancelled");
+  });
+
+  it("reads only the orders that can be holding a balance, not every order ever raised", async () => {
+    /*
+     * The report used to load every purchase order the business had ever
+     * raised — with its lines, its receipts and every receipt line — onto a
+     * dashboard, and return all of them. Goods received and not invoiced is a
+     * question about deliveries nobody has billed yet: an order whose every
+     * line has been invoiced for at least as much as it received holds nothing
+     * in 1250 and cannot start holding something by being read.
+     */
+    const before = await grniReport({ orgId: ORG, entityId: ENT, asOf: "2026-04-30" });
+
+    // A drawer full of orders that cannot contribute a fil.
+    for (let i = 0; i < 10; i++) {
+      await createOrder({
+        orgId: ORG, entityId: ENT,
+        order: {
+          number: `PO-QUIET-${i}`, supplierName: "Gulf Steel LLC", orderedOn: "2026-04-01",
+          lines: [service("Nothing delivered", 1, 100_00)],
+        },
+      });
+    }
+
+    const after = await grniReport({ orgId: ORG, entityId: ENT, asOf: "2026-04-30" });
+    expect(after.orders.map((o) => o.number)).toEqual(before.orders.map((o) => o.number));
+    expect(after.totals.outstandingMinor).toBe(before.totals.outstandingMinor);
+    // The ledger side is summed by the database now rather than by fetching a
+    // row for every posting ever made to 1250; it has to reach the same figure.
+    expect(after.ledger.outstandingMinor).toBe(before.ledger.outstandingMinor);
+    expect(after.ledger.differenceMinor).toBe(before.ledger.differenceMinor);
+    expect(after.note).toBe(before.note);
+
+    // And what it read is the orders with an unbilled delivery on them, which
+    // is fewer than the orders on file — said out loud rather than assumed.
+    const lines = await db.purchaseOrderLine.findMany({
+      where: { orgId: ORG, order: { entityId: ENT } },
+      select: { orderId: true, receivedMilli: true, invoicedMilli: true },
+    });
+    const unbilled = new Set(
+      lines.filter((l) => l.receivedMilli > l.invoicedMilli).map((l) => l.orderId),
+    ).size;
+    const onFile = await db.purchaseOrder.count({ where: { orgId: ORG, entityId: ENT } });
+    expect(unbilled).toBeLessThan(onFile);
+    expect(after.note).toContain(`Read from ${unbilled} purchase order`);
+    expect(after.note).toMatch(/is not read/);
   });
 
   it("values a quantity at a unit price without ever seeing a float", () => {

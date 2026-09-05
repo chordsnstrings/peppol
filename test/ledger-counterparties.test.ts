@@ -565,4 +565,89 @@ d("counterparties and credit control", () => {
       orgId: ORG, entityId: ENT, code: "C-ALM", change: { kind: "SUPPLIER" },
     })).rejects.toThrow(/still carries/i);
   });
+
+  /* ------------------------------------- what a long-lived ledger costs to read */
+
+  /*
+   * The statement used to read every posting the receivables control account
+   * had ever carried, and then ask the document store who every one of those
+   * documents belonged to in a single `id: { in: [...] }`. That list is one
+   * bind parameter per sales document ever raised, and PostgreSQL refuses a
+   * statement past 65,535 of them — about eleven hundred invoices a month for
+   * five years, at which point the customer statement stops working entirely
+   * rather than merely slowly. The read is chunked now and bounded below by the
+   * period asked for; these say the answer did not move.
+   */
+
+  it("reads the ledger only from the start of the period, and closes at the same figure", async () => {
+    const bounded = await counterpartyStatement({
+      orgId: ORG, entityId: ENT, code: "C-ALM", from: "2026-03-01", to: ASOF,
+    });
+    const whole = await counterpartyStatement({ orgId: ORG, entityId: ENT, code: "C-ALM", to: ASOF });
+
+    expect(bounded.readFrom).toBe("2026-03-01");
+    expect(whole.readFrom).toBeNull();
+    expect(bounded.closingMinor).toBe(whole.closingMinor);
+    expect(bounded.agrees).toBe(true);
+
+    // January's invoice had no movement in March at all, so it is carried in at
+    // its balance rather than read line by line — and it is not itemised twice.
+    expect(bounded.openingMinor).toBe("210000");
+    expect(bounded.lines.some((l) => l.documentId === A2)).toBe(false);
+    expect(bounded.note).toMatch(/ledger was read from 2026-03-01/i);
+  });
+
+  it("still nets a receipt against the invoice it settles when the invoice is older than the window", async () => {
+    // The trap in bounding the read: INV-A1 was raised on 10 March and part-paid
+    // on 22 March. Read from 15 March the receipt is inside the window and the
+    // invoice is not, so a read that stopped at the boundary would show this
+    // customer 400.00 in credit — money the business owes them — when they
+    // actually owe 2,750.00.
+    const s = await counterpartyStatement({
+      orgId: ORG, entityId: ENT, code: "C-ALM", from: "2026-03-15", to: ASOF,
+    });
+    expect(s.readFrom).toBe("2026-03-15");
+    expect(s.openingMinor).toBe("315000");
+    expect(s.lines.map((l) => [l.number, l.debitMinor, l.creditMinor, l.balanceMinor])).toEqual([
+      ["INV-A1", "0", "40000", "275000"],
+    ]);
+    expect(s.closingMinor).toBe("275000");
+    expect(s.agrees).toBe(true);
+  });
+
+  it("gives a customer with nothing on the ledger a statement of nil rather than an error", async () => {
+    // The chunked lookup has to survive an empty list of documents: the loop
+    // that replaced the single query must simply not run.
+    const s = await counterpartyStatement({
+      orgId: ORG, entityId: ENT, code: "C-HOLD", from: "2026-01-01", to: ASOF,
+    });
+    expect(s.lines).toEqual([]);
+    expect(s.openingMinor).toBe("0");
+    expect(s.closingMinor).toBe("0");
+    expect(s.agrees).toBe(true);
+  });
+
+  it("gives each customer only their own open items, however many customers there are", async () => {
+    // `openItemsOf` used to walk every document in the ledger once per party,
+    // which on a thousand customers and a hundred thousand documents is a
+    // hundred million comparisons on the event loop — and the event loop is
+    // what every other request on the process is waiting on. The documents are
+    // bucketed by party once; the answer has to be the one they gave before.
+    const list = await listCounterparties({ orgId: ORG, entityId: ENT, asOf: ASOF, includeArchived: true });
+    const alm = await creditStatus({ orgId: ORG, entityId: ENT, code: "C-ALM", asOf: ASOF });
+    const nak = await creditStatus({ orgId: ORG, entityId: ENT, code: "C-NAK", asOf: ASOF });
+    const cash = await creditStatus({ orgId: ORG, entityId: ENT, code: "C-CASH", asOf: ASOF });
+
+    expect([...alm.items].map((i) => i.documentId).sort()).toEqual([A1, A2].sort());
+    expect(nak.items.map((i) => i.documentId)).toEqual([B1]);
+    expect(cash.items.map((i) => i.documentId)).toEqual([C1]);
+
+    // No document is on two accounts, and one pass over the ledger says the
+    // same as reading each customer on their own.
+    const ids = [alm, nak, cash].flatMap((c) => c.items.map((i) => i.documentId));
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const c of [alm, nak, cash]) {
+      expect(list.counterparties.find((x) => x.code === c.code)!.openItems).toBe(c.items.length);
+    }
+  });
 });

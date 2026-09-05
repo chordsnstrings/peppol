@@ -97,8 +97,51 @@ function minor(v: number | bigint | string | undefined | null, what: string): bi
   return BigInt(typeof v === "string" ? v.trim() : v);
 }
 
-const asDate = (d: Date | string) => (typeof d === "string" ? new Date(d) : d);
 const day = (d: Date) => d.toISOString().slice(0, 10);
+
+/**
+ * The books are kept in the Gulf, which is UTC+4 the whole year round — the UAE
+ * observes no daylight saving, so this is a fixed offset and not an
+ * approximation of one.
+ *
+ * It is a constant rather than a per-entity setting because there is nowhere on
+ * an entity to record one. An entity keeping its books in another zone needs
+ * that field before this can read it, and this is the line to change when it
+ * exists.
+ */
+const BUSINESS_UTC_OFFSET_MINUTES = 4 * 60;
+
+/**
+ * The business day a movement falls on, anchored at UTC midnight.
+ *
+ * Entry dates and period bounds are plain dates in the database, and this
+ * module used to hand `new Date()` — an instant, with a time on it — straight
+ * to `post()`. Two things followed from that, and both bit hardest on the
+ * busiest day of the month.
+ *
+ * A reimbursement keyed at nine in the evening on the last day of a period is
+ * 17:00 UTC on that day, and a period ending that day is stored as midnight on
+ * it, so `startsOn <= date <= endsOn` matched NO period at all and the posting
+ * was refused outright. And in the other direction, between midnight and four
+ * in the morning here it is still yesterday in UTC: a reimbursement at one in
+ * the morning on 1 July was dated 30 June, in the previous VAT quarter.
+ *
+ * A date somebody wrote down is a day already, and its digits are taken as they
+ * stand — "2026-07-01" means that day wherever it was keyed, and reading it
+ * through a clock would move it. Only an instant is resolved, and it resolves
+ * to the calendar day it fell on where the money moved.
+ */
+function businessDay(v: Date | string | null | undefined, what: string): Date {
+  if (typeof v === "string") {
+    const written = new Date(`${v.slice(0, 10)}T00:00:00.000Z`);
+    if (Number.isNaN(written.getTime())) throw new LedgerError(`${what} is not a date I can read ("${v}").`);
+    return written;
+  }
+  const at = v ?? new Date();
+  if (Number.isNaN(at.getTime())) throw new LedgerError(`${what} is not a date I can read.`);
+  const local = new Date(at.getTime() + BUSINESS_UTC_OFFSET_MINUTES * 60_000);
+  return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()));
+}
 
 export type MovementKind = "OPENING" | "SPEND" | "REIMBURSE" | "RETURN";
 
@@ -362,7 +405,7 @@ export async function openFund(opts: {
         include: { movements: { orderBy: { seq: "asc" } } },
       });
 
-  const openedOn = opts.openedOn ? asDate(opts.openedOn) : new Date();
+  const openedOn = businessDay(opts.openedOn, `The date fund ${code} was advanced`);
   const externalKey = `petty-cash-open:${fund.id}`;
   const fx = fxOf(fund, opts.fxRate, "the opening");
 
@@ -517,7 +560,7 @@ export async function recordSpend(opts: {
       fundId: fund.id,
       seq: nextSeq(fund.movements),
       kind: "SPEND",
-      movedOn: asDate(opts.movedOn),
+      movedOn: businessDay(opts.movedOn, `The date of "${description}"`),
       description,
       amountMinor: amount,
       accountCode: (opts.accountCode ?? "").trim() || DEFAULT_EXPENSE,
@@ -599,7 +642,7 @@ export async function reimburse(opts: {
   const recoverableVat = outstanding.reduce((a, m) => a + recoverableVatOf(m), 0n);
   const blockedVat = outstanding.reduce((a, m) => a + (m.vatMinor - recoverableVatOf(m)), 0n);
 
-  const movedOn = opts.movedOn ? asDate(opts.movedOn) : new Date();
+  const movedOn = businessDay(opts.movedOn, `The date fund ${fund.code} was reimbursed`);
   const externalKey = `petty-cash-reimburse:${fund.id}:${outstanding[outstanding.length - 1].id}`;
   const fx = fxOf(fund, opts.fxRate, "the reimbursement");
 
@@ -742,7 +785,7 @@ export async function returnCash(opts: {
     );
   }
 
-  const movedOn = opts.movedOn ? asDate(opts.movedOn) : new Date();
+  const movedOn = businessDay(opts.movedOn, `The date cash came back from fund ${fund.code}`);
   const seq = nextSeq(fund.movements);
   const externalKey = `petty-cash-return:${fund.id}:${seq}`;
   const fx = fxOf(fund, opts.fxRate, "the return");

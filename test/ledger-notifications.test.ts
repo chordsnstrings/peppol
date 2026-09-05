@@ -9,6 +9,7 @@ import { importStatement } from "@/lib/server/ledger/bank";
 import { addItem, setReorderLevel } from "@/lib/server/ledger/inventory";
 import { addBorrowing, addCovenant } from "@/lib/server/ledger/borrowings";
 import { issueFacility } from "@/lib/server/ledger/trade-finance";
+import { sharedReads, type SharedReads } from "@/lib/server/ledger/attention";
 
 const db = new PrismaClient();
 const d = process.env.DATABASE_URL ? describe : describe.skip;
@@ -17,6 +18,8 @@ const ORG = "t-org-ntf";
 const ENT = "t-ent-ntf";
 /** A second entity with no ledger at all, used to make a source genuinely throw. */
 const BARE = "t-ent-ntf-bare";
+/** A third, trading straight past the VAT registration threshold and not registered. */
+const GROWING = "t-ent-ntf-growing";
 const S = { orgId: ORG, entityId: ENT };
 const ACTOR = "t-user-ntf";
 
@@ -121,6 +124,23 @@ async function seed() {
       borrowingCode: "LOAN-1", code: "NEG-PLEDGE", metric: "OTHER",
       wording: "The borrower shall grant no security over its assets.",
     },
+  });
+
+  // AED 400,000 of supplies in a day, on an entity with no VAT registration
+  // recorded — which puts the twelve months ending on it over the mandatory
+  // threshold and starts a thirty-day clock the FTA sets rather than this
+  // product. Its own books, because the threshold is a function of every supply
+  // in the ledger and the entity above is used by every other test here.
+  await openFiscalYear({ orgId: ORG, entityId: GROWING, label: "2025", startsOn: "2025-01-01" });
+  await openFiscalYear({ orgId: ORG, entityId: GROWING, label: "2026", startsOn: "2026-01-01" });
+  await openBooks({ orgId: ORG, entityId: GROWING });
+  await post({
+    orgId: ORG, entityId: GROWING, entryDate: "2026-01-15", source: "invoice", memo: "Fit-out contract",
+    lines: [
+      { account: "1010", debit: 42_000_000n },
+      { account: "4000", credit: 40_000_000n, taxCode: "STANDARD_5", taxEmirate: "DU" },
+      { account: "2100", credit: 2_000_000n, taxCode: "OUTPUT_VAT", taxEmirate: "DU" },
+    ],
   });
 
   // A guarantee expiring inside the ninety-day window, with margin the bank is
@@ -487,6 +507,56 @@ d("the notification centre", () => {
     expect(expiring!.severity).toBe("warning");
     // The uncalled exposure, which is the face less anything drawn.
     expect(expiring!.amountMinor).toBe("25000000");
+  });
+
+  it("carries the registration deadline through as the statutory one it is", async () => {
+    // The day the ledger shows the threshold crossed is 15 January, so the
+    // application is due by 14 February — a date set by law rather than by
+    // terms, and the queue has to treat it as one.
+    const day = "2026-02-10";
+    const centre = await notificationCentre({ orgId: ORG, entityId: GROWING, asOf: day });
+
+    const row = centre.notices.find((n) => n.key === "attention:vat_registration")!;
+    expect(row).toBeDefined();
+    expect(row.severity).toBe("blocker");
+    expect(row.statutory).toBe(true);
+    expect(row.dueOn).toBe("2026-02-14");
+    expect(row.daysToDue).toBe(4);
+    expect(centre.digest.dueSoon.map((r) => r.key)).toContain("attention:vat_registration");
+
+    // A blocker cannot be acknowledged away, and it cannot be put off up to the
+    // day it is due either — which is the only reason "cannot be acknowledged"
+    // means anything.
+    expect(row.mayAcknowledge).toBe(false);
+    expect(row.snoozeLimit).toBe("2026-02-13");
+    await expect(
+      snooze({ orgId: ORG, entityId: GROWING, key: row.key, actorId: ACTOR, until: "2026-02-14", asOf: day }),
+    ).rejects.toThrow(/on or past the day it is due/);
+  });
+
+  /* ── one page, one read of each question ───────────────────────────────── */
+
+  it("asks the same question once, however many of the twelve sources ask it", async () => {
+    // The tax period is wanted by three of them: the attention list's own VAT
+    // check, the row this module attaches the deadline to, and the VAT source.
+    // Each of the three calls the module that owns the fact, which is the rule
+    // — and each of them used to be its own read of the registration.
+    const real = sharedReads(S);
+    const answered: unknown[] = [];
+    const reads: SharedReads = {
+      ...real,
+      async vatPeriod(asOf) {
+        const period = await real.vatPeriod(asOf);
+        answered.push(period);
+        return period;
+      },
+    };
+
+    await notificationCentre({ ...S, asOf: A, reads });
+
+    expect(answered.length).toBeGreaterThanOrEqual(3);
+    // The same object every time, which is only possible if it was read once.
+    expect(new Set(answered).size).toBe(1);
   });
 
   it("names every source it read, so nothing found can be told from nothing asked", async () => {

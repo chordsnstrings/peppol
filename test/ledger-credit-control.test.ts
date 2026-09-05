@@ -10,6 +10,7 @@ import {
   creditStanding, creditCheck,
   dunningPlan, dunningLetter, recordDunning, dunningHistory,
   stageForDays, statementOfAccount, creditControlRegister,
+  documentIdBatches, ID_CHUNK, MAX_LEDGER_MOVEMENTS,
 } from "@/lib/server/ledger/credit-control";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
@@ -798,5 +799,55 @@ d("credit control", () => {
     const reg = await creditControlRegister({ orgId: "someone-else", entityId: ENT, asOf: ASOF });
     expect(reg.customers).toEqual([]);
     expect(reg.summary.exposureMinor).toBe("0");
+  });
+
+  /* ------------------------------------------------- what the read is bounded by */
+
+  /*
+   * Every open item on the control account is one id in an `in (…)`, one bind
+   * parameter each, and PostgreSQL's wire protocol carries at most 65,535 of
+   * them. Written as a single `in`, the attribution read stopped working — not
+   * slowly, but at all — on exactly the businesses with the longest sales
+   * history and therefore the most reason to be checking credit at all. The
+   * fixture above is five customers, so the batching cannot be exercised
+   * through it; the invariant is asserted where it lives instead.
+   */
+  it("splits the document lookup into batches no `in` clause will choke on", () => {
+    // A safe margin under the protocol's ceiling: the ids are not the only
+    // parameters in the query.
+    expect(ID_CHUNK).toBeLessThanOrEqual(5_000);
+    expect(ID_CHUNK * 4).toBeLessThan(65_535);
+
+    const ids = Array.from({ length: 12_001 }, (_, i) => `doc-${i}`);
+    const batches = documentIdBatches(ids);
+
+    // The defect was one batch of everything.
+    expect(batches).toHaveLength(3);
+    expect(batches.map((b) => b.length)).toEqual([5_000, 5_000, 2_001]);
+    expect(Math.max(...batches.map((b) => b.length))).toBeLessThanOrEqual(ID_CHUNK);
+    // And the batched read has to answer what the single read answered: every
+    // id exactly once, in order. A slice that dropped or repeated one would
+    // silently mis-attribute somebody's invoice.
+    expect(batches.flat()).toEqual(ids);
+  });
+
+  it("batches nothing when there is nothing, so no empty `in` is ever sent", () => {
+    expect(documentIdBatches([])).toEqual([]);
+    expect(documentIdBatches(["only-one"])).toEqual([["only-one"]]);
+  });
+
+  /*
+   * The ceiling on the movements themselves cannot be exercised here without
+   * materialising two hundred thousand journal lines, which would cost more
+   * than the assertion is worth. What is checked is that it exists, that it is
+   * far above anything a real book reaches, and that the ordinary path is
+   * untouched by it — the exposure this suite hand-worked at the top of the
+   * file still comes back exact with the bound in place.
+   */
+  it("bounds the ledger read without changing what it answers", async () => {
+    expect(MAX_LEDGER_MOVEMENTS).toBeGreaterThan(100_000);
+    const standing = await creditStanding({ ...S, partyKey: "C-DEEP", asOf: ASOF });
+    expect(standing.exposure.ledgerMinor).toBe("306500");
+    expect(standing.exposure.totalMinor).toBe("411500");
   });
 });

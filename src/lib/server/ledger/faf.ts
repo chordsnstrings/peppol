@@ -74,6 +74,9 @@ import { csvField, csvRow, parseCsv } from "./csv";
  * see the note on `supplyRows`.
  */
 
+/** How many document ids go into one `in (…)`. See the chunked read below. */
+const ID_CHUNK = 5_000;
+
 /** Chart codes the file's own arithmetic depends on. */
 const VAT_OUTPUT = "2100";
 const VAT_INPUT = "1350";
@@ -294,9 +297,21 @@ export async function ftaAuditFile(opts: {
         .map((l) => l.entry.sourceId as string),
     ),
   ];
-  const docs = docIds.length
-    ? await prisma.record.findMany({ where: { orgId: opts.orgId, store: "invoices", id: { in: docIds } } })
-    : [];
+  /*
+   * Chunked, because `id: { in: [...] }` is one bind parameter per id and
+   * PostgreSQL's protocol carries a hard limit of 65,535 of them. Past that the
+   * query does not slow down, it fails — and it fails on exactly the extract
+   * that matters most, the multi-year one an auditor asked for. The ledger
+   * export chunks at the same 5,000.
+   */
+  const docs: Awaited<ReturnType<typeof prisma.record.findMany>> = [];
+  for (let i = 0; i < docIds.length; i += ID_CHUNK) {
+    docs.push(
+      ...(await prisma.record.findMany({
+        where: { orgId: opts.orgId, store: "invoices", id: { in: docIds.slice(i, i + ID_CHUNK) } },
+      })),
+    );
+  }
   const counterparty = new Map<string, { name: string; trn: string; number: string }>();
   for (const d of docs) {
     let inv: Invoice | undefined;

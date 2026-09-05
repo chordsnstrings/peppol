@@ -78,8 +78,16 @@ export function eventNarratives(events: GatewayEvent[]): { detail: string; tone:
         ? { detail: `Simulated FTA rejection of the report${code} — the FTA never saw it`, tone: "warning" as const }
         : { detail: `FTA rejected the report${code}`, tone: "error" as const };
     }
-    return simulated
-      ? { detail: `Simulated delivery failure: ${e.reason}`, tone: "warning" as const }
-      : { detail: `Delivery failed: ${e.reason}`, tone: "error" as const };
+    if (e.kind === "DELIVERY_FAILED") {
+      return simulated
+        ? { detail: `Simulated delivery failure: ${e.reason}`, tone: "warning" as const }
+        : { detail: `Delivery failed: ${e.reason}`, tone: "error" as const };
+    }
+    /* A document that arrived FOR us is not an event in the life of a document
+     * we sent, so it has no line on an invoice timeline and the receiver never
+     * routes one here. The branch exists because the narrator has to be total
+     * over the union, and it names what the event is rather than inventing a
+     * status for an invoice it has nothing to do with. */
+    return { detail: `A document arrived from ${e.document.senderParticipantId}`, tone: "neutral" as const };
   });
 }

@@ -466,6 +466,21 @@ export async function issueAllDue(opts: {
 
 /* -------------------------------------------------------------- the screen */
 
+/**
+ * The subscription register.
+ *
+ * `billedMinor` is aggregated over every invoice a subscription has ever
+ * raised, and that is the whole of what this note is for. It used to be the
+ * sum of the six invoices listed beside it — the same six the screen shows as
+ * "recent" — while `issuedCount` next to it counted all of them. On the
+ * seventh invoice the two columns started describing different sets: a
+ * subscription reading "48 issued, AED 30,000 billed" against a real AED
+ * 240,000, with nothing on the row to say the second figure was a sample of
+ * the first.
+ *
+ * So the total is an aggregate and the list stays a list. `recent` is six
+ * because six is what fits; `billedMinor` is every one of them.
+ */
 export async function subscriptionRegister(opts: { orgId: string; entityId: string; asOf?: Date | string }) {
   const asOf = opts.asOf ? asDate(opts.asOf, "The date") : new Date();
   const templates = await prisma.recurringInvoice.findMany({
@@ -473,6 +488,16 @@ export async function subscriptionRegister(opts: { orgId: string; entityId: stri
     include: { issued: { orderBy: { scheduledOn: "desc" }, take: 6 } },
     orderBy: [{ status: "asc" }, { code: "asc" }],
   });
+
+  const totalsByTemplate = templates.length
+    ? await prisma.recurringInvoiceIssue.groupBy({
+        by: ["templateId"],
+        where: { orgId: opts.orgId, templateId: { in: templates.map((t) => t.id) } },
+        _sum: { totalMinor: true },
+        _count: { _all: true },
+      })
+    : [];
+  const billed = new Map(totalsByTemplate.map((g) => [g.templateId, g]));
 
   const rows = templates.map((t) => {
     const lines = invoiceLines(readLines(t.lines, t.code), t.code);
@@ -488,7 +513,10 @@ export async function subscriptionRegister(opts: { orgId: string; entityId: stri
       overdue: t.status === "active" && t.nextOn <= asOf,
       perInvoiceMinor: BigInt(totals.payableMinor),
       issuedCount: t.issuedCount,
-      billedMinor: t.issued.reduce((a, i) => a + i.totalMinor, 0n),
+      /** Every invoice this subscription has raised, not only the recent ones. */
+      billedMinor: billed.get(t.id)?._sum.totalMinor ?? 0n,
+      /** How many that total is of, which is what makes it checkable against the counter. */
+      billedCount: billed.get(t.id)?._count._all ?? 0,
       recent: t.issued.map((i) => ({
         scheduledOn: iso(i.scheduledOn),
         number: i.invoiceNumber,

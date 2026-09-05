@@ -45,6 +45,18 @@ import type { Invoice } from "@/lib/domain/types";
 /** The receivables control account. Mirrors `AR_CONTROL` in ar.ts. */
 const AR_CONTROL = "1100";
 
+/**
+ * How many ids go into one `in (…)`.
+ *
+ * PostgreSQL's wire protocol carries a hard limit of 65,535 bind parameters,
+ * and past it a query does not slow down — it fails. Every sales document a
+ * business has ever raised is one id here, so a shop billing eleven hundred
+ * customers a month crosses that line inside five years and the statement
+ * screen stops working altogether. The ledger export chunks at the same 5,000
+ * and for the same reason.
+ */
+const ID_CHUNK = 5_000;
+
 export const KINDS = ["CUSTOMER", "SUPPLIER", "BOTH"] as const;
 export type CounterpartyKind = (typeof KINDS)[number];
 
@@ -496,7 +508,27 @@ interface DocFacts {
 interface Activity {
   lines: ActivityLine[];
   docs: Map<string, DocFacts>;
+  /**
+   * The same documents, bucketed by the party they belong to.
+   *
+   * `openItemsOf` used to walk the whole map once per counterparty, which on a
+   * thousand customers and a hundred thousand documents is a hundred million
+   * comparisons on the event loop — and the event loop is single-threaded, so
+   * every other request on the process waits behind the customers screen while
+   * it runs. Bucketing once turns the same answer into one pass.
+   */
+  byParty: Map<string, DocFacts[]>;
+  /** The earliest entry date read, or null where the whole ledger was read. */
+  since: Date | null;
 }
+
+/** An activity with nothing in it — the answer when there is nobody to ask about. */
+const noActivity = (): Activity => ({
+  lines: [],
+  docs: new Map<string, DocFacts>(),
+  byParty: new Map<string, DocFacts[]>(),
+  since: null,
+});
 
 export interface PartyIndex {
   byId: Map<string, string>;
@@ -552,6 +584,39 @@ export function attributeDocument(
 const partyIdOf = (inv: Invoice, idx: PartyIndex) => attributeDocument(inv, idx, "buyer");
 
 /**
+ * Whose documents are these?
+ *
+ * A journal line records what an entry did to the books; it does not record
+ * that invoice `x` was to Al Marri Trading. The document store does, so that is
+ * where it is read from — the one fact taken from outside the ledger, and the
+ * same source the FAF extract uses for the same reason.
+ *
+ * The ids go over in chunks. Every sales document ever raised can appear in
+ * this list, and `id: { in: [...] }` is one bind parameter each, so the query
+ * that used to be written in one go stopped working — not slowly, but at all —
+ * on the businesses with the longest history.
+ */
+async function attributedDocuments(
+  orgId: string,
+  ids: string[],
+  idx: PartyIndex,
+): Promise<Map<string, { partyId: string | null; number: string }>> {
+  const out = new Map<string, { partyId: string | null; number: string }>();
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const stored = await prisma.record.findMany({
+      where: { orgId, store: "invoices", id: { in: ids.slice(i, i + ID_CHUNK) } },
+    });
+    for (const row of stored) {
+      let inv: Invoice | undefined;
+      try { inv = JSON.parse(row.data) as Invoice; } catch { inv = undefined; }
+      if (!inv || inv.direction !== "OUTBOUND") continue;
+      out.set(row.id, { partyId: partyIdOf(inv, idx), number: (inv.number ?? "").trim() });
+    }
+  }
+  return out;
+}
+
+/**
  * Every movement on the receivables control account up to a date, netted into
  * open items exactly as `receivablesAgeing` nets them, and attributed to a
  * counterparty.
@@ -561,12 +626,24 @@ const partyIdOf = (inv: Invoice, idx: PartyIndex) => attributeDocument(inv, idx,
  * that keyed differently would drift from the ageing the first time either
  * changed, and the whole point of a statement of account is that the customer's
  * copy and ours are the same number.
+ *
+ * **`since` bounds the read without changing the netting.** The control account
+ * grows for the life of the business and reading all of it to explain what is
+ * owed this month is work nobody asked for. What makes a lower bound safe is
+ * the second read below: every document the window touched has its earlier
+ * halves fetched by key, so a receipt inside the window still meets the invoice
+ * outside it and nets against it exactly. A document that had no movement in
+ * the window at all is the only thing left out, and the caller is told the date
+ * so it can account for those itself — `counterpartyStatement` carries them in
+ * the opening balance, which is what an opening balance is for.
  */
 async function receivableActivity(opts: {
   orgId: string;
   entityId: string;
   to: Date;
   parties: Counterparty[];
+  /** Read nothing dated before this. Null or omitted reads the whole ledger. */
+  since?: Date | null;
 }): Promise<Activity> {
   const account = await prisma.account.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, code: AR_CONTROL },
@@ -578,21 +655,69 @@ async function receivableActivity(opts: {
     );
   }
 
-  const rows = await prisma.journalLine.findMany({
-    where: {
-      accountId: account.id,
-      entry: { orgId: opts.orgId, status: { in: ["posted", "reversed"] }, entryDate: { lte: opts.to } },
-    },
-    include: {
-      entry: {
-        select: {
-          entryDate: true, dueDate: true, sourceId: true, settlesId: true, sourceType: true,
-          memo: true, source: true, series: true, number: true,
-        },
+  const since = opts.since ?? null;
+  const include = {
+    entry: {
+      select: {
+        entryDate: true, dueDate: true, sourceId: true, settlesId: true, sourceType: true,
+        memo: true, source: true, series: true, number: true,
       },
     },
+  } as const;
+  const entryWhere = {
+    orgId: opts.orgId,
+    status: { in: ["posted", "reversed"] },
+    entryDate: since ? { gte: since, lte: opts.to } : { lte: opts.to },
+  };
+
+  const inWindow = await prisma.journalLine.findMany({
+    where: { accountId: account.id, entry: entryWhere },
+    include,
     orderBy: { entry: { entryDate: "asc" } },
   });
+
+  // The open-item key, exactly as ar.ts computes it. Line-level settlement
+  // first: one batch entry can discharge several documents, and the entry-level
+  // column names only one of them.
+  type Row = (typeof inWindow)[number];
+  const keyOf = (l: Row) => l.settlesId ?? l.entry.settlesId ?? l.entry.sourceId ?? l.id;
+
+  /*
+   * The other halves of the documents the window touched.
+   *
+   * Without this a receipt dated inside the window would open an item of its
+   * own — a credit balance on a customer who owes money — because the invoice
+   * it settles was raised before the window and never read. Fetching by key
+   * costs one query per five thousand documents and makes the bound honest
+   * rather than approximate.
+   */
+  const carried: Row[] = [];
+  if (since) {
+    const keys = [...new Set(inWindow.map(keyOf))];
+    const touched = new Set(keys);
+    for (let i = 0; i < keys.length; i += ID_CHUNK) {
+      const batch = keys.slice(i, i + ID_CHUNK);
+      const earlier = await prisma.journalLine.findMany({
+        where: {
+          accountId: account.id,
+          entry: { orgId: opts.orgId, status: { in: ["posted", "reversed"] }, entryDate: { lt: since } },
+          OR: [
+            { settlesId: { in: batch } },
+            { entry: { settlesId: { in: batch } } },
+            { entry: { sourceId: { in: batch } } },
+          ],
+        },
+        include,
+      });
+      // An entry can name one document in `sourceId` while a line of it settles
+      // another, so a row fetched by the entry's id may key to somewhere else
+      // entirely. Keeping only the keys the window actually holds stops a
+      // fragment of an untouched document appearing as an item of its own.
+      carried.push(...earlier.filter((l) => touched.has(keyOf(l))));
+    }
+  }
+
+  const rows = carried.length ? [...inWindow, ...carried] : inWindow;
 
   // A statement is read down the page, so its order has to be total: two
   // documents on the same day must always come out in the same sequence, or the
@@ -609,9 +734,7 @@ async function receivableActivity(opts: {
   const lines: ActivityLine[] = [];
   const docs = new Map<string, DocFacts>();
   for (const l of sorted) {
-    // Line-level settlement first: one batch entry can discharge several
-    // documents, and the entry-level column names only one of them.
-    const key = l.settlesId ?? l.entry.settlesId ?? l.entry.sourceId ?? l.id;
+    const key = keyOf(l);
     const reference = `${l.entry.series}-${l.entry.number}`;
     const opensItem = l.entry.source === "invoice";
     lines.push({
@@ -650,26 +773,21 @@ async function receivableActivity(opts: {
     }
   }
 
-  // The one fact taken from outside the ledger. A journal line records what an
-  // entry did to the books; it does not record that invoice `x` was to Al Marri
-  // Trading. The document store does, so that is where it is read from — the
-  // same source the FAF extract uses for the same reason.
-  const ids = [...docs.keys()];
-  const stored = ids.length
-    ? await prisma.record.findMany({ where: { orgId: opts.orgId, store: "invoices", id: { in: ids } } })
-    : [];
-  const idx = partyIndex(opts.parties);
-  for (const row of stored) {
-    const doc = docs.get(row.id);
-    if (!doc) continue;
-    let inv: Invoice | undefined;
-    try { inv = JSON.parse(row.data) as Invoice; } catch { inv = undefined; }
-    if (!inv || inv.direction !== "OUTBOUND") continue;
-    doc.partyId = partyIdOf(inv, idx);
-    if (inv.number) doc.number = inv.number.trim();
+  const attributed = await attributedDocuments(opts.orgId, [...docs.keys()], partyIndex(opts.parties));
+  const byParty = new Map<string, DocFacts[]>();
+  for (const doc of docs.values()) {
+    const known = attributed.get(doc.key);
+    if (known) {
+      doc.partyId = known.partyId;
+      if (known.number) doc.number = known.number;
+    }
+    if (!doc.partyId) continue;
+    const bucket = byParty.get(doc.partyId);
+    if (bucket) bucket.push(doc);
+    else byParty.set(doc.partyId, [doc]);
   }
 
-  return { lines, docs };
+  return { lines, docs, byParty, since };
 }
 
 export interface OpenItem {
@@ -689,8 +807,10 @@ export interface OpenItem {
 
 function openItemsOf(activity: Activity, party: Counterparty, asOf: Date): OpenItem[] {
   const out: OpenItem[] = [];
-  for (const doc of activity.docs.values()) {
-    if (doc.partyId !== party.id) continue;
+  // This party's documents only. Reading them out of the bucket rather than
+  // filtering the whole map is what keeps a screen of a thousand customers from
+  // being a thousand passes over every document the business has ever raised.
+  for (const doc of activity.byParty.get(party.id) ?? []) {
     if (doc.outstanding === 0n) continue;
     // The document's own terms beat the party's default: an invoice raised on
     // sixty days does not become late on the thirty-first because the customer
@@ -728,7 +848,7 @@ async function outstandingOf(opts: {
     orgId: opts.orgId, entityId: opts.entityId, to: asOf, parties: [opts.party],
   });
   let total = 0n;
-  for (const doc of activity.docs.values()) if (doc.partyId === opts.party.id) total += doc.outstanding;
+  for (const doc of activity.byParty.get(opts.party.id) ?? []) total += doc.outstanding;
   return total;
 }
 
@@ -758,6 +878,17 @@ export interface StatementLine {
  * because the failure it is there to catch is precisely the two of them drifting
  * apart — a statement the customer can reconcile against a control account
  * nobody else can is not a statement, it is a claim.
+ *
+ * **Where the ledger is read from.** A statement asked for a period does not
+ * need to read the years before it line by line: everything earlier belongs in
+ * the opening balance, and an opening balance is one figure. So the ledger read
+ * starts at `from`, and the two things that would otherwise be lost are put
+ * back exactly — the earlier halves of documents this period touched come from
+ * the keyed read inside `receivableActivity`, and documents that had no
+ * movement in the period at all are carried in at their balance from the same
+ * ageing the statement ties to. Asked for a statement with no start date, it
+ * reads everything, because then every line is meant to be on the page.
+ * `readFrom` says which of the two happened.
  */
 export async function counterpartyStatement(opts: {
   orgId: string;
@@ -773,13 +904,36 @@ export async function counterpartyStatement(opts: {
     throw new LedgerError(`A statement cannot run from ${iso(from)} back to ${iso(to)}.`);
   }
 
-  const activity = await receivableActivity({
-    orgId: opts.orgId, entityId: opts.entityId, to, parties: [party],
-  });
-  const mine = (key: string) => activity.docs.get(key)?.partyId === party.id;
+  // The tie, read first because it is also where the brought-forward balances
+  // come from. `receivablesAgeing` is the report the trial balance backs, so
+  // the party's share of it is the number this statement has to reach.
+  const ageing = await receivablesAgeing({ orgId: opts.orgId, entityId: opts.entityId, asOf: to });
 
-  let opening = 0n;
-  let balance = 0n;
+  const activity = await receivableActivity({
+    orgId: opts.orgId, entityId: opts.entityId, to, parties: [party], since: from,
+  });
+
+  /*
+   * The open items the period never touched.
+   *
+   * A document with no movement between `from` and `to` holds the same balance
+   * at both ends, so the ageing's figure for it at `to` is also its figure at
+   * `from` — which is precisely what the opening balance is made of. They are
+   * attributed from the document store the same way every other document here
+   * is, because the ageing knows what is open and not whose it is.
+   */
+  const untouched = ageing.open.filter((o) => !activity.docs.has(o.sourceId));
+  const carriedIn = activity.since && untouched.length
+    ? await attributedDocuments(opts.orgId, untouched.map((o) => o.sourceId), partyIndex([party]))
+    : new Map<string, { partyId: string | null; number: string }>();
+
+  const mine = (key: string) =>
+    (activity.docs.get(key)?.partyId ?? carriedIn.get(key)?.partyId) === party.id;
+
+  let opening = untouched
+    .filter((o) => carriedIn.get(o.sourceId)?.partyId === party.id)
+    .reduce((a, o) => a + BigInt(o.outstandingMinor), 0n);
+  let balance = opening;
   const lines: StatementLine[] = [];
   for (const l of activity.lines) {
     if (!mine(l.key)) continue;
@@ -805,9 +959,6 @@ export async function counterpartyStatement(opts: {
   }
   const closing = balance;
 
-  // The tie. `receivablesAgeing` is the report the trial balance backs, so the
-  // party's share of it is the number this statement has to reach.
-  const ageing = await receivablesAgeing({ orgId: opts.orgId, entityId: opts.entityId, asOf: to });
   const share = ageing.open
     .filter((o) => mine(o.sourceId))
     .reduce((a, o) => a + BigInt(o.outstandingMinor), 0n);
@@ -820,19 +971,27 @@ export async function counterpartyStatement(opts: {
     paymentTerms: party.paymentTerms,
     from: from ? iso(from) : null,
     to: iso(to),
+    /** Where the ledger read started. Null means it read the whole account. */
+    readFrom: activity.since ? iso(activity.since) : null,
     openingMinor: opening.toString(),
     lines,
     closingMinor: closing.toString(),
     ageingShareMinor: share.toString(),
     agrees,
-    note: agrees
-      ? `The closing balance of ${aed(closing, party.currency)} is exactly what ${party.name} contributes to the ` +
-        `receivables ageing at ${iso(to)}, which ties this statement to the ${AR_CONTROL} control account on the ` +
-        `trial balance.`
-      : `This statement closes at ${aed(closing, party.currency)} but ${party.name} contributes ` +
-        `${aed(share, party.currency)} to the receivables ageing at ${iso(to)}, a difference of ` +
-        `${aed(closing - share, party.currency)}. Do not send it: one of the two is wrong, and a statement that ` +
-        `disagrees with the control account will be disputed the day it arrives.`,
+    note:
+      (agrees
+        ? `The closing balance of ${aed(closing, party.currency)} is exactly what ${party.name} contributes to the ` +
+          `receivables ageing at ${iso(to)}, which ties this statement to the ${AR_CONTROL} control account on the ` +
+          `trial balance.`
+        : `This statement closes at ${aed(closing, party.currency)} but ${party.name} contributes ` +
+          `${aed(share, party.currency)} to the receivables ageing at ${iso(to)}, a difference of ` +
+          `${aed(closing - share, party.currency)}. Do not send it: one of the two is wrong, and a statement that ` +
+          `disagrees with the control account will be disputed the day it arrives.`) +
+      (activity.since
+        ? ` The ledger was read from ${iso(activity.since)}. Anything still owing on a document that has had no ` +
+          `movement since then is in the opening balance of ${aed(opening, party.currency)} rather than itemised ` +
+          `below, which is what an opening balance is for.`
+        : ""),
   };
 }
 
@@ -1405,7 +1564,7 @@ export async function listCounterparties(opts: {
   const sellable = parties.filter((p) => sells(p.kind));
   const activity = sellable.length
     ? await receivableActivity({ orgId: opts.orgId, entityId: opts.entityId, to: asOf, parties: sellable })
-    : { lines: [], docs: new Map<string, DocFacts>() };
+    : noActivity();
 
   return {
     asOf: iso(asOf),

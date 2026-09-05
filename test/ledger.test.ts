@@ -1,8 +1,22 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { PrismaClient } from "@prisma/client";
+
+/**
+ * Who is signed in for the two tests that drive the journal route directly. A
+ * route handler is a function from a Request to a Response, and the session is
+ * the only thing between a test and one of them. Hoisted because `vi.mock` is.
+ */
+const seat = vi.hoisted(() => ({ orgId: "t-org-ledger", userId: "u-journal-clerk" }));
+
+vi.mock("@/lib/server/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/server/session")>();
+  return { ...actual, requireSession: async () => ({ orgId: seat.orgId, userId: seat.userId }) };
+});
+
 import { post, reverse, LedgerError } from "@/lib/server/ledger/post";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
 import { trialBalance, generalLedger } from "@/lib/server/ledger/reports";
+import { POST as journalsPost } from "@/app/api/ledger/journals/route";
 
 /**
  * End-to-end ledger behaviour against a real Postgres. Skipped when no database
@@ -290,6 +304,91 @@ d("ledger", () => {
 
     const tb = await trialBalance({ orgId: ORG, entityId: ENT, periodLabel: "2026-01" });
     expect(tb.balanced).toBe(true);
+  });
+
+  it("mirrors an entry once, however many times Reverse is clicked", async () => {
+    // Two mirrors apply the entry MINUS once rather than nought, and because
+    // the balance cache moves with the second one exactly as it moved with the
+    // first, the trial balance still ties over the wrong figure. Nothing else
+    // stopped this: there is no unique index on reversalOfId, and the
+    // immutability trigger has no objection to reversed → reversed, that being
+    // no change of status at all.
+    const account = await db.account.findFirstOrThrow({ where: { orgId: ORG, entityId: ENT, code: "6900" } });
+    const cached = async () =>
+      (await db.accountBalance.aggregate({ where: { orgId: ORG, accountId: account.id }, _sum: { closingMinor: true } }))
+        ._sum.closingMinor ?? 0n;
+    const before = await cached();
+
+    const original = await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-02-10", memo: "Reversed in haste",
+      lines: [{ account: "6900", debit: 12_000 }, { account: "1000", credit: 12_000 }],
+    });
+
+    // Both clicks in flight at once: neither transaction can see the other's
+    // mirror, so what decides it is the unique index on the key the reversal
+    // now carries.
+    const both = await Promise.allSettled([
+      reverse({ orgId: ORG, entryId: original.id, entryDate: "2026-02-11" }),
+      reverse({ orgId: ORG, entryId: original.id, entryDate: "2026-02-11" }),
+    ]);
+    expect(both.some((r) => r.status === "fulfilled")).toBe(true);
+    // Whichever click loses is either handed the mirror that won or told the
+    // entry is already reversed. It never posts a second one.
+    for (const r of both) {
+      if (r.status === "rejected") expect(String(r.reason)).toMatch(/already .* reversed|this one is reversed/i);
+    }
+
+    const mirrors = await db.journalEntry.findMany({
+      where: { orgId: ORG, reversalOfId: original.id },
+      include: { lines: true },
+    });
+    expect(mirrors).toHaveLength(1);
+    expect(mirrors[0].externalKey).toBe(`reversal:${original.id}`);
+
+    const after = await db.journalEntry.findUniqueOrThrow({ where: { id: original.id }, include: { lines: true } });
+    expect(after.status).toBe("reversed");
+    // Applied nought times, on both the lines and the cache the reports read.
+    expect([...after.lines, ...mirrors[0].lines].reduce((a, l) => a + l.functionalAmountMinor, 0n)).toBe(0n);
+    expect(await cached()).toBe(before);
+  });
+
+  it("posts a manual journal once when the same form is submitted twice", async () => {
+    // The token the form was opened with, sent again by the retry. Without one
+    // the second arrival is a second balanced entry with a second gapless
+    // number, and nothing downstream can tell it from a journal somebody meant
+    // to key twice — which is why this is the most likely wrong number here.
+    const token = "form-01HZY9K3QX7M4N2P";
+    const body = {
+      entityId: ENT,
+      entryDate: "2026-02-14",
+      memo: "Accrual submitted twice",
+      idempotencyKey: token,
+      lines: [{ account: "6900", debit: "3300" }, { account: "2050", credit: "3300" }],
+    };
+    const send = async (over: Record<string, unknown> = {}) => {
+      const res = await journalsPost(
+        new Request("http://localhost/api/ledger/journals", { method: "POST", body: JSON.stringify({ ...body, ...over }) }),
+      );
+      return { status: res.status, body: (await res.json()) as { error?: string; alreadyPosted?: boolean; entry?: { id: string } } };
+    };
+
+    const first = await send();
+    const second = await send();
+    expect(first.status).toBe(200);
+    expect(first.body.alreadyPosted).toBe(false);
+    expect(second.body.alreadyPosted).toBe(true);
+    expect(second.body.entry?.id).toBe(first.body.entry?.id);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, externalKey: `journal:${ENT}:${token}` } })).toBe(1);
+
+    // A journal keyed a second time on purpose is a second journal: the form
+    // was opened again, so it carries a different token.
+    const deliberate = await send({ idempotencyKey: "form-02J4T7V0BCDEFGHK" });
+    expect(deliberate.body.entry?.id).not.toBe(first.body.entry?.id);
+
+    // A token that could reach into another module's keys is refused outright
+    // rather than namespaced quietly into one.
+    const crafted = await send({ idempotencyKey: `x:payroll:${ENT}:2026-02` });
+    expect(crafted.status).toBe(400);
   });
 
   it("drills from an account to its journal lines with a running balance", async () => {

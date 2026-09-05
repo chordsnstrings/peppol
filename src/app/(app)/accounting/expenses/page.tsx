@@ -5,7 +5,9 @@ import Link from "next/link";
 import { api, ApiError, useEntityId, useLedgerQuery } from "@/components/ledger/use-ledger";
 import { Figure, PageHead, Panel, ErrorNote, Loading, Empty } from "@/components/ledger/primitives";
 import { useAsk } from "@/components/ledger/ask";
-import { parseAmount } from "@/lib/ledger/format";
+import { ClaimDetail, CLAIM_CHIP, CLAIM_EXPLAIN } from "@/components/ledger/claim-detail";
+import { ClaimLineFields, ClaimLinesTable, type DraftLine } from "@/components/ledger/claim-line-form";
+import { Field } from "@/components/ledger/ap-coding";
 
 interface Totals {
   netMinor: string; vatMinor: string; recoverableVatMinor: string;
@@ -65,20 +67,6 @@ const ACTIONS: Record<
   paid: [],
 };
 
-const EXPLAIN: Record<string, string> = {
-  draft: "Being put together. Nobody else has seen it.",
-  submitted: "With an approver — who may not be the claimant.",
-  approved: "Approved and waiting to be posted.",
-  rejected: "Sent back with a reason.",
-  posted: "In the ledger, owed to the employee.",
-  paid: "Reimbursed and closed.",
-};
-
-const CHIP: Record<string, string> = {
-  draft: "", submitted: "sw-chip-warn", approved: "sw-chip-accent",
-  rejected: "sw-chip-bad", posted: "sw-chip-ok", paid: "sw-chip-ok",
-};
-
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function ExpenseClaimsPage() {
@@ -90,6 +78,8 @@ export default function ExpenseClaimsPage() {
   const [err, setErr] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [drafting, setDrafting] = React.useState(false);
+  /** The claim whose detail panel is open, by id. One at a time. */
+  const [selected, setSelected] = React.useState<string | null>(null);
   const ask = useAsk();
 
   const act = async (key: string, body: Record<string, unknown>) => {
@@ -216,7 +206,21 @@ export default function ExpenseClaimsPage() {
               <tbody>
                 {claims.map((c) => (
                   <tr key={c.id} data-testid={`claim-${c.reference}`}>
-                    <td className="sw-code">{c.reference}</td>
+                    <td className="sw-code">
+                      {/* The reference opens the claim. A rejected claim has a
+                          reason on it and receipts that have to be corrected,
+                          and both live in the detail below — so the way in is
+                          the thing every row already shows. */}
+                      <button
+                        type="button"
+                        className="sw-link sw-link-btn"
+                        aria-expanded={selected === c.id}
+                        data-testid="open-claim"
+                        onClick={() => setSelected(selected === c.id ? null : c.id)}
+                      >
+                        {c.reference}
+                      </button>
+                    </td>
                     <td className="max-w-0 truncate">
                       {c.employeeName}
                       <span className="sw-sub"> · {c.employeeCode}</span>
@@ -236,8 +240,8 @@ export default function ExpenseClaimsPage() {
                     <td className="sw-num"><Figure minor={c.totals.recoverableVatMinor} currency={c.currency} colour={false} /></td>
                     <td className="sw-num"><Figure minor={c.totals.totalMinor} currency={c.currency} colour={false} /></td>
                     <td>
-                      <span className={`sw-chip ${CHIP[c.status] ?? ""}`}>{c.status}</span>
-                      <span className="sr-only"> — {EXPLAIN[c.status]}</span>
+                      <span className={`sw-chip ${CLAIM_CHIP[c.status] ?? ""}`}>{c.status}</span>
+                      <span className="sr-only"> — {CLAIM_EXPLAIN[c.status]}</span>
                     </td>
                     <td>
                       <span className="flex flex-wrap gap-1.5 py-1">
@@ -270,8 +274,16 @@ export default function ExpenseClaimsPage() {
             VAT is only reclaimed where the receipt is a tax invoice showing the supplier&rsquo;s TRN (UAE VAT
             Decree-Law Art 55). Everywhere else it is added to the expense, because VAT that cannot be reclaimed is
             part of what the thing cost. Posting and reimbursement are separate entries, each idempotent on the
-            claim &mdash; an employee cannot be paid twice by clicking twice.
+            claim &mdash; an employee cannot be paid twice by clicking twice. A claim is opened by its reference:
+            that is where the reason it came back is written, and where its receipts are corrected before it goes
+            round again.
           </p>
+        </Panel>
+      )}
+
+      {selected && (
+        <Panel className="mt-4 overflow-hidden">
+          <ClaimDetail claimId={selected} onChanged={reload} />
         </Panel>
       )}
     </>
@@ -296,22 +308,6 @@ function Tile({ label, minor, count, note, testId }: {
 
 /* ----------------------------------------------------------------- new claim */
 
-interface DraftLine {
-  spentOn: string; description: string; accountCode: string;
-  netMinor: string; vatMinor: string; supplierTrn: string;
-  vatRecoverable: boolean; receiptRef: string;
-}
-
-/** The accounts an expense claim realistically lands in. */
-const ACCOUNTS = [
-  ["6400", "Travel and entertainment"],
-  ["6900", "Other operating expenses"],
-  ["6150", "Utilities"],
-  ["6300", "Government fees and licences"],
-  ["6450", "Repairs and maintenance"],
-  ["6200", "Marketing and advertising"],
-];
-
 function NewClaim({ busy, onCreate }: {
   busy: boolean;
   onCreate: (claim: {
@@ -321,39 +317,6 @@ function NewClaim({ busy, onCreate }: {
 }) {
   const [head, setHead] = React.useState({ reference: "", employeeCode: "", employeeName: "", claimedOn: today(), notes: "" });
   const [lines, setLines] = React.useState<DraftLine[]>([]);
-  const [line, setLine] = React.useState<{
-    spentOn: string; description: string; accountCode: string;
-    net: string; vat: string; supplierTrn: string; vatRecoverable: boolean; receiptRef: string;
-  }>({ spentOn: today(), description: "", accountCode: "6400", net: "", vat: "", supplierTrn: "", vatRecoverable: false, receiptRef: "" });
-
-  const net = parseAmount(line.net);
-  const vat = parseAmount(line.vat) ?? 0n;
-
-  // The same rules the server enforces, said before the request rather than
-  // after it. The server remains the authority; this is only courtesy.
-  const lineBlocker =
-    !line.description.trim() ? "Say what was bought." :
-    net === null || net === 0n ? "How much was it?" :
-    vat === null || vat < 0n ? "VAT cannot be negative." :
-    line.vatRecoverable && !/^\d{15}$/.test(line.supplierTrn.trim())
-      ? "Reclaiming VAT needs the supplier's fifteen-digit TRN from the tax invoice." :
-    line.vatRecoverable && vat <= 0n ? "There is no VAT on this line to reclaim." :
-    null;
-
-  const addLine = () => {
-    if (lineBlocker || net === null) return;
-    setLines((ls) => [...ls, {
-      spentOn: line.spentOn,
-      description: line.description.trim(),
-      accountCode: line.accountCode,
-      netMinor: net.toString(),
-      vatMinor: (vat ?? 0n).toString(),
-      supplierTrn: line.supplierTrn.trim(),
-      vatRecoverable: line.vatRecoverable,
-      receiptRef: line.receiptRef.trim(),
-    }]);
-    setLine((l) => ({ ...l, description: "", net: "", vat: "", supplierTrn: "", vatRecoverable: false, receiptRef: "" }));
-  };
 
   const owed = lines.reduce((a, l) => a + BigInt(l.netMinor) + BigInt(l.vatMinor), 0n);
   const blocker =
@@ -372,91 +335,31 @@ function NewClaim({ busy, onCreate }: {
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Reference"><input className="sw-input" value={head.reference} onChange={(e) => setHead({ ...head, reference: e.target.value })} placeholder="EXP-2026-014" /></Field>
-        <Field label="Employee code"><input className="sw-input" value={head.employeeCode} onChange={(e) => setHead({ ...head, employeeCode: e.target.value })} placeholder="E-001" /></Field>
+        <Field label="Employee code" hint="The claimant's own code — what the self-approval check compares against.">
+          <input className="sw-input" value={head.employeeCode} onChange={(e) => setHead({ ...head, employeeCode: e.target.value })} placeholder="E-001" />
+        </Field>
         <Field label="Employee name"><input className="sw-input" value={head.employeeName} onChange={(e) => setHead({ ...head, employeeName: e.target.value })} placeholder="Layla Haddad" /></Field>
         <Field label="Claim date"><input type="date" className="sw-input" value={head.claimedOn} onChange={(e) => setHead({ ...head, claimedOn: e.target.value })} /></Field>
+        {/* The claim has carried a note to the approver all along and this form
+            never asked for one, so every claim reached its approver with the
+            field empty. It is the one place to say what a receipt cannot. */}
+        <Field label="Note" hint="Anything the approver should read that a receipt does not say.">
+          <input className="sw-input" value={head.notes} onChange={(e) => setHead({ ...head, notes: e.target.value })} placeholder="Client visit, Abu Dhabi" />
+        </Field>
       </div>
 
       {lines.length > 0 && (
-        <div className="sw-scroll mt-4">
-          <table className="sw-table">
-            <caption className="sr-only">Receipts on this claim</caption>
-            <thead>
-              <tr>
-                <th style={{ width: "7rem" }}>Spent</th>
-                <th>Description</th>
-                <th style={{ width: "6rem" }}>Account</th>
-                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>Net</th>
-                <th className="sw-num" style={{ width: "var(--sw-col-amount)" }}>VAT</th>
-                <th style={{ width: "9rem" }}>VAT treatment</th>
-                <th style={{ width: "4rem" }}><span className="sr-only">Remove</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.map((l, i) => (
-                <tr key={`${l.description}-${i}`}>
-                  <td>{l.spentOn}</td>
-                  <td className="max-w-0 truncate">{l.description}</td>
-                  <td className="sw-code">{l.accountCode}</td>
-                  <td className="sw-num"><Figure minor={l.netMinor} colour={false} /></td>
-                  <td className="sw-num"><Figure minor={l.vatMinor} colour={false} /></td>
-                  <td className="sw-sub">
-                    {l.vatRecoverable ? `reclaimed · ${l.supplierTrn}` : BigInt(l.vatMinor) > 0n ? "added to the expense" : "none"}
-                  </td>
-                  <td>
-                    <button type="button" className="sw-btn sw-btn-sm"
-                      onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="mt-4">
+          <ClaimLinesTable
+            lines={lines}
+            caption="The receipts on this claim"
+            onRemove={(i) => setLines((ls) => ls.filter((_, j) => j !== i))}
+          />
         </div>
       )}
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="Spent on"><input type="date" className="sw-input" value={line.spentOn} onChange={(e) => setLine({ ...line, spentOn: e.target.value })} /></Field>
-        <Field label="Description"><input className="sw-input" value={line.description} onChange={(e) => setLine({ ...line, description: e.target.value })} placeholder="Airport taxi" /></Field>
-        <Field label="Account">
-          <select className="sw-select" value={line.accountCode} onChange={(e) => setLine({ ...line, accountCode: e.target.value })}>
-            {ACCOUNTS.map(([code, name]) => <option key={code} value={code}>{code} {name}</option>)}
-          </select>
-        </Field>
-        <Field label="Receipt reference"><input className="sw-input" value={line.receiptRef} onChange={(e) => setLine({ ...line, receiptRef: e.target.value })} placeholder="R-1042" /></Field>
-        <Field label="Net"><input className="sw-input sw-cell-num" inputMode="decimal" value={line.net} onChange={(e) => setLine({ ...line, net: e.target.value })} placeholder="1,000.00" /></Field>
-        <Field label="VAT"><input className="sw-input sw-cell-num" inputMode="decimal" value={line.vat} onChange={(e) => setLine({ ...line, vat: e.target.value })} placeholder="50.00" /></Field>
-        <Field label="Supplier TRN"><input className="sw-input" inputMode="numeric" value={line.supplierTrn} onChange={(e) => setLine({ ...line, supplierTrn: e.target.value })} placeholder="100123456700003" /></Field>
-        <label className="flex items-end gap-2 pb-1.5">
-          <input
-            type="checkbox"
-            checked={line.vatRecoverable}
-            onChange={(e) => setLine({ ...line, vatRecoverable: e.target.checked })}
-            data-testid="vat-recoverable"
-          />
-          <span className="sw-label" style={{ textTransform: "none" }}>Reclaim this VAT</span>
-        </label>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          className="sw-btn"
-          disabled={lineBlocker !== null}
-          aria-disabled={lineBlocker !== null || undefined}
-          data-testid="add-claim-line"
-          onClick={addLine}
-        >
-          Add receipt
-        </button>
-        {lineBlocker && <span className="sw-sub" role="status" data-testid="line-blocker">{lineBlocker}</span>}
-        {!lineBlocker && line.vatRecoverable === false && vat > 0n && (
-          <span className="sw-sub">
-            This VAT will be added to {line.accountCode} rather than reclaimed — that is the treatment when there is
-            no valid tax invoice behind it.
-          </span>
-        )}
+      <div className="mt-4">
+        <ClaimLineFields onAdd={(line) => setLines((ls) => [...ls, line])} />
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3" style={{ borderTop: "1px solid var(--sw-line)", paddingTop: "0.75rem" }}>
@@ -485,14 +388,5 @@ function NewClaim({ busy, onCreate }: {
         )}
       </div>
     </Panel>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="sw-label">{label}</span>
-      <span className="mt-1 block">{children}</span>
-    </label>
   );
 }

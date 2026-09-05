@@ -70,7 +70,20 @@ const ACCOUNTS = [
   ["6200", "Marketing and advertising"],
 ];
 
-const today = () => new Date().toISOString().slice(0, 10);
+/**
+ * Today as the calendar on the wall reads it, not as UTC does.
+ *
+ * `toISOString()` converts to UTC first, so between midnight and four in the
+ * morning here it returns yesterday — and yesterday, at the turn of a month, is
+ * in the previous VAT quarter. A receipt keyed at one in the morning on 1 July
+ * arrived with 30 June already filled in, and the date field is exactly the one
+ * nobody re-reads.
+ */
+const today = () => {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
 
 export default function PettyCashPage() {
   const entityId = useEntityId();

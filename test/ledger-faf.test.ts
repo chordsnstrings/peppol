@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/server/prisma";
 import { postInvoice } from "@/lib/server/ledger/ar";
 import { postBill } from "@/lib/server/ledger/ap";
 import { post } from "@/lib/server/ledger/post";
@@ -289,6 +290,48 @@ d("FTA Audit File and financial KPIs", () => {
     // A missing counterparty does not make the arithmetic wrong, and the file
     // says so rather than conflating the two.
     expect(f.reconciles).toBe(true);
+  });
+
+  it("asks the document store for its counterparties in chunks, never in one list", async () => {
+    /*
+     * The counterparty lookup used to be a single `id: { in: [...] }` over
+     * every sales and purchase document in the period. That is one bind
+     * parameter per document, and PostgreSQL's protocol refuses a statement
+     * past 65,535 of them — so a multi-year extract, which is exactly the one
+     * an auditor asks for, failed outright rather than ran slowly.
+     *
+     * A unit test cannot raise sixty-five thousand documents to stand on the
+     * boundary, so what is checked here is the shape: the ids go over in
+     * batches no larger than the chunk, every document is asked for, and none
+     * is asked for twice or dropped between batches.
+     */
+    type Read = { where?: { store?: string; id?: { in?: string[] } } };
+    const delegate = prisma.record as unknown as { findMany: (a: Read) => Promise<unknown> };
+    const original = delegate.findMany;
+    const seen: Read[] = [];
+    // Restored by assignment rather than by a spy's own teardown: the Prisma
+    // delegate holds its methods as own properties, and a teardown that deletes
+    // one leaves every later test without it.
+    delegate.findMany = (args: Read) => { seen.push(args); return original.call(prisma.record, args); };
+    try {
+      const f = await ftaAuditFile({ orgId: ORG, entityId: ENT, ...MAY });
+      const asked = seen
+        .filter((a) => a?.where?.store === "invoices" && Array.isArray(a.where.id?.in))
+        .map((a) => a.where!.id!.in!);
+
+      expect(asked.length).toBeGreaterThan(0);
+      for (const batch of asked) expect(batch.length).toBeLessThanOrEqual(5_000);
+
+      const flat = asked.flat();
+      expect(new Set(flat).size).toBe(flat.length);
+
+      // And the answer is unchanged: every row still knows whose document it is.
+      const rows = csvRows(f.csv).filter((r) => r[0] === "S" || r[0] === "P");
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) expect(r[1].length).toBeGreaterThan(0);
+    } finally {
+      delegate.findMany = original;
+    }
   });
 
   it("fails to reconcile, and says why, when revenue was posted without an invoice", async () => {

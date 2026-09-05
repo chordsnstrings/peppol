@@ -1,14 +1,20 @@
 import { describe, it, expect } from "vitest";
 import {
+  aedTaxTotals,
+  categorySubtotalKey,
   computeLine,
   computeTotals,
   deriveDocType,
+  documentTaxStatements,
   importVatOnGoods,
   marginSchemeLineTax,
+  MARGIN_SCHEME_STATEMENT,
   PURCHASE_TAX_PROFILE_LIST,
+  REVERSE_CHARGE_STATEMENT,
   TAX_PROFILE_LIST,
 } from "@/lib/domain/tax";
-import type { TaxableLine } from "@/lib/domain/types";
+import { convertMinorAtRate } from "@/lib/domain/money";
+import type { FxInfo, TaxableLine } from "@/lib/domain/types";
 import { line } from "./helpers";
 
 describe("computeLine", () => {
@@ -250,5 +256,109 @@ describe("goods imported into the UAE", () => {
     // and sales-order editors all render TAX_PROFILE_LIST whole.
     expect(TAX_PROFILE_LIST.map((p) => p.code)).not.toContain("IMPORT_GOODS");
     expect(PURCHASE_TAX_PROFILE_LIST.map((p) => p.code)).toContain("IMPORT_GOODS");
+  });
+});
+
+describe("the AED conversion (Article 69, ER Article 59(1)(k))", () => {
+  const peg: FxInfo = { rateToAED: "3.6725", source: "CBUAE", rateDate: "2026-07-01" };
+  const usd = () => [line({ qty: 2, unitPriceMinor: 50_000 })];
+
+  it("records the tax and the payable in AED when the build is given the rate", () => {
+    // 1,000.00 USD of goods, 50.00 USD of tax. At 3.6725 the tax is 18,362.5
+    // fils, which rounds away from zero to 183.63 AED, and the payable is
+    // 105,000 × 3.6725 = 385,612.5 → 3,856.13 AED.
+    const t = computeTotals(usd(), { currency: "USD", fx: peg });
+    expect(t.vatMinorAED).toBe(18_363);
+    expect(t.payableMinorAED).toBe(385_613);
+    // The document currency is untouched: the conversion is stated beside the
+    // figures, it does not replace them.
+    expect(t.vatMinor).toBe(5_000);
+    expect(t.payableMinor).toBe(105_000);
+  });
+
+  it("converts exactly, not through a float", () => {
+    // 1.80 at 1.025 is 1.845, which is 1.85 rounded half away from zero. In
+    // binary floating point the product lands a hair under and rounds to 1.84 —
+    // a fils the FTA is short on every document that hits the case.
+    expect(convertMinorAtRate(180, "1.025")).toBe(185);
+    expect(convertMinorAtRate(8_825, "2.260")).toBe(19_945);
+    expect(convertMinorAtRate(53_905, "8.700")).toBe(468_974);
+  });
+
+  it("converts nothing it cannot convert", () => {
+    // A half-typed rate, a nought, a word. Undefined rather than a nought: a
+    // nought reads as a conversion that was made and came to nothing.
+    expect(convertMinorAtRate(5_000, "3.")).toBeUndefined();
+    expect(convertMinorAtRate(5_000, "0")).toBeUndefined();
+    expect(convertMinorAtRate(5_000, "abc")).toBeUndefined();
+    expect(convertMinorAtRate(5_000, "-3.67")).toBeUndefined();
+    expect(convertMinorAtRate(5_000, "")).toBeUndefined();
+  });
+
+  it("records nothing on an AED document, or where no usable rate was captured", () => {
+    expect(computeTotals(usd()).vatMinorAED).toBeUndefined();
+    expect(computeTotals(usd(), { currency: "AED", fx: peg }).vatMinorAED).toBeUndefined();
+    expect(
+      computeTotals(usd(), {
+        currency: "USD",
+        fx: { rateToAED: "", source: "MANUAL", rateDate: "2026-07-01" },
+      }).vatMinorAED,
+    ).toBeUndefined();
+  });
+
+  it("reads back the same figures from a document whose totals predate the fields", () => {
+    // A persisted invoice totalled before the AED figures were recorded — or by
+    // a caller with no rate to hand — still prints and serializes the
+    // conversion, because the renderers derive it from the document's own rate
+    // rather than from a stored copy that may have been taken at another one.
+    const totals = computeTotals(usd());
+    expect(totals.vatMinorAED).toBeUndefined();
+    const aed = aedTaxTotals({ currency: "USD", fx: peg, totals });
+    expect(aed?.vatMinorAED).toBe(18_363);
+    expect(aed?.payableMinorAED).toBe(385_613);
+    expect(aed?.rateToAED).toBe("3.6725");
+    expect(aed?.source).toBe("CBUAE");
+  });
+
+  it("makes no conversion the document cannot stand behind", () => {
+    const totals = computeTotals(usd());
+    expect(aedTaxTotals({ currency: "AED", fx: peg, totals })).toBeUndefined();
+    expect(aedTaxTotals({ currency: "USD", totals })).toBeUndefined();
+  });
+});
+
+describe("the statements a document must carry", () => {
+  it("states that the recipient accounts for the tax, and cites the provision", () => {
+    // ER Article 59(1)(l) requires both halves. A bare "VAT 0%" row reads as a
+    // relief, and a buyer who takes it at face value never self-accounts.
+    const totals = computeTotals([line({ taxProfileCode: "REVERSE_CHARGE" })]);
+    expect(documentTaxStatements(totals)).toEqual([REVERSE_CHARGE_STATEMENT]);
+    expect(REVERSE_CHARGE_STATEMENT).toContain("Article 48");
+  });
+
+  it("says the margin scheme was applied", () => {
+    // ER Article 43: say so, and state no tax amount. The totals already
+    // withhold the amount; this is the other half of the rule.
+    const totals = computeTotals([
+      line({ taxProfileCode: "MARGIN_SCHEME", unitPriceMinor: 3_500_000, marginPurchaseMinor: 3_000_000 }),
+    ]);
+    expect(documentTaxStatements(totals)).toEqual([MARGIN_SCHEME_STATEMENT]);
+  });
+
+  it("says nothing on an ordinary document", () => {
+    expect(documentTaxStatements(computeTotals([line()]))).toEqual([]);
+  });
+});
+
+describe("categorySubtotalKey", () => {
+  it("keeps treatments that state no tax out of the subtotal they would corrupt", () => {
+    // Both carry a 5% profile — margin under category S, imports under AE — and
+    // both must show nil on the face of the document, so neither may share a
+    // subtotal with the ordinary rate that has the same key.
+    expect(categorySubtotalKey("MARGIN_SCHEME")).not.toBe(categorySubtotalKey("STANDARD_5"));
+    expect(categorySubtotalKey("IMPORT_GOODS")).not.toBe(categorySubtotalKey("REVERSE_CHARGE"));
+    // Two treatments that state the same rate under the same category are one
+    // subtotal, which is what lets the serializer hang a reason on the right one.
+    expect(categorySubtotalKey("ZERO_EXPORT")).toBe(categorySubtotalKey("ZERO_OTHER"));
   });
 });

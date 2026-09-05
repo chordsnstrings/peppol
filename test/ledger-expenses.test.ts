@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import {
   createClaim, addLine, removeLine, updateClaim,
   submitClaim, approveClaim, rejectClaim, reopenClaim,
-  postClaim, payClaim, claimList, claimDetail,
+  postClaim, payClaim, claimList, claimSummary, claimDetail,
   type NewClaimLine,
 } from "@/lib/server/ledger/expenses";
 import { setRule, decide } from "@/lib/server/ledger/approvals";
@@ -310,6 +310,30 @@ d("employee expense claims", () => {
     const filtered = await claimList({ orgId: ORG, entityId: ENT, status: "paid" });
     expect(filtered.claims.every((c) => c.status === "paid")).toBe(true);
     expect(filtered.summary.approvedUnpaidMinor).toBe(list.summary.approvedUnpaidMinor);
+  });
+
+  /*
+   * The two figures on their own.
+   *
+   * The attention queue wants exactly these and nothing else, and was getting
+   * them by loading every claim the business has ever filed — with every line
+   * on every one of them — and then discarding the list. The cost of that grows
+   * with the age of the business while the answer stays two numbers. What this
+   * test holds is that the cheap read and the list still agree: two answers to
+   * "what do we owe staff" is worse than either of them being wrong.
+   */
+  it("answers what is waiting and what is owed without reading every claim ever filed", async () => {
+    const list = await claimList({ orgId: ORG, entityId: ENT });
+    const summary = await claimSummary({ orgId: ORG, entityId: ENT });
+    expect(summary).toEqual(list.summary);
+    expect(summary.awaitingApprovalMinor).toBe(105_000n + 105_000n + 63_000n);
+    expect(summary.approvedUnpaidMinor).toBe(105_000n + 42_000n + 31_500n);
+
+    // It is entity-scoped and org-scoped like everything else here: another
+    // organisation's staff are not owed anything out of these books.
+    const elsewhere = await claimSummary({ orgId: "someone-else", entityId: ENT });
+    expect(elsewhere.awaitingApprovalCount).toBe(0);
+    expect(elsewhere.approvedUnpaidMinor).toBe(0n);
   });
 
   /*

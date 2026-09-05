@@ -182,6 +182,36 @@ d("inventory", () => {
     expect(h.movements[0].kind).toBe("RECEIPT");
     // Each movement carries the running balance, so it reads on its own.
     expect(h.movements[h.movements.length - 1].balanceQuantity).toBe("150");
+    // Everything this item has is listed, and the read says so.
+    expect(h.movementCount).toBe(h.movements.length);
+    expect(h.listed).toBe(h.movements.length);
+    expect(h.truncated).toBe(false);
+  });
+
+  it("takes the newest movements when it cannot take them all, and says which end it took", async () => {
+    // The page used to be the OLDEST 200 movements, printed under a header
+    // carrying the item's quantity and value as at today, with nothing saying
+    // the two did not belong together. An item with a year of trading behind it
+    // showed its first month under this year's figures.
+    const h = await itemHistory({ orgId: ORG, entityId: ENT, sku: "WIDGET", limit: 2 });
+    expect(h.listed).toBe(2);
+    expect(h.movements).toHaveLength(2);
+    expect(h.truncated).toBe(true);
+    expect(h.movementCount).toBeGreaterThan(2);
+
+    // The two it took are the two newest, presented oldest of those first —
+    // a stock card is read down the page.
+    const all = await itemHistory({ orgId: ORG, entityId: ENT, sku: "WIDGET" });
+    expect(h.movements.map((m) => m.id)).toEqual(all.movements.slice(-2).map((m) => m.id));
+
+    // And the header is still the item's own figure, which is the whole reason
+    // the screen has to say what the table below it is.
+    expect(h.item.quantity).toBe(all.item.quantity);
+    expect(h.item.costMinor).toBe(all.item.costMinor);
+
+    // A limit typed into a query string is clamped rather than trusted.
+    const nonsense = await itemHistory({ orgId: ORG, entityId: ENT, sku: "WIDGET", limit: Number("many") });
+    expect(nonsense.movements.length).toBe(all.movements.length);
   });
 
   it("ties the stock valuation to the ledger", async () => {
@@ -663,20 +693,29 @@ d("a retried movement", () => {
     expect(again.quantityMilli).toBe("-2000");
   });
 
-  it("keys the posting on the position it moves the stock to, so a half-failed act cannot double-post", async () => {
-    // The gap this closes: the entry posted, the movement did not, and the caller
-    // retried. The retry starts from the same balances, so it asks for the same
-    // key and gets the entry that already exists rather than a second one.
-    const before = await stock();
-    const key = `inventory:receipt:${before.id}:${before.quantityMilli + 10_000n}:${before.valueMinor + 50_000n}`;
-    await receive({ orgId: ORG_R, entityId: ENT_R, sku: "RETRY", movedOn: "2026-04-05", quantityMilli: 10_000, valueMinor: 50_000 });
-    const posted = await db.journalEntry.findMany({ where: { orgId: ORG_R, externalKey: key } });
-    expect(posted.length).toBe(1);
-    // Two genuine receipts on one day are two receipts: the second moves the item
-    // to different balances, so it carries a different key and posts.
-    await receive({ orgId: ORG_R, entityId: ENT_R, sku: "RETRY", movedOn: "2026-04-05", quantityMilli: 10_000, valueMinor: 50_000 });
+  it("keys the posting on the movement, so two identical receipts both reach the ledger", async () => {
+    // The key used to name the position the stock was moved TO — the item, the
+    // kind and the two closing balances. Two receipts of the same size on the
+    // same day compute the same closing balance, so they carried the same key,
+    // so the second one was mistaken for a retry of the first and never posted:
+    // two goods received notes, one debit to 1200.
+    const a = await receive({ orgId: ORG_R, entityId: ENT_R, sku: "RETRY", movedOn: "2026-04-05", quantityMilli: 10_000, valueMinor: 50_000 });
+    const b = await receive({ orgId: ORG_R, entityId: ENT_R, sku: "RETRY", movedOn: "2026-04-05", quantityMilli: 10_000, valueMinor: 50_000 });
+    expect(b.movementId).not.toBe(a.movementId);
+    expect(b.entryId).not.toBe(a.entryId);
     expect(await entries("RECEIPT")).toBe(3);
     expect((await stock()).quantityMilli).toBe(98_000n);
+
+    // And each entry names its own movement, which is what makes a retry of a
+    // half-failed act — posted, not recorded — impossible to confuse with a
+    // second movement that really happened.
+    const keys = await db.journalEntry.findMany({
+      where: { orgId: ORG_R, id: { in: [a.entryId as string, b.entryId as string] } },
+      select: { externalKey: true },
+    });
+    expect(keys.map((k) => k.externalKey).sort()).toEqual(
+      [`inventory:receipt:${a.movementId}`, `inventory:receipt:${b.movementId}`].sort(),
+    );
   });
 
   it("records both lines when one document carries the same item twice", async () => {
@@ -700,6 +739,129 @@ d("a retried movement", () => {
 
   it("still ties to the ledger after all of that", async () => {
     const v = await stockValuation({ orgId: ORG_R, entityId: ENT_R });
+    expect(v.ledger.agrees).toBe(true);
+    expect(v.ledger.differenceMinor).toBe("0");
+  });
+});
+
+/* ------------------------------ two clerks, one SKU, and what used to happen */
+
+const ORG_C = "t-org-inv-race";
+const ENT_C = "t-ent-inv-race";
+
+d("two movements at once", () => {
+  const stock = (sku: string) => db.inventoryItem.findFirstOrThrow({ where: { orgId: ORG_C, entityId: ENT_C, sku } });
+  const item = (sku: string) => ({ orgId: ORG_C, entityId: ENT_C, sku });
+
+  beforeAll(async () => {
+    await wipe(ORG_C);
+    await openFiscalYear({ orgId: ORG_C, entityId: ENT_C, label: "2026", startsOn: "2026-01-01" });
+    await openBooks({ orgId: ORG_C, entityId: ENT_C });
+  });
+  afterAll(async () => { await wipe(ORG_C); });
+
+  it("adds two simultaneous issues together instead of keeping one of them", async () => {
+    // The defect, exactly: both issues read 200 on the shelf, both worked out
+    // that 150 would be left, both posted a real charge to cost of sales, and
+    // then both SET the item to 150. The stock ledger said 150, account 1200
+    // said 100, and the journal balanced — so nothing on any screen said
+    // anything was wrong. The write is an increment now, and it is taken under
+    // the item's own row lock.
+    await addItem({ orgId: ORG_C, entityId: ENT_C, item: { sku: "RACE", name: "Contested widget" } });
+    await receive({ ...item("RACE"), movedOn: "2026-02-01", quantityMilli: 200_000, valueMinor: 1_000_000 });
+
+    const out = { movedOn: "2026-02-02", quantityMilli: 50_000 };
+    const [a, b] = await Promise.all([issue({ ...item("RACE"), ...out }), issue({ ...item("RACE"), ...out })]);
+
+    // Two despatches, two movements, two charges — and one item card that holds
+    // what is left rather than what one of the two expected to be left.
+    expect(a.movementId).not.toBe(b.movementId);
+    expect(a.entryId).not.toBe(b.entryId);
+    const held = await stock("RACE");
+    expect(held.quantityMilli).toBe(100_000n);
+    expect(held.valueMinor).toBe(500_000n);
+    expect(await db.inventoryMovement.count({ where: { orgId: ORG_C, kind: "ISSUE" } })).toBe(2);
+
+    // And the register agrees with the ledger, which is the whole point of the
+    // increment: the two records are kept by different mechanisms and they have
+    // to arrive at the same number.
+    const v = await stockValuation({ orgId: ORG_C, entityId: ENT_C });
+    expect(v.ledger.agrees).toBe(true);
+    expect(v.ledger.differenceMinor).toBe("0");
+  });
+
+  it("refuses the second of two issues that would together overdraw the shelf", async () => {
+    await addItem({ orgId: ORG_C, entityId: ENT_C, item: { sku: "THIN", name: "Nearly gone" } });
+    await receive({ ...item("THIN"), movedOn: "2026-02-01", quantityMilli: 30_000, valueMinor: 300_000 });
+
+    // Each of these fits what the shelf held when it was read; together they do
+    // not. One has to be refused, and it has to be refused by the database
+    // rather than by a check made against a figure that was already stale —
+    // `InventoryItem_quantity_check` is what actually decides it.
+    const both = await Promise.allSettled([
+      issue({ ...item("THIN"), movedOn: "2026-02-03", quantityMilli: 20_000 }),
+      issue({ ...item("THIN"), movedOn: "2026-02-03", quantityMilli: 20_000 }),
+    ]);
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(both.filter((r) => r.status === "rejected")).toHaveLength(1);
+
+    const held = await stock("THIN");
+    expect(held.quantityMilli).toBe(10_000n);
+    expect(held.valueMinor).toBe(100_000n);
+    // Nothing was posted for the issue that did not happen.
+    expect(await db.inventoryMovement.count({ where: { orgId: ORG_C, itemId: held.id, kind: "ISSUE" } })).toBe(1);
+    const v = await stockValuation({ orgId: ORG_C, entityId: ENT_C });
+    expect(v.ledger.agrees).toBe(true);
+  });
+
+  it("takes the movement back out when the posting for it is refused", async () => {
+    // The movement is written before the entry is posted, because the entry is
+    // keyed on the movement's own id. So a refusal — a closed period, a missing
+    // account — must not leave stock that moved on the item card and nothing at
+    // all in 1200.
+    await addItem({ orgId: ORG_C, entityId: ENT_C, item: { sku: "REFUSED", name: "Refused widget" } });
+    await receive({ ...item("REFUSED"), movedOn: "2026-02-01", quantityMilli: 40_000, valueMinor: 400_000 });
+    const was = await stock("REFUSED");
+
+    // 2027 has no fiscal year open, so `post` refuses it.
+    await expect(issue({ ...item("REFUSED"), movedOn: "2027-02-01", quantityMilli: 10_000 }))
+      .rejects.toThrow(/no accounting period covers/i);
+
+    const after = await stock("REFUSED");
+    expect(after.quantityMilli).toBe(was.quantityMilli);
+    expect(after.valueMinor).toBe(was.valueMinor);
+    expect(await db.inventoryMovement.count({ where: { orgId: ORG_C, itemId: was.id, kind: "ISSUE" } })).toBe(0);
+    const v = await stockValuation({ orgId: ORG_C, entityId: ENT_C });
+    expect(v.ledger.agrees).toBe(true);
+  });
+
+  it("counts against what the item holds now, not against what the count sheet was read against", async () => {
+    await addItem({ orgId: ORG_C, entityId: ENT_C, item: { sku: "COUNT", name: "Counted widget" } });
+    await receive({ ...item("COUNT"), movedOn: "2026-02-01", quantityMilli: 100_000, valueMinor: 500_000 });
+
+    // A count and an issue at once. Which of the two settles first decides
+    // where the item ends — 95 counted then 10 issued is 85, 10 issued then 95
+    // counted is 95 — and either is a true account of what happened. What is
+    // NOT allowed is the count closing a gap measured against a shelf that had
+    // already changed, which is what the delta was worked out from before.
+    const both = await Promise.allSettled([
+      adjust({ ...item("COUNT"), movedOn: "2026-02-04", countedMilli: 95_000, reference: "SHEET-1" }),
+      issue({ ...item("COUNT"), movedOn: "2026-02-04", quantityMilli: 10_000 }),
+    ]);
+    expect(both.every((r) => r.status === "fulfilled")).toBe(true);
+
+    const held = await stock("COUNT");
+    const moves = await db.inventoryMovement.findMany({
+      where: { orgId: ORG_C, itemId: held.id }, orderBy: { createdAt: "asc" },
+    });
+    // The balance the last movement wrote is the balance the item carries —
+    // which is only true if every one of them worked from what it found.
+    expect(moves[moves.length - 1].balanceQtyMilli).toBe(held.quantityMilli);
+    expect([85_000n, 95_000n]).toContain(held.quantityMilli);
+    // And the movements add up to it, one after the other, with none of them
+    // written over.
+    expect(moves.reduce((a, m) => a + m.quantityMilli, 0n)).toBe(held.quantityMilli);
+    const v = await stockValuation({ orgId: ORG_C, entityId: ENT_C });
     expect(v.ledger.agrees).toBe(true);
     expect(v.ledger.differenceMinor).toBe("0");
   });

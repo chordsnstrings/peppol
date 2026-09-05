@@ -670,6 +670,11 @@ export interface CreditGate {
  * `postInvoice` deliberately still does not call this, and its own docstring
  * says why — refusing to post would leave the books denying a document the
  * customer is already holding. The gate belongs before the document exists.
+ *
+ * This is one of the two places it does. The other is `invoiceCreditGate` in
+ * credit-control.ts, which runs when an invoice is finalised, for the business
+ * that raises invoices without raising orders first — for whom everything here
+ * would otherwise be an enforcement it never reaches.
  */
 async function creditGate(opts: {
   orgId: string;

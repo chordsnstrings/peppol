@@ -1,21 +1,14 @@
 import { prisma } from "@/lib/server/prisma";
 import { fmtMinor } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
-import { trialBalance } from "./reports";
-import { templateStatus } from "./recurring";
-import { assetRegister } from "./assets";
+import { sharedReads, type SharedReads } from "./attention";
 import { leaseRegister } from "./leases";
-import { reconcile } from "./bank";
-import { receivablesAgeing } from "./ar";
-import { payablesAgeing } from "./ap";
 import { ledgerBalances } from "./balances";
-import { contractRegister } from "./revenue";
 import { provisionRegister } from "./provisions";
 import { fundList } from "./petty-cash";
 import { revaluationRegister } from "./asset-revaluation";
 import { payrollSummary } from "./payroll";
 import { borrowingRegister } from "./borrowings";
-import { contingentLiabilities } from "./trade-finance";
 import { timesheetRegister } from "./timesheets";
 
 /**
@@ -93,6 +86,13 @@ interface Ctx {
   period: string;
   startsOn: Date;
   endsOn: Date;
+  /**
+   * The reads this checklist shares with whatever else is on the page. Five of
+   * the checks below ask a report the attention list has already asked, and on
+   * the notification centre both modules run against the same books in the same
+   * request — see the note on `SharedReads` in `attention.ts`.
+   */
+  reads: SharedReads;
 }
 
 type Check = {
@@ -107,7 +107,7 @@ const trialBalanceTies: Check = {
   key: "trial_balance",
   label: "The trial balance",
   async run(ctx) {
-    const tb = await trialBalance({ orgId: ctx.orgId, entityId: ctx.entityId, periodLabel: ctx.period });
+    const tb = await ctx.reads.trialBalance(ctx.period);
     if (tb.balanced) {
       return {
         key: "trial_balance", label: "The trial balance", severity: "done",
@@ -197,9 +197,9 @@ const registersAgree: Check = {
     const disagreeing: string[] = [];
 
     const [assets, leases, revenue, provisions, surplus, petty, loans, facilities, wip] = await Promise.allSettled([
-      assetRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
+      ctx.reads.assets(asOf),
       leaseRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
-      contractRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
+      ctx.reads.contracts(),
       provisionRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
       revaluationRegister({ orgId: ctx.orgId, entityId: ctx.entityId }),
       fundList({ orgId: ctx.orgId, entityId: ctx.entityId }),
@@ -220,7 +220,7 @@ const registersAgree: Check = {
       // in progress ties the timesheets to 1330. Neither is a control account,
       // so a hand-keyed journal into either is accepted by the ledger and
       // silently breaks the register that supports the disclosure.
-      contingentLiabilities({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
+      ctx.reads.facilities(asOf),
       timesheetRegister({ orgId: ctx.orgId, entityId: ctx.entityId, asOf }),
     ]);
 
@@ -278,9 +278,14 @@ const controlAccountsTie: Check = {
   label: "Receivables and payables against their control accounts",
   async run(ctx) {
     const [ar, ap, ledger] = await Promise.all([
-      receivablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.endsOn }),
-      payablesAgeing({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.endsOn }),
-      ledgerBalances({ orgId: ctx.orgId, entityId: ctx.entityId, codes: ["1100", "2000"] }),
+      ctx.reads.receivables(ctx.endsOn),
+      ctx.reads.payables(ctx.endsOn),
+      // At the month end, like the ageings beside it. Without the date this
+      // read the control accounts as they stand today and compared them to open
+      // items netted at the end of the month — so a single invoice raised after
+      // the month end made the two disagree by its own value, and the checklist
+      // reported a difference that was nothing but the calendar.
+      ledgerBalances({ orgId: ctx.orgId, entityId: ctx.entityId, codes: ["1100", "2000"], asOf: ctx.endsOn }),
     ]);
     // The ageing is netted per open item; the control account is the raw
     // balance. They are two routes to the same figure and must agree.
@@ -311,7 +316,7 @@ const recurringPosted: Check = {
   key: "recurring",
   label: "Recurring journals",
   async run(ctx) {
-    const status = await templateStatus({ orgId: ctx.orgId, entityId: ctx.entityId, asOf: ctx.period });
+    const status = await ctx.reads.templates(ctx.period);
     const behind = status.templates.filter((t) => t.behind);
     if (!behind.length) return null;
     return {
@@ -361,7 +366,7 @@ const revenueRecognised: Check = {
   key: "revenue",
   label: "Revenue recognition",
   async run(ctx) {
-    const reg = await contractRegister({ orgId: ctx.orgId, entityId: ctx.entityId });
+    const reg = await ctx.reads.contracts();
     if (!reg.contracts.length) return null;
     const pending = BigInt(reg.reconciliation.pendingAssetMinor) + BigInt(reg.reconciliation.pendingLiabilityMinor);
     if (pending === 0n) {
@@ -386,22 +391,33 @@ const bankReconciled: Check = {
   key: "bank",
   label: "Bank reconciliation",
   async run(ctx) {
+    // Only the accounts carrying an unmatched line at the month end are
+    // reconciled, which is the same rule the attention list applies and for the
+    // same reason: a reconciliation reads every journal line on its account, so
+    // running one per bank account here cost the whole cash ledger to find out
+    // that there was nothing to say. An account with no unmatched line
+    // contributes nothing to the count either way, and an account with no
+    // statement imported at all is not unreconciled — it is not being
+    // reconciled, which is a decision rather than a finding.
+    const withLines = await prisma.bankStatementLine.findMany({
+      where: { orgId: ctx.orgId, entityId: ctx.entityId, status: "unmatched", postedOn: { lte: ctx.endsOn } },
+      select: { accountId: true },
+      distinct: ["accountId"],
+    });
+    if (!withLines.length) return null;
+
     const accounts = await prisma.account.findMany({
-      where: { orgId: ctx.orgId, entityId: ctx.entityId, subtype: "BANK", status: "active" },
+      where: { id: { in: withLines.map((l) => l.accountId) }, subtype: "BANK", status: "active" },
       select: { code: true },
+      orderBy: { code: "asc" },
     });
     if (!accounts.length) return null;
 
-    let unmatched = 0;
-    for (const a of accounts) {
-      try {
-        const r = await reconcile({ orgId: ctx.orgId, entityId: ctx.entityId, accountCode: a.code, asOf: ctx.endsOn });
-        unmatched += (r as unknown as { unmatchedBank?: unknown[] }).unmatchedBank?.length ?? 0;
-      } catch {
-        // An account with no statement imported is not unreconciled; it is
-        // simply not being reconciled, which is a decision, not a finding.
-      }
-    }
+    const settled = await Promise.allSettled(accounts.map((a) => ctx.reads.reconcile(a.code, ctx.endsOn)));
+    const unmatched = settled.reduce(
+      (a, r) => a + (r.status === "fulfilled" ? r.value.unmatchedBank.length : 0),
+      0,
+    );
     if (!unmatched) return null;
     // An advisory rather than a blocker: an unmatched statement line means the
     // bank knows something the books do not, which is worth chasing — but the
@@ -462,6 +478,12 @@ export async function monthEnd(opts: {
   orgId: string;
   entityId: string;
   period: string;
+  /**
+   * The reads this checklist shares with whatever else is on the page. Left
+   * out, it makes its own — which is right for the month-end screen, where the
+   * checklist is the only thing being read.
+   */
+  reads?: SharedReads;
 }): Promise<MonthEnd> {
   if (!/^\d{4}-\d{2}$/.test(opts.period)) {
     throw new LedgerError(`"${opts.period}" is not a month. Give it as 2026-03.`);
@@ -477,6 +499,7 @@ export async function monthEnd(opts: {
   const ctx: Ctx = {
     orgId: opts.orgId, entityId: opts.entityId, period: opts.period,
     startsOn: period.startsOn, endsOn: period.endsOn,
+    reads: opts.reads ?? sharedReads({ orgId: opts.orgId, entityId: opts.entityId }),
   };
 
   const settled = await Promise.allSettled(CHECKS.map((c) => c.run(ctx)));
