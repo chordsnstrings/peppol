@@ -1163,6 +1163,34 @@ model Project {
   @@index([orgId, entityId, status])
 }
 
+/// Why a project's budget is what it is.
+///
+/// `Project.budgetMinor` is one column, so revising it overwrote the figure
+/// actual was being measured against and left nothing behind. A budget whose
+/// history is invisible is a budget nobody can be held to: the overspend
+/// disappears the moment somebody raises the number, and who raised it is not
+/// recorded either.
+///
+/// Written inside the same transaction as the change, so a revision that is
+/// visible is a revision that happened.
+model ProjectBudgetRevision {
+  id          String   @id @default(cuid())
+  orgId       String
+  projectId   String
+  /// What it was, and what it became. Both, so the row reads on its own
+  /// without having to be chained to the one before it.
+  priorMinor  BigInt
+  budgetMinor BigInt
+  /// Why. A revision nobody has to justify is the thing this table exists to
+  /// prevent, so the column is required and the database checks it is not
+  /// whitespace.
+  reason      String
+  revisedBy   String?
+  revisedAt   DateTime @default(now())
+
+  @@index([orgId, projectId, revisedAt])
+}
+
 /// A lease under IFRS 16 — a right-of-use asset and a lease liability.
 model Lease {
   id                    String   @id @default(cuid())
