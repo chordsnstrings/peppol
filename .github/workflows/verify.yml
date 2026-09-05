@@ -1,0 +1,173 @@
+# Nine verification suites, 2,000-odd checks, and until now nothing ran them
+# except a person remembering to.
+#
+# The split below is not arbitrary. Six suites need only a database and finish
+# in a couple of minutes, so they run on every push and are what a reviewer
+# waits for. The other three need a built application answering on a port —
+# two HTTP suites and a browser suite driving Chromium — which costs a Next.js
+# production build, so they run in a second job that starts only once the first
+# has passed. A red unit test should not spend four minutes building.
+#
+# Both jobs run against a real PostgreSQL 16, because most of what this ledger
+# guarantees is enforced by the database itself: gapless numbering, the
+# immutability trigger, the deferred balance constraints, the control-account
+# guard. A suite run against a mock would pass while every one of those was
+# broken.
+name: verify
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The suites read DATABASE_URL directly through Prisma. Credentials here are
+  # the service container's own and exist only for the life of the job.
+  DATABASE_URL: postgresql://arks:arks@127.0.0.1:5432/arks?schema=public
+  AUTH_SECRET: verify-only-not-a-production-secret-0000000000
+  ENCRYPTION_KEY: verify-only-not-a-production-secret-1111111111
+  CRON_SECRET: verify-only-not-a-production-secret-2222222222
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # ---------------------------------------------------------------- fast ----
+  checks:
+    name: unit, invariants, design, permissions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: arks
+          POSTGRES_PASSWORD: arks
+          POSTGRES_DB: arks
+        ports: ["5432:5432"]
+        # Without this the first migration races the server's own startup and
+        # fails with "the database system is starting up".
+        options: >-
+          --health-cmd "pg_isready -U arks"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # `migrate deploy` rather than `db push`: the migrations are part of what
+      # is being verified, and one that does not apply cleanly is a defect.
+      - run: npx prisma migrate deploy
+      - run: npx prisma generate
+
+      # Type errors are cheaper to find here than in a suite that fails for a
+      # reason three levels away from the mistake.
+      - name: typecheck
+        run: npx tsc --noEmit
+
+      - name: unit and database tests
+        run: npx vitest run
+
+      - name: ledger invariants
+        run: node scripts/verify-ledger.mjs
+
+      - name: palette contrast
+        run: node scripts/verify-contrast.mjs
+
+      - name: design language
+        run: node scripts/verify-swedish-design.mjs
+
+      - name: permissions
+        run: node scripts/verify-permissions.mjs
+
+      - name: capability count
+        run: node scripts/capabilities.mjs --check
+
+  # ------------------------------------------------------- against a server --
+  server-suites:
+    name: HTTP and browser
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: arks
+          POSTGRES_PASSWORD: arks
+          POSTGRES_DB: arks
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U arks"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npx prisma generate
+
+      - name: build
+        run: npm run build
+
+      - name: install Chromium for the browser suite
+        run: npx playwright install --with-deps chromium
+
+      # Backgrounded, then waited for rather than slept on: a fixed sleep is
+      # either too short on a slow runner or wasted time on a fast one.
+      - name: start the server
+        run: |
+          npm run start &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/login > /dev/null; then
+              echo "answering after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the server never answered on :3000"
+          exit 1
+
+      # Each HTTP suite registers a fresh account, and registration is rate
+      # limited per address in a fixed window held in the server's own memory.
+      # One run per server is what the limiter allows, which is what this is.
+      - name: ledger HTTP
+        run: node scripts/verify-ledger-api.mjs
+        env:
+          BASE: http://localhost:3000
+
+      - name: subledgers HTTP
+        run: node scripts/verify-ledger-ar.mjs
+        env:
+          BASE: http://localhost:3000
+
+      - name: browser
+        run: node scripts/verify-ledger-ui.mjs
+        env:
+          BASE: http://localhost:3000
+
+      - name: stop the server
+        if: always()
+        run: kill "$(cat /tmp/server.pid)" || true

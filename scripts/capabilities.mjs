@@ -111,6 +111,118 @@ const unique = rows.filter((r) => {
 const byKind = {};
 for (const r of unique) byKind[r.kind] = (byKind[r.kind] ?? 0) + 1;
 
+/* ---------------------------------------------------------------- join */
+
+/*
+ * The three lists above are three lists, and counting them separately is how a
+ * product can hold a complete, tested, routed subledger that no screen calls.
+ * That is not hypothetical: postInvoice, postReceipt, postBill and
+ * postSupplierPayment were all present, all tested, all routed at
+ * /api/ledger/ar/post and /api/ledger/ap/post, and the count went up by eight
+ * while the daily loop an accounting product exists for — raise an invoice,
+ * post it, receive against it, enter a bill, pay it — stayed unreachable from
+ * every screen in the product.
+ *
+ * So the register joins the lists rather than concatenating them:
+ *
+ *   endpoint  -> screen    does any page, component or hook reach this route?
+ *   operation -> anything  does anything outside its own module name it?
+ *
+ * Both joins read source, which is exactly the grep a person would run, and is
+ * why they cannot drift from what is actually wired.
+ *
+ * Neither is a proof. A screen may build a path from a variable — the ageing
+ * report takes endpoint="ar" and interpolates it — and no static reading will
+ * see that. So the endpoint join reports CANDIDATES, and --check ratchets on
+ * the count rather than demanding zero: what must never happen is the number
+ * going up, because an endpoint no screen calls is a capability added to the
+ * count and to nothing else.
+ */
+
+const ROUTE_FILES = walk(join(root, "src/app/api")).filter((p) => p.endsWith("route.ts"));
+
+const UI_SRC = [
+  ...walk(join(root, "src/app/(app)")),
+  ...walk(join(root, "src/components")),
+  ...walk(join(root, "src/hooks")),
+]
+  .filter((p) => /\.tsx?$/.test(p))
+  .map((p) => readFileSync(p, "utf8"))
+  .join("\n");
+
+const TEST_SRC = readdirSync(join(root, "test"))
+  .filter((f) => f.endsWith(".ts"))
+  .map((f) => readFileSync(join(root, "test", f), "utf8"))
+  .join("\n");
+
+const ROUTE_SRC = ROUTE_FILES.map((p) => readFileSync(p, "utf8")).join("\n");
+
+const word = (name) => new RegExp(`\\b${name}\\b`);
+
+/*
+ * A route reached through a server component rather than over the wire is
+ * still reached: several screens import the ledger module directly and never
+ * touch their own endpoint. So the join also asks whether any operation the
+ * route imports is named in the interface.
+ *
+ * Short names are excluded because they collide with the language itself —
+ * `reverse`, `post` and `sort` appear in any React file — and a collision here
+ * would mark a genuine gap as reached, which is the one error this must not
+ * make.
+ */
+const namedInUi = (name) => name.length > 8 && word(name).test(UI_SRC);
+
+const endpointReached = new Map();
+for (const rp of ROUTE_FILES) {
+  const src = readFileSync(rp, "utf8");
+  const path = rp.replace(root + "/src/app", "").replace(/\/route\.ts$/, "");
+  // A dynamic segment is written [id] in the filesystem and ${id} in the
+  // caller, so the literal never matches. Match the shape instead.
+  const asRegex = new RegExp(
+    path.replace(/[.*+?^${}()|\\]/g, "\\$&").replace(/\\\[[^\]]+\\\]|\[[^\]]+\]/g, "[^\"'`\\s)]+"),
+  );
+  /* Only the domain modules count. Every route imports requirePermission,
+   * LedgerError and ledgerJson, and LedgerError is caught by name in a dozen
+   * server components — so counting the infrastructure would mark every route
+   * in the product as reached. */
+  const INFRASTRUCTURE = new Set(["permissions", "post", "serialize", "balances"]);
+  const imported = [...src.matchAll(/import\s*\{([^}]+)\}\s*from\s*"@\/lib\/server\/ledger\/([\w-]+)"/g)]
+    .filter((m) => !INFRASTRUCTURE.has(m[2]))
+    .flatMap((m) => m[1].split(",").map((n) => n.trim().replace(/^type\s+/, "")))
+    .filter((n) => /^[a-zA-Z_$][\w$]*$/.test(n));
+  endpointReached.set(path, asRegex.test(UI_SRC) || imported.some(namedInUi));
+}
+
+/** Ledger endpoints nothing in the interface appears to reach. */
+const unreachedEndpoints = [...endpointReached]
+  .filter(([path, reached]) => !reached && path.startsWith("/api/ledger/"))
+  .map(([path]) => path)
+  .sort();
+
+/*
+ * Operations named nowhere but their own module — not by a route, not by the
+ * interface, not by another ledger module, not even by a test. That is dead
+ * code rather than an unreachable feature, which is why the two are counted
+ * apart.
+ */
+const LEDGER_SRC_BY_AREA = new Map();
+for (const f of readdirSync(LEDGER).filter((f) => f.endsWith(".ts"))) {
+  LEDGER_SRC_BY_AREA.set(f.replace(/\.ts$/, ""), readFileSync(join(LEDGER, f), "utf8"));
+}
+const OUTSIDE = [ROUTE_SRC, UI_SRC, TEST_SRC].join("\n");
+
+const unreachedOperations = unique
+  .filter((r) => r.kind === "operation")
+  .filter((op) => {
+    const re = word(op.name);
+    if (re.test(OUTSIDE)) return false;
+    for (const [area, src] of LEDGER_SRC_BY_AREA) {
+      if (area !== op.area && re.test(src)) return false;
+    }
+    return true;
+  });
+
+
 /*
  * The target this product was asked to reach.
  *
@@ -148,7 +260,42 @@ if (process.argv.includes("--check")) {
     console.log(`  PASS  ${n} ${kind}${n === 1 ? "" : "s"}`);
   }
   console.log(`  PASS  ${byKind.check ?? 0} checks hold them`);
-  console.log(`\n${Object.keys(byKind).length} passed, 0 failed\n`);
+
+  /*
+   * A ratchet, not a target. Both figures are gaps that were there before
+   * anybody counted them, and a gate that failed until every one was closed
+   * would be a gate nobody could run. What must not happen is the number going
+   * UP. Lower these as they are closed; never raise them.
+   */
+  const UNREACHED_ENDPOINTS_CEILING = 4;
+  const UNREACHED_OPERATIONS_CEILING = 11;
+
+  let failed = 0;
+  const ratchet = (n, ceiling, what) => {
+    if (n > ceiling) {
+      failed++;
+      console.log(`  FAIL  ${n} ${what}, against a ceiling of ${ceiling} — ${n - ceiling} more than there were. Run --gaps to see them.`);
+    } else {
+      console.log(`  PASS  ${n} ${what}, within the ceiling of ${ceiling}`);
+    }
+  };
+  ratchet(unreachedEndpoints.length, UNREACHED_ENDPOINTS_CEILING, "ledger endpoints no screen appears to reach");
+  ratchet(unreachedOperations.length, UNREACHED_OPERATIONS_CEILING, "operations nothing outside their own module names");
+
+  const passed = Object.keys(byKind).length + 2 - failed;
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  process.exit(failed ? 1 : 0);
+}
+
+if (process.argv.includes("--gaps")) {
+  // What the join found, so it can be worked through rather than argued with.
+  console.log(`\n${unreachedEndpoints.length} ledger endpoints no page, component or hook appears to reach.`);
+  console.log("Some will be reached through a path built from a variable, which no static reading can see.\n");
+  for (const path of unreachedEndpoints) console.log(`  ${path}`);
+  console.log(`\n${unreachedOperations.length} exported operations nothing outside their own module names — not a route,`);
+  console.log("not the interface, not another ledger module, not a test.\n");
+  for (const op of unreachedOperations) console.log(`  ${op.area}.${op.name}`);
+  console.log("");
   process.exit(0);
 }
 

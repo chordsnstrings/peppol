@@ -62,6 +62,7 @@ export const LEDGER_NAV: NavGroup[] = [
       { href: "/accounting/subscriptions", label: "Subscriptions" },
       { href: "/accounting/receivables", label: "Receivables" },
       { href: "/accounting/credit-control", label: "Credit control" },
+      { href: "/accounting/write-offs", label: "Bad-debt write-offs" },
       { href: "/accounting/revenue", label: "Revenue recognition" },
     ],
   },
