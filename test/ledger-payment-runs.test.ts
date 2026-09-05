@@ -575,4 +575,51 @@ d("supplier payment runs", () => {
     expect(item!.excludeReason).toMatch(/hold/i);
     expect(item!.excludeReason).toMatch(/Quality dispute/);
   });
+  it("holds the organisation's own approval rules on a release, on top of the run's own control", async () => {
+    // A rule about payments, written after the runs above so nothing before
+    // this changes. A run is the largest single movement of money this product
+    // makes, and a rule saying "payments over a million need two directors" was
+    // binding on a single supplier payment and not on a run settling forty
+    // bills of the same total. That is not a policy, it is a gap.
+    const rule = await db.approvalRule.create({
+      data: {
+        orgId: ORG, entityId: ENT, subjectType: "PAYMENT",
+        thresholdMinor: 10_000n, approverRole: "DIRECTOR", approversRequired: 2,
+      },
+    });
+
+    const b1 = await receiveApproved(bill({
+      number: "BILL-RULE-1", issueDate: "2026-05-05", dueDate: "2026-05-20",
+      seller: { nameEn: "Falcon Freight LLC" },
+    }, [line(40_000, 2_000)]));
+
+    const run = await proposeRun({
+      orgId: ORG, entityId: ENT, runDate: "2026-05-25", dueBy: "2026-05-25", reference: "PR-RULE",
+    });
+    await approveRun({ orgId: ORG, runId: run.id, approvedBy: "omar", submittedBy: "farah" });
+
+    // The run's own control is satisfied — somebody other than the preparer
+    // signed it — and the rules are not. Both have to hold.
+    await expect(releaseRun({ orgId: ORG, runId: run.id, releasedOn: "2026-05-25" }))
+      .rejects.toThrow(/needs two more approvals from a director/i);
+    expect(await db.journalEntry.count({ where: { orgId: ORG, sourceType: "PAYMENT_RUN", sourceId: run.id } })).toBe(0);
+
+    const total = run.items.filter((i) => !i.excluded).reduce((a, i) => a + BigInt(i.amountMinor), 0n);
+    for (const who of ["dir-a", "dir-b"]) {
+      await db.approvalDecision.create({
+        data: {
+          orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: run.id,
+          decision: "APPROVED", decidedBy: who, amountMinor: total,
+        },
+      });
+    }
+
+    const released = await releaseRun({ orgId: ORG, runId: run.id, releasedOn: "2026-05-25" });
+    expect(released.alreadyReleased).toBe(false);
+    expect(released.entryIds).toHaveLength(1);
+    expect(b1.number).toBe("BILL-RULE-1");
+
+    // Put the policy back so the tests after this see the fixture they seeded.
+    await db.approvalRule.delete({ where: { id: rule.id } });
+  });
 });

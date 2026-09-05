@@ -20,6 +20,8 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "ApprovalRule" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "ExpenseClaimLine" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "ExpenseClaim" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "FxRate" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${ORG}'`),
   ]);
 }
 
@@ -341,6 +343,97 @@ d("approval workflows", () => {
     const back = await setRule({ orgId: ORG, entityId: ENT, subjectType: "PAYMENT", thresholdMinor: 100_000, approverRole: "DIRECTOR", approversRequired: 2 });
     expect(back.id).toBe(again.id);
     expect(back.active).toBe(true);
+  });
+
+  /* ------------------------------------------ a threshold has a currency too */
+
+  it("tests a foreign amount against the threshold in the book's own currency", async () => {
+    // A book that reports in dirhams, and a euro rate on file. Without the
+    // book there is nothing to convert INTO, so this is the first test here
+    // that needs one.
+    await db.book.create({
+      data: { orgId: ORG, entityId: ENT, code: "PRIMARY", name: "Primary", isDefault: true, functionalCurrency: "AED" },
+    });
+    await db.fxRate.create({
+      data: { orgId: ORG, entityId: ENT, currency: "EUR", rate: "3.9500000000", rateDate: new Date("2026-01-01") },
+    });
+
+    // EUR 200.00 is AED 790.00. The payment rules here are AED 0 (a manager)
+    // and AED 1,000.00 (two directors), so this is under the second either way
+    // and the conversion cannot change the answer — which is the case that has
+    // to stay cheap.
+    const small = await approvalState({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-EUR-SMALL",
+      amountMinor: 20_000, currency: "EUR",
+    });
+    expect(small.matchedOnMinor).toBe(79_000n);
+    expect(small.thresholdCurrency).toBe("AED");
+    expect(small.rules.map((r) => r.thresholdMinor)).toEqual([0n]);
+
+    // EUR 400.00 is AED 1,580.00, which IS over the AED 1,000.00 director
+    // rule — and 40,000 read as dirhams would have sailed under it. This is the
+    // whole defect: a foreign document four times the size of the limit passing
+    // a rule written to stop it, because 40,000 fils were compared with
+    // 100,000 fils and nobody asked which currency either was in.
+    const big = await approvalState({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-EUR-BIG",
+      amountMinor: 40_000, currency: "EUR",
+    });
+    expect(big.matchedOnMinor).toBe(158_000n);
+    expect(big.rules.map((r) => r.thresholdMinor)).toEqual([100_000n, 0n]);
+    expect(big.approved).toBe(false);
+    // The threshold is quoted in the currency it is written in, not the
+    // document's — "payments of AED 1,000.00 and above", never "EUR 1,000.00".
+    expect(big.blockers.join(" ")).toMatch(/AED 1,000\.00 and above/);
+    // And the document is still quoted at its face value, which is what the
+    // approver will be looking at.
+    expect(big.blockers.join(" ")).toMatch(/EUR 400\.00/);
+  });
+
+  it("keeps the approver's own figure for the staleness check, not the converted one", async () => {
+    // The approver signed EUR 400.00 and the decision records 40,000 — the face
+    // amount. If the guard compared that against the converted 158,000 every
+    // signature on every foreign document would read as stale and nothing would
+    // ever post.
+    await decide({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-EUR-BIG",
+      amountMinor: 40_000, currency: "EUR", decision: "APPROVED", decidedBy: "u-d1",
+    });
+    const after = await approvalState({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-EUR-BIG",
+      amountMinor: 40_000, currency: "EUR",
+    });
+    expect(after.blockers.join(" ")).not.toMatch(/approval covers the amount it was shown/);
+    expect(after.approvers).toEqual(["u-d1"]);
+  });
+
+  it("refuses to guess when a foreign amount has no rate, but only where it could matter", async () => {
+    // GBP 400.00, no GBP rate anywhere. Reading 40,000 as dirhams would put it
+    // under the 100,000 director rule; the truth is that nobody here knows
+    // which side of the line it falls, and quietly picking the lenient side is
+    // the failure this is about.
+    const unknown = await approvalState({
+      orgId: ORG, entityId: ENT, subjectType: "PAYMENT", subjectId: "PAY-GBP",
+      amountMinor: 40_000, currency: "GBP",
+    });
+    expect(unknown.approved).toBe(false);
+    expect(unknown.blockers.join(" ")).toMatch(/no GBP rate is on file/);
+
+    // But a payroll run of GBP 20,000.00 is already past the only payroll rule
+    // there is, at AED 10,000.00, on its face value. A rate can only move it
+    // further past — and if it moved it BELOW, keeping the rule is the strict
+    // answer rather than the lenient one, which is nobody's problem. So nothing
+    // is asked for here: a control that interrupts people for a number which
+    // cannot make it more permissive is a control they learn to work around.
+    const immaterial = await approvalState({
+      orgId: ORG, entityId: ENT, subjectType: "PAYROLL", subjectId: "PAYROLL-GBP",
+      amountMinor: 2_000_000, currency: "GBP",
+    });
+    expect(immaterial.blockers.join(" ")).not.toMatch(/rate is on file/);
+    // The rule still applies and is still unmet — strictness is not the thing
+    // being relaxed.
+    expect(immaterial.approved).toBe(false);
+    expect(immaterial.rules.map((r) => r.thresholdMinor)).toEqual([1_000_000n]);
   });
 
   it("records who decided, when, and against what amount — and never edits it", async () => {

@@ -3,6 +3,7 @@ import { fmtMinor, exponentOf } from "@/lib/ledger/format";
 import { post, LedgerError } from "./post";
 import { payablesAgeing } from "./ap";
 import { partyIndex, attributeDocument } from "./counterparties";
+import { assertApproved } from "./approvals";
 import type { Invoice } from "@/lib/domain/types";
 
 /**
@@ -43,10 +44,12 @@ import type { Invoice } from "@/lib/domain/types";
  * words that its guard is called by the posting paths rather than reaching into
  * them, and a run that quietly depended on a rule row existing would lose its
  * control the day somebody deactivated the rule. Where both are in use the
- * intended shape is: approvals.ts collects the signatures policy asks for
- * against subject PAYMENT and this run's id, and releaseRun() is the posting
- * path that would call assertApproved() before it posts. That call is not made
- * from here — the same reason approvals.ts gives for not making it itself.
+ * shape is: approvals.ts collects the signatures policy asks for against
+ * subject PAYMENT and this run's id, and releaseRun() calls assertApproved()
+ * before it posts. It does. The two are different questions — the run's own
+ * control says somebody other than the preparer signed it and cannot be
+ * switched off; the rules say which people and how many policy wants for money
+ * of this size — so a run needs both and losing either loses something real.
  *
  * ONE ENTRY, MANY BILLS. A release posts a single entry: one debit to payables
  * per bill, each line naming the bill it settles, and one credit to the bank
@@ -794,6 +797,40 @@ export async function releaseRun(opts: {
   // line names the bill it discharges, so the ageing clears exactly as it
   // would have done paying each bill on its own.
   const total = ins.reduce((a, i) => a + i.amountMinor, 0n);
+
+  /*
+   * The organisation's own approval rules, on the largest single movement of
+   * money this product makes.
+   *
+   * This module's header used to argue that the call was not made here "the
+   * same reason approvals.ts gives for not making it itself" — that guard was
+   * called from nowhere at all, so wiring one path and not the others would
+   * have been arbitrary. That reason has gone: `postBill`,
+   * `postSupplierPayment`, `postClaim` and the manual journal route all call it
+   * now, and a payment run is the one path where a rule saying "payments over a
+   * million need two directors" most obviously means to bind. A run settling
+   * forty bills bypassing a limit that stops a single payment of the same size
+   * is not a policy, it is a gap.
+   *
+   * The run's own approval stays exactly as it was, and the two are different
+   * controls rather than one duplicated. `PaymentRun.approvedBy` and the CHECK
+   * behind it say SOMEBODY other than the preparer signed off this run; it is
+   * enforced by the database and it does not depend on a rule row existing, so
+   * it cannot be deactivated. The rules say WHICH people, and how many, policy
+   * wants for money of this size. Where no rule covers the amount this returns
+   * quietly and the run's own control is the whole of it, which is the
+   * behaviour every organisation that has configured nothing already has.
+   */
+  await assertApproved({
+    orgId: run.orgId,
+    entityId: run.entityId,
+    subjectType: "PAYMENT",
+    subjectId: run.id,
+    amountMinor: total,
+    reference: run.reference,
+    currency: run.currency,
+  });
+
   const entry = await post({
     orgId: run.orgId,
     entityId: run.entityId,

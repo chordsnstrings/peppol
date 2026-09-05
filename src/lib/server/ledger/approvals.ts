@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/server/prisma";
 import { Prisma } from "@prisma/client";
-import { fmtMinor } from "@/lib/ledger/format";
+import { fmtMinor, exponentOf } from "@/lib/ledger/format";
 import { LedgerError } from "./post";
 import { totalsOf } from "./expenses";
 
@@ -353,6 +353,17 @@ export interface ApprovalState {
   rejection: { by: string; at: Date; reason: string | null } | null;
   /** What is still outstanding, in sentences somebody can act on. */
   blockers: string[];
+  /**
+   * The figure the THRESHOLDS were tested against, in the book's own currency.
+   *
+   * Equal to `amountMinor` for a document in the functional currency, which is
+   * most of them. Different for a foreign one, and the difference is the point:
+   * a EUR 20,000 bill is roughly AED 80,000, and testing 20,000 against a
+   * threshold written in dirhams let four fifths of the money past the rule.
+   */
+  matchedOnMinor: bigint;
+  /** The currency the thresholds are written in — the book's. */
+  thresholdCurrency: string;
 }
 
 const asDecision = (d: {
@@ -377,12 +388,25 @@ function computeState(input: {
   subjectId: string;
   amountMinor: bigint;
   currency?: string;
+  /**
+   * The same money in the book's currency, which is the currency the
+   * thresholds are in. Defaults to `amountMinor` — right whenever the document
+   * is in the functional currency, and wrong in exactly the case this argument
+   * exists for.
+   */
+  matchMinor?: bigint;
+  /** The book's currency, for wording a threshold in the units it is written in. */
+  thresholdCurrency?: string;
+  /** Set when the document is foreign and no rate is on file to convert it. */
+  rateMissing?: { currency: string; asOf: string } | null;
   rules: RuleRow[];
   decisions: DecisionRow[];
 }): ApprovalState {
   const { subjectType, amountMinor } = input;
   const what = LABEL[subjectType];
   const currency = input.currency ?? "AED";
+  const matchMinor = input.matchMinor ?? amountMinor;
+  const thresholdCurrency = input.thresholdCurrency ?? currency;
   const decisions = [...input.decisions].sort((a, b) => a.decidedAt.getTime() - b.decidedAt.getTime());
 
   const rejectionRow = decisions.find((d) => d.decision === "REJECTED") ?? null;
@@ -420,9 +444,19 @@ function computeState(input: {
   const approvalsOutstanding = rules.reduce((m, r) => Math.max(m, r.missing), 0);
 
   const rejected = rejectionRow !== null;
-  const approved = !rejected && rules.every((r) => r.satisfied);
+  const rateMissing = input.rateMissing ?? null;
+  const approved = !rejected && rateMissing === null && rules.every((r) => r.satisfied);
 
   const blockers: string[] = [];
+  if (rateMissing) {
+    blockers.push(
+      `This ${what} is in ${rateMissing.currency} and the approval limits are written in ${thresholdCurrency}, ` +
+        `but no ${rateMissing.currency} rate is on file at ${rateMissing.asOf}. Comparing the two figures as they ` +
+        `stand would test ${aed(amountMinor, currency)} against a limit in a different unit, which is how a ` +
+        `foreign document four times the size of the threshold passes a rule written to stop it. Record the rate ` +
+        `on the revaluation screen and this answers itself.`,
+    );
+  }
   if (rejectionRow) {
     blockers.push(
       `This ${what} was rejected by ${rejectionRow.decidedBy} on ${day(rejectionRow.decidedAt)}` +
@@ -442,7 +476,7 @@ function computeState(input: {
     if (r.satisfied) continue;
     const scope = r.thresholdMinor === 0n
       ? `every ${what}`
-      : `${what}s of ${aed(r.thresholdMinor, currency)} and above`;
+      : `${what}s of ${aed(r.thresholdMinor, thresholdCurrency)} and above`;
     if (r.approverUserId) {
       blockers.push(
         `This ${what} of ${aed(amountMinor, currency)} needs the approval of ${r.approverUserId}, ` +
@@ -473,6 +507,106 @@ function computeState(input: {
       ? { by: rejectionRow.decidedBy, at: rejectionRow.decidedAt, reason: rejectionRow.reason }
       : null,
     blockers,
+    matchedOnMinor: matchMinor,
+    thresholdCurrency,
+  };
+}
+
+
+/* ------------------------------------------------------- thresholds and money */
+
+/**
+ * A threshold is written in one currency; a document arrives in another.
+ *
+ * "Bills over 50,000 need two directors" is a sentence about dirhams, because
+ * that is what the business reports in. A EUR 20,000 bill is about AED 80,000
+ * of real money, and comparing 20,000 to 50,000 let it through a rule written
+ * to stop exactly that. Multi-currency posting is first-class in this ledger,
+ * so this is not a corner case.
+ *
+ * Two figures come out of here and they are used for different things:
+ *
+ *   the FACE amount is what the approver was shown and what their decision was
+ *   recorded against, so the staleness check has to keep using it — converting
+ *   it would make every signature on a foreign document look as though it had
+ *   been given for a different number, and nothing would ever post;
+ *
+ *   the MATCH amount is the same money in the book's currency, and it is the
+ *   only figure a threshold may be compared against.
+ *
+ * Where no rate is on file, this does NOT quietly fall back to the face value.
+ * It says so, and `computeState` turns that into a blocker — but only when it
+ * could change the answer, which is when some rule's threshold sits above the
+ * face amount. A rule at zero applies either way, and interrupting somebody for
+ * a rate that cannot move the outcome is how a control teaches people to work
+ * around it.
+ */
+async function convertForThresholds(opts: {
+  orgId: string;
+  entityId: string;
+  amountMinor: bigint;
+  currency?: string;
+  rules: RuleRow[];
+  asOf?: Date;
+}): Promise<{
+  matchMinor: bigint;
+  thresholdCurrency: string;
+  rateMissing: { currency: string; asOf: string } | null;
+}> {
+  const book = await prisma.book.findFirst({
+    where: { orgId: opts.orgId, entityId: opts.entityId, code: "PRIMARY" },
+    select: { functionalCurrency: true },
+  });
+  const functional = book?.functionalCurrency ?? "AED";
+  const face = (opts.currency ?? functional).trim().toUpperCase();
+
+  // The ordinary case, and the one that must cost nothing: the document is in
+  // the currency the limits are written in.
+  if (!face || face === functional) {
+    return { matchMinor: opts.amountMinor, thresholdCurrency: functional, rateMissing: null };
+  }
+
+  const asOf = opts.asOf ?? new Date();
+  const row = await prisma.fxRate.findFirst({
+    where: { orgId: opts.orgId, entityId: opts.entityId, currency: face, rateDate: { lte: asOf } },
+    orderBy: { rateDate: "desc" },
+  });
+
+  if (!row) {
+    // Only material where a threshold sits above the face amount — below that,
+    // every rule applies on either figure and the rate cannot change anything.
+    const size = abs(opts.amountMinor);
+    const couldMatter = opts.rules.some((r) => r.active && r.thresholdMinor > size);
+    return {
+      matchMinor: opts.amountMinor,
+      thresholdCurrency: functional,
+      rateMissing: couldMatter ? { currency: face, asOf: asOf.toISOString().slice(0, 10) } : null,
+    };
+  }
+
+  // The rate is Decimal(20,10) so that 3.6725 is held exactly; it is scaled to
+  // an integer rather than passed through Number for the same reason.
+  const text = row.rate.toFixed();
+  const m = /^\s*(\d+)(?:\.(\d*))?\s*$/.exec(text);
+  if (!m) return { matchMinor: opts.amountMinor, thresholdCurrency: functional, rateMissing: null };
+  const frac = (m[2] ?? "").padEnd(10, "0");
+  let scaled = BigInt(m[1] + frac.slice(0, 9));
+  if (Number(frac[9] ?? "0") >= 5) scaled += 1n;
+  if (scaled === 0n) return { matchMinor: opts.amountMinor, thresholdCurrency: functional, rateMissing: null };
+
+  // Minor units are not comparable across currencies without the exponent: 100
+  // fils is 1 AED and 100 fils is a tenth of a dinar. Ignoring this is wrong by
+  // a factor of ten in exactly the currencies a UAE business trades with.
+  const shift = exponentOf(functional) - exponentOf(face);
+  const numerator = abs(opts.amountMinor) * scaled * (shift > 0 ? 10n ** BigInt(shift) : 1n);
+  const denominator = 1_000_000_000n * (shift < 0 ? 10n ** BigInt(-shift) : 1n);
+  // Half away from zero, the same rounding the rest of the ledger uses.
+  const converted = (numerator * 2n + denominator) / (denominator * 2n);
+
+  return {
+    matchMinor: opts.amountMinor < 0n ? -converted : converted,
+    thresholdCurrency: functional,
+    rateMissing: null,
   };
 }
 
@@ -508,13 +642,27 @@ export async function approvalState(opts: {
     prisma.approvalDecision.findMany({ where: { orgId: opts.orgId, subjectType, subjectId } }),
   ]);
 
+  const rules = ruleRows.map(asRule);
+  const converted = await convertForThresholds({
+    orgId: opts.orgId,
+    entityId: opts.entityId,
+    amountMinor,
+    currency: opts.currency,
+    rules,
+  });
+
   return computeState({
     entityId: opts.entityId,
     subjectType,
     subjectId,
     amountMinor,
     currency: opts.currency,
-    rules: applicable(ruleRows.map(asRule), amountMinor),
+    matchMinor: converted.matchMinor,
+    thresholdCurrency: converted.thresholdCurrency,
+    rateMissing: converted.rateMissing,
+    // Matched on the converted figure; the decisions are still compared against
+    // the face amount, which is what the approver was shown.
+    rules: applicable(rules, converted.matchMinor),
     decisions: decisionRows.map(asDecision),
   });
 }
@@ -876,6 +1024,13 @@ export async function pendingFor(opts: {
     if (subjectType && c.subjectType !== subjectType) continue;
     if (opts.entityId && c.entityId !== opts.entityId) continue;
 
+    // No currency conversion here, deliberately. The queue settles a hundred
+    // subjects from two queries and converting each would mean a rate lookup
+    // per row; more to the point, this list decides what to SHOW somebody,
+    // while `approvalState` decides what may post — and that one converts. A
+    // foreign document can therefore appear in the queue against the wrong
+    // band, and it still cannot post until the rate is on file and the rules
+    // are met on the converted figure.
     const state = computeState({
       entityId: c.entityId,
       subjectType: c.subjectType,
