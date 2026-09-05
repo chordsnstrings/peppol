@@ -59,10 +59,12 @@ function journalSizeMinor(lines: PostLine[], functionalCurrency: string): bigint
 /** Journal register. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The journals are the books. This was readable by anybody with a session. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const take = Math.min(Number(url.searchParams.get("limit") ?? 50), 200);
 
     const entries = await prisma.journalEntry.findMany({

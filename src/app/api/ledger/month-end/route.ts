@@ -11,11 +11,13 @@ export const runtime = "nodejs";
 /** What is still stopping this month from being closed. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     const period = q.get("period") ?? new Date().toISOString().slice(0, 7);
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The checklist is assembled entirely out of reads. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json(ledgerJson(await monthEnd({ orgId, entityId, period })));
   } catch (e) {
     if (e instanceof LedgerError) return json({ error: e.message }, 422);

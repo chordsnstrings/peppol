@@ -15,7 +15,7 @@ export const runtime = "nodejs";
 /** The runs for an entity, or one run in full with the entries it posted. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
     const runId = q.get("runId");
@@ -23,6 +23,9 @@ export async function GET(req: Request) {
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* A run and its items are a read of what is owed. Proposing, approving and
+     * releasing each have their own key, on the POST. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const status = (q.get("status") as RunStatus | null) ?? undefined;
     return json(ledgerJson(await runList({ orgId, entityId, status })));
   } catch (e) {

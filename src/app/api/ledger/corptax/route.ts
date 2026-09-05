@@ -37,12 +37,17 @@ function suppliedFrom(params: URLSearchParams): SuppliedFigures {
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
     if (!entityId || !from || !to) return json({ error: "entityId, from and to are required." }, 400);
+    /* The computation is derived from the same journals `ledger.read` already
+     * covers, so guarding the total stops nobody who could add it up by hand.
+     * `tax.file` guards the act its own sentence names — locking the
+     * computation — which the POST does. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     return json(
       ledgerJson(

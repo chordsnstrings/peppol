@@ -14,10 +14,14 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The document sequences and what the next number would be. Changing a
+     * sequence is `setup.manage` on the POST — a gapless series is a control,
+     * and moving it is a decision about the books. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     if (q.get("view") === "preview") {
       const scope = q.get("scope");

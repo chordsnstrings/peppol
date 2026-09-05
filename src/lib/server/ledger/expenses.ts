@@ -793,6 +793,8 @@ export async function payClaim(opts: {
 
 export interface ClaimSummaryRow {
   id: string;
+  /** Whose books it belongs to — a claim is addressed by its own id, not by an entity. */
+  entityId: string;
   reference: string;
   employeeCode: string;
   employeeName: string;
@@ -810,13 +812,18 @@ export interface ClaimSummaryRow {
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
 function summarise(claim: {
-  id: string; reference: string; employeeCode: string; employeeName: string;
+  id: string; entityId: string; reference: string; employeeCode: string; employeeName: string;
   claimedOn: Date; currency: string; status: string; approvedBy: string | null;
   rejectedReason: string | null; entryId: string | null; paidEntryId: string | null;
   lines: LineLike[];
 }): ClaimSummaryRow {
   return {
     id: claim.id,
+    // Which entity's books this claim belongs to. Carried because a claim is
+    // addressed by its own id — the route reading one has no entity in hand
+    // until this says so, and the permission check needs the entity the
+    // posting would land in rather than one the caller named.
+    entityId: claim.entityId,
     reference: claim.reference,
     employeeCode: claim.employeeCode,
     employeeName: claim.employeeName,

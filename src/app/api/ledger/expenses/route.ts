@@ -16,14 +16,27 @@ export const runtime = "nodejs";
 /** The claim list with what is owed to staff, or one claim in full. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
     const claimId = q.get("claimId");
-    if (claimId) return json(ledgerJson(await claimDetail({ orgId, claimId })));
+    if (claimId) {
+      // One claim, addressed by id, so the entity comes off the claim rather
+      // than out of the query — the same reason /api/ledger/ar/post reads the
+      // document before it asks. Reading it before the guard would leave the
+      // whole detail, including what a colleague is owed, open to anybody.
+      const detail = await claimDetail({ orgId, claimId });
+      const entityOfClaim = detail.claim.entityId;
+      await requirePermission({ orgId, userId, entityId: entityOfClaim, permission: "ledger.read" });
+      return json(ledgerJson(detail));
+    }
 
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The claim list carries what the business owes its own staff, name by
+     * name. Approving one is `expense.approve` on the POST; reading the list
+     * is the ordinary read a bookkeeper needs to pay them. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json(ledgerJson(await claimList({
       orgId,
       entityId,

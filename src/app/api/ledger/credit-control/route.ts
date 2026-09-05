@@ -34,10 +34,13 @@ export const runtime = "nodejs";
  */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Exposure, ageing, holds and the dunning ladder are all read from the
+     * sales ledger. Placing a hold is `ar.credit_hold`, and it is elsewhere. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const scope = { orgId, entityId };
     const asOf = q.get("asOf") ?? undefined;
     const partyKey = q.get("partyKey") ?? q.get("code");

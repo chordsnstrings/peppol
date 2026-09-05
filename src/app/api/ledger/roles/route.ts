@@ -16,12 +16,30 @@ export async function GET(req: Request) {
     const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
 
+    /* open-read: "may I?", asked by the caller about the caller.
+     *
+     * This is how a screen decides whether to render a button, and it answers
+     * only about `userId` from the session — there is no parameter for whose
+     * permissions to check, so nobody can ask about anybody else. Guarding it
+     * would be circular in the worst way: a person with no role could not find
+     * out that they have no role, and every screen would render every control
+     * and then refuse on the click. */
     const permission = q.get("check");
     if (permission) {
       return json(ledgerJson(await check({
         orgId, userId, permission, entityId: q.get("entityId") ?? undefined,
       })));
     }
+
+    /* Who holds what, across the workspace. That is the administration of the
+     * workspace rather than a read of one set of books, and the key that
+     * governs writing it governs seeing it: an overview of who can approve
+     * what is a map of where the controls are weakest.
+     *
+     * org-wide: roles are granted across the organisation, and this lists
+     * every grant in it. Narrowing to one entity would answer a different
+     * question from the one asked. */
+    await requirePermission({ orgId, userId, permission: "roles.manage" });
     return json(ledgerJson(await rolesOverview({ orgId })));
   } catch (e) {
     if (e instanceof LedgerError) return json({ error: e.message }, 422);

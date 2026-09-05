@@ -13,9 +13,11 @@ export const runtime = "nodejs";
 /** The chart, with what each account carries and what it will therefore allow. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const entityId = new URL(req.url).searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The chart is part of the books. Editing it is `chart.edit` on the POST. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json({ accounts: await chartWithUsage({ orgId, entityId }) });
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);

@@ -20,7 +20,7 @@ do, or one guarantee it makes and holds:
 | rule | a constraint or trigger PostgreSQL enforces itself | 294 |
 | screen | a page somebody navigates to | 88 |
 | | **capabilities** | **1,235** |
-| check | an assertion in the verification suites | 2,025 |
+| check | an assertion in the verification suites | 2,029 |
 
 An operation reached over HTTP is counted once as each, because they are
 different things: one is what the code can do, the other is what is reachable

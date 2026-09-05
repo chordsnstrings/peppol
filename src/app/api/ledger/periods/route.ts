@@ -16,9 +16,11 @@ const NEXT: Record<string, string[]> = {
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const entityId = new URL(req.url).searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Which months are open. Moving one is `period.close` or `period.reopen`. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const periods = await prisma.accountingPeriod.findMany({
       where: { orgId, entityId },
       orderBy: [{ startsOn: "asc" }],

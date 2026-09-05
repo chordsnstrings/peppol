@@ -13,11 +13,15 @@ export const runtime = "nodejs";
 /** The reconciliation statement, plus suggested matches for what is still open. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const accountCode = url.searchParams.get("account") ?? "1010";
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* Reconciling the bank is one job, and its own key. The suggestions this
+     * returns are the matches somebody is about to make, so reading them is
+     * part of the same act rather than a separate, looser one. */
+    await requirePermission({ orgId, userId, entityId, permission: "bank.reconcile" });
     const asOf = url.searchParams.get("asOf");
 
     const [statement, suggestions] = await Promise.all([

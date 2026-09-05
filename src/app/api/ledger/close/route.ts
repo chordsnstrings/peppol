@@ -11,11 +11,14 @@ export const runtime = "nodejs";
 /** What closing this year would do, and what currently stops it. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     const fiscalYear = url.searchParams.get("fiscalYear");
     if (!entityId || !fiscalYear) return json({ error: "entityId and fiscalYear are required." }, 400);
+    /* A preview of the year-end close computes and posts nothing. Closing is
+     * `year.close` on the POST — a preview is how somebody decides whether to. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     return json(ledgerJson(await previewClose({ orgId, entityId, fiscalYear })));
   } catch (e) {
     if (e instanceof PermissionError) return json({ error: e.message }, 403);

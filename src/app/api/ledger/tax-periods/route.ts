@@ -28,10 +28,13 @@ export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const url = new URL(req.url);
     const entityId = url.searchParams.get("entityId");
     if (!entityId) return json({ error: "entityId is required." }, 400);
+    /* The registration, its periods and what has been filed. Recording a
+     * filing is `tax.file`, on the POST. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
     const regime = (url.searchParams.get("regime") ?? "VAT") as TaxRegime;
     const asOf = url.searchParams.get("asOf") ?? undefined;
 

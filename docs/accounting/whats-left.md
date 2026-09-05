@@ -49,18 +49,24 @@ the two `serialize` and `verify-ledger` items. And the separate, larger piece
 the first section named — other comprehensive income, and a total that includes
 it.
 
-**Still open, deliberately.** IAS 38 intangibles as a class of their own: the
-chart carries account 1560 and the cash flow statement classifies it, so the
-balance sheet is right, but there is no IAS 38.118 reconciliation, no
-indefinite-life path, and a capitalised licence still draws the IAS 16 policy
-note. The arithmetic is right and the caption is wrong, at a year end only.
+**Still open.** One thing, and it is named on the note itself rather than left
+out: an intangible with no foreseeable end to its life is not amortised at all
+(IAS 38.107) and is tested for impairment instead. The fixed asset register
+requires a useful life in months and has no path for that, so an entity holding
+one is not disclosing it from here. Every other item on this survey is closed,
+including the rest of IAS 38 — the class, the accounts, the IAS 38.118
+reconciliation and the policy note.
 
 **Found while fixing, and fixed.** A drawing under a trade facility dated after
 the facility expired. A related-party note reading only the first five thousand
 documents. `outstandingOnOrder` scoped to the organisation and not the entity.
 An approval threshold compared against a figure in another currency. A payment
 run bypassing the approval rules entirely. A rule naming a ROLE satisfied by
-any two people, because nothing checked what the signatories were.
+any two people, because nothing checked what the signatories were. An account
+opened on hold that was not on hold — the same defect as the one this survey
+names, surviving in the create verb after the hold verb was fixed. And a role
+granted on one entity answering for every other, because the guards knew which
+entity they were acting on and were not passing it.
 
 What's left, ranked by whether it makes a number wrong, exposes you to a regulator, is simply unreachable from the product, or is polish. Everything below survived two rounds of refutation against the code; twenty other candidates did not, and I've listed those at the end so nobody re-opens them.
 

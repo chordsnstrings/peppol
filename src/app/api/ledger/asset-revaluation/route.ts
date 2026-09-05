@@ -13,10 +13,13 @@ export const runtime = "nodejs";
 /** The revaluation register with the equity balance it must agree with, or one asset's history. */
 export async function GET(req: Request) {
   try {
-    const { orgId } = await requireSession();
+    const { orgId, userId } = await requireSession();
     const q = new URL(req.url).searchParams;
     const entityId = q.get("entityId");
     if (!entityId) return json({ error: "entityId required" }, 400);
+    /* The revaluation register and one asset's history are a read of the
+     * books, the same as the fixed asset register they belong beside. */
+    await requirePermission({ orgId, userId, entityId, permission: "ledger.read" });
 
     const code = q.get("code");
     if (code) return json(ledgerJson(await revaluationHistory({ orgId, entityId, code })));

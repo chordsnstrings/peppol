@@ -95,6 +95,49 @@ unguarded.length === 0
       unguarded.map((p) => p.replace("src/app/api/ledger/", "").replace("/route.ts", "")).join(", "),
     );
 
+/* ------------------------------------ every route that reads asks too ------- */
+
+/*
+ * A GET is not exempt, and treating it as one was how fourteen routes came to
+ * be readable by anybody with a session: the journals, the bank reconciliation,
+ * the corporate tax computation, the expense claims with what is owed to staff,
+ * and the roles overview showing who may do what.
+ *
+ * `ledger.read` is the key most of them want, and the shipped Viewer holds it —
+ * so guarding a read costs an ordinary reader nothing and costs a person with
+ * no role the whole ledger. A route that is genuinely open says so on the line
+ * above with the same `open-read:` marker convention the org-wide exception
+ * uses, in the source rather than in a list somewhere else.
+ */
+const OPEN_READ_MARKER = "open-read:";
+
+/**
+ * The body of one exported handler, so a guard on the POST does not count as a
+ * guard on the GET — which is what most of these files look like.
+ */
+function handlerBody(source, verb) {
+  const start = source.search(new RegExp(`export async function ${verb}\\b`));
+  if (start === -1) return null;
+  const rest = source.slice(start + 1);
+  const next = rest.search(/export async function [A-Z]+\b/);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+const unread = [];
+for (const p of LEDGER) {
+  const get = handlerBody(bodies.get(p), "GET");
+  if (get === null) continue;
+  if (get.includes("requirePermission")) continue;
+  if (get.includes(OPEN_READ_MARKER)) continue;
+  unread.push(p.replace("src/app/api/ledger/", "").replace("/route.ts", ""));
+}
+unread.length === 0
+  ? ok("every ledger route that reads asks who is asking, or says why it need not")
+  : bad(
+      `${unread.length} ledger route(s) are readable by anybody with a session`,
+      unread.join(", "),
+    );
+
 /* ---------------------------------------- a guard names a key that exists --- */
 
 /*
