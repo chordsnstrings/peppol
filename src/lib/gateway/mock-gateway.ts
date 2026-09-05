@@ -13,6 +13,12 @@ import type {
  * external calls: submit returns a ref and fetchStatusUpdates returns a terminal
  * ACCEPTED on both legs, so a sandbox send completes end-to-end. Configurable
  * failure can be added later via the mock-network simulator.
+ *
+ * Every event it emits carries `simulated: true`. That flag is the whole reason
+ * the rest of the product can be honest about a rehearsal: this driver's
+ * "ACCEPTED" is a value assigned in this file, not an acknowledgement from the
+ * buyer's Access Point or the FTA, and an acceptance nobody sent is exactly the
+ * thing a user must never be shown as fact.
  */
 export const mockGateway: PeppolGatewayPort = {
   driver: "mock",
@@ -35,21 +41,26 @@ export const mockGateway: PeppolGatewayPort = {
   async fetchStatusUpdates(gatewayRef: string): Promise<GatewayEvent[]> {
     const at = new Date().toISOString();
     return [
-      { kind: "EXCHANGE_MLS", gatewayRef, status: "ACCEPTED", at },
-      { kind: "REPORTING_MLS", gatewayRef, leg: "C2", status: "ACCEPTED", at },
+      { kind: "EXCHANGE_MLS", gatewayRef, status: "ACCEPTED", at, simulated: true },
+      { kind: "REPORTING_MLS", gatewayRef, leg: "C2", status: "ACCEPTED", at, simulated: true },
     ];
   },
 
   async parseWebhook(_headers, rawBody: string): Promise<GatewayEvent[]> {
     try {
       const parsed = JSON.parse(rawBody);
-      return Array.isArray(parsed) ? parsed : [parsed];
+      const events = (Array.isArray(parsed) ? parsed : [parsed]) as GatewayEvent[];
+      // This driver verifies no signature, so anything that reaches it is a
+      // hand-posted body. The flag is re-stamped here rather than trusted from
+      // the payload: a caller must not be able to launder an event into looking
+      // like a real one by leaving the field out.
+      return events.map((e) => ({ ...e, simulated: true }));
     } catch {
       return [];
     }
   },
 
   async healthcheck(): Promise<HealthStatus> {
-    return { ok: true, detail: "mock gateway" };
+    return { ok: true, detail: "mock gateway — simulated, reaches no network" };
   },
 };

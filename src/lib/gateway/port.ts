@@ -37,11 +37,21 @@ export interface SubmitResult {
   gatewayRef: string;
 }
 
-/** Normalized events the drivers emit (spec §5.6). */
+/**
+ * Normalized events the drivers emit (spec §5.6).
+ *
+ * `simulated` marks an outcome a driver invented instead of reading off the
+ * network. It travels on the event itself rather than being re-derived later,
+ * because the question "was this real?" is asked in four places (the timeline
+ * narrative, the notification, the status chips, the evidence bundle) and two
+ * of them run long after the send — a webhook delivery, an auditor opening a
+ * bundle from last quarter. An absent flag therefore has to mean "real", so it
+ * is set by the mock and by nothing else.
+ */
 export type GatewayEvent =
-  | { kind: "EXCHANGE_MLS"; gatewayRef: string; status: "ACCEPTED" | "REJECTED"; code?: string; reasons?: MlsReason[]; at: string }
-  | { kind: "REPORTING_MLS"; gatewayRef: string; leg: "C2" | "C3"; status: "ACCEPTED" | "REJECTED"; code?: string; reasons?: MlsReason[]; at: string }
-  | { kind: "DELIVERY_FAILED"; gatewayRef: string; reason: string; retryable: boolean; at: string };
+  | { kind: "EXCHANGE_MLS"; gatewayRef: string; status: "ACCEPTED" | "REJECTED"; code?: string; reasons?: MlsReason[]; at: string; simulated?: boolean }
+  | { kind: "REPORTING_MLS"; gatewayRef: string; leg: "C2" | "C3"; status: "ACCEPTED" | "REJECTED"; code?: string; reasons?: MlsReason[]; at: string; simulated?: boolean }
+  | { kind: "DELIVERY_FAILED"; gatewayRef: string; reason: string; retryable: boolean; at: string; simulated?: boolean };
 
 export interface HealthStatus {
   ok: boolean;
