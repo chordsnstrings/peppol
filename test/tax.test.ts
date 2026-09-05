@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { computeLine, computeTotals, deriveDocType, marginSchemeLineTax } from "@/lib/domain/tax";
+import {
+  computeLine,
+  computeTotals,
+  deriveDocType,
+  importVatOnGoods,
+  marginSchemeLineTax,
+  PURCHASE_TAX_PROFILE_LIST,
+  TAX_PROFILE_LIST,
+} from "@/lib/domain/tax";
+import type { TaxableLine } from "@/lib/domain/types";
 import { line } from "./helpers";
 
 describe("computeLine", () => {
@@ -173,5 +182,73 @@ describe("profit margin scheme", () => {
     const t = computeTotals([line({ qty: 2, unitPriceMinor: 50_000 })]);
     expect(t.marginTaxMinor).toBeUndefined();
     expect(t.marginLinesWithoutCostCount).toBeUndefined();
+  });
+});
+
+describe("goods imported into the UAE", () => {
+  /**
+   * Article 48 of Federal Decree-Law 8/2017 puts the tax on an import of goods
+   * on the importer rather than on the overseas seller. The seller's invoice
+   * carries no UAE VAT at all, so the document has to state none — and the
+   * importer still owes five percent of the value, which it declares in box 6
+   * of the VAT 201 and recovers in box 10.
+   *
+   * Goods of AED 5,000 imported: the supplier is paid AED 5,000, and AED 250 is
+   * accounted for to the FTA and reclaimed from it in the same breath.
+   */
+  const imported = (over: Partial<TaxableLine> = {}): TaxableLine => ({
+    ...line(),
+    taxProfileCode: "IMPORT_GOODS",
+    unitPriceMinor: 500_000,
+    ...over,
+  });
+
+  it("states no tax on the line, because the supplier charged none", () => {
+    expect(computeLine(imported())).toEqual({ lineNetMinor: 500_000, lineVatMinor: 0 });
+  });
+
+  it("works out the tax the importer owes on it", () => {
+    expect(importVatOnGoods([imported()])).toBe(25_000);
+  });
+
+  it("rounds the import tax once, over the goods, not once per line", () => {
+    // Two lines of 3,333 fils: 6,666 × 5% = 333.3, so 333. Per line it would be
+    // 167 + 167 = 334, and the return would be a fils out.
+    const l = (n: number) => imported({ lineNo: n, unitPriceMinor: 3_333 });
+    expect(importVatOnGoods([l(1), l(2)])).toBe(333);
+  });
+
+  it("keeps the import tax out of what the supplier is paid", () => {
+    const t = computeTotals([imported(), line({ lineNo: 2, unitPriceMinor: 100_000 })]);
+    expect(t.taxExclusiveMinor).toBe(600_000);
+    // 5,000 on the standard-rated line only. The import contributes nothing:
+    // paying the overseas supplier the FTA's money would be paying it twice.
+    expect(t.vatMinor).toBe(5_000);
+    expect(t.payableMinor).toBe(605_000);
+    // Reported beside it, so it can be posted and put on the return.
+    expect(t.importVatMinor).toBe(25_000);
+
+    // Its own subtotal. The import profile carries category AE at 5% and the
+    // reverse charge carries AE at 0, so a key of category-and-rate alone would
+    // have put 5% of the customs value on the face of the document.
+    const imports = t.perCategory.find((c) => c.profileCode === "IMPORT_GOODS")!;
+    expect(imports.taxableMinor).toBe(500_000);
+    expect(imports.vatMinor).toBe(0);
+    expect(imports.ratePercent).toBe(0);
+  });
+
+  it("leaves documents with no imported goods alone", () => {
+    expect(computeTotals([line({ unitPriceMinor: 100_000 })]).importVatMinor).toBeUndefined();
+  });
+
+  it("does not make a document that states no tax a tax invoice", () => {
+    expect(deriveDocType([imported()])).toBe("COMMERCIAL_INVOICE");
+  });
+
+  it("is offered on a purchase and not in the tax dropdown of a sales document", () => {
+    // Nothing an entity sells is an import of its own, and the invoice, product
+    // and sales-order editors all render TAX_PROFILE_LIST whole.
+    expect(TAX_PROFILE_LIST.map((p) => p.code)).not.toContain("IMPORT_GOODS");
+    expect(PURCHASE_TAX_PROFILE_LIST.map((p) => p.code)).toContain("IMPORT_GOODS");
   });
 });

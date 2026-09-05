@@ -1,11 +1,15 @@
 import { halfUp } from "./money";
 import type {
+  AnyTaxProfile,
+  AnyTaxProfileCode,
   CategoryBreakdown,
   DocType,
   InvoiceLine,
   InvoiceTotals,
+  PurchaseTaxProfileCode,
   TaxProfile,
   TaxProfileCode,
+  TaxableLine,
 } from "./types";
 
 /**
@@ -106,6 +110,57 @@ export const TAX_PROFILES: Record<TaxProfileCode, TaxProfile> = {
   },
 };
 
+/**
+ * Treatments a purchase can carry and a sales document cannot.
+ *
+ * Kept in a table of their own so `TAX_PROFILE_LIST` — which the invoice
+ * editor, the product editor and the sales-order editor all render whole —
+ * stays the set of treatments a supply can be raised under. An importer never
+ * issues an invoice for its own import.
+ */
+export const PURCHASE_TAX_PROFILES: Record<PurchaseTaxProfileCode, AnyTaxProfile> = {
+  IMPORT_GOODS: {
+    code: "IMPORT_GOODS",
+    label: "Goods imported into the UAE",
+    // The same category the reverse charge carries, because it is the same
+    // mechanism: the customer, not the supplier, accounts for the tax. The
+    // note on TAX_PROFILES above applies here too — these code values are
+    // placeholders until the vendored PINT AE artefacts are loaded.
+    categoryCode: "AE",
+    // The rate the law applies to an import (Article 48 of Federal Decree-Law
+    // 8/2017 and the standard rate under Article 3). It is stated here rather
+    // than left at nought so `importVatOnGoods` can read the rate from the
+    // profile instead of restating five percent somewhere else — but the
+    // document still shows no tax, exactly as a reverse-charge document does,
+    // because the overseas supplier charged none.
+    ratePercent: 5,
+    requiresExemptionReason: false,
+    isTaxable: true,
+    hint:
+      "Goods brought into the UAE. The importer accounts for the tax itself under Article 48 — box 6 of the " +
+      "VAT 201 — and recovers the same amount in box 10, so it is cash-neutral where the input tax is " +
+      "recoverable in full. The supplier's invoice carries no UAE VAT.",
+  },
+};
+
+/** Every treatment, whichever side of the book raises it. */
+export const ALL_TAX_PROFILES: Record<AnyTaxProfileCode, AnyTaxProfile> = {
+  ...TAX_PROFILES,
+  ...PURCHASE_TAX_PROFILES,
+};
+
+/**
+ * Treatments that state no tax on the face of the document, though tax is due.
+ *
+ * A margin-scheme supply is forbidden from stating one (Executive Regulation
+ * Article 43) and an import is never charged one by the overseas supplier, so
+ * in both cases the per-line and per-category arithmetic below must produce
+ * nothing. What is actually owed is reported separately — `marginTaxMinor` and
+ * `importVatMinor` on the totals — so that it is visible without ever being
+ * added to what the counterparty is asked to pay.
+ */
+const STATES_NO_TAX_ON_THE_DOCUMENT = new Set<AnyTaxProfileCode>(["MARGIN_SCHEME", "IMPORT_GOODS"]);
+
 /** Credit-note reason codes (plain-language; UNTDID-aligned) `[VERIFY-LATEST]`. */
 export const CREDIT_REASONS: { code: string; label: string }[] = [
   { code: "PRICE", label: "Price/quantity correction" },
@@ -118,14 +173,32 @@ export const CREDIT_REASONS: { code: string; label: string }[] = [
   { code: "OTHER", label: "Other (explain in notes)" },
 ];
 
+/** The treatments a document line may be coded to, in the order the pickers show them. */
 export const TAX_PROFILE_LIST = Object.values(TAX_PROFILES);
 
-export function getProfile(code: TaxProfileCode): TaxProfile {
-  return TAX_PROFILES[code] ?? TAX_PROFILES.STANDARD_5;
+/** The same list plus the purchase-only treatments, for a bill or expense editor. */
+export const PURCHASE_TAX_PROFILE_LIST: AnyTaxProfile[] = [
+  ...TAX_PROFILE_LIST,
+  ...Object.values(PURCHASE_TAX_PROFILES),
+];
+
+/**
+ * The profile behind a code.
+ *
+ * Two signatures rather than one widened signature. Handed a document code,
+ * this still returns a profile whose `code` is a `TaxProfileCode` — which is
+ * what lets `sales-orders.ts` keep subtotalling into a map keyed by that type.
+ * Handed any code at all, including a purchase-only one, it returns the wider
+ * shape. One function, and neither caller has to know about the other's half.
+ */
+export function getProfile(code: TaxProfileCode): TaxProfile;
+export function getProfile(code: AnyTaxProfileCode): AnyTaxProfile;
+export function getProfile(code: AnyTaxProfileCode): AnyTaxProfile {
+  return ALL_TAX_PROFILES[code] ?? TAX_PROFILES.STANDARD_5;
 }
 
 /** Compute a single line's net + informational VAT. */
-export function computeLine(line: Pick<InvoiceLine, "qty" | "unitPriceMinor" | "taxProfileCode">): {
+export function computeLine(line: Pick<TaxableLine, "qty" | "unitPriceMinor" | "taxProfileCode">): {
   lineNetMinor: number;
   lineVatMinor: number;
 } {
@@ -139,9 +212,42 @@ export function computeLine(line: Pick<InvoiceLine, "qty" | "unitPriceMinor" | "
   // the margin alone, so the difference would leave the FTA permanently short.
   // The tax the supplier does owe is `marginSchemeLineTax`, and it is reported
   // on the totals rather than on the line the buyer reads.
-  const lineVatMinor =
-    profile.code === "MARGIN_SCHEME" ? 0 : halfUp((lineNetMinor * profile.ratePercent) / 100);
+  //
+  // An import of goods states none for a different reason with the same
+  // consequence: the overseas supplier is outside UAE VAT and charged nothing,
+  // and the tax is the importer's own under Article 48. `importVatOnGoods`
+  // reports it.
+  const lineVatMinor = STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code)
+    ? 0
+    : halfUp((lineNetMinor * profile.ratePercent) / 100);
   return { lineNetMinor, lineVatMinor };
+}
+
+/**
+ * The tax an importer must account for on goods it brought into the UAE.
+ *
+ * Article 48 of Federal Decree-Law 8/2017 makes the importer, not the overseas
+ * supplier, liable for the tax on an import of goods. The importer declares it
+ * as output tax in box 6 of the VAT 201 and recovers the same figure as input
+ * tax in box 10, so where the input tax is recoverable in full no money moves —
+ * but the transaction has to appear on both sides, and leaving it off the
+ * output side is an understatement of output tax even though nothing was ever
+ * paid across.
+ *
+ * Rounded once, on the total of the imported goods, for the reason EN 16931
+ * gives for rounding per category rather than per line: two roundings of half a
+ * fils each are a fils the return is out by.
+ */
+export function importVatOnGoods(
+  lines: Pick<TaxableLine, "qty" | "unitPriceMinor" | "taxProfileCode">[],
+): number {
+  const profile = PURCHASE_TAX_PROFILES.IMPORT_GOODS;
+  let net = 0;
+  for (const l of lines) {
+    if (l.taxProfileCode !== "IMPORT_GOODS") continue;
+    net += computeLine(l).lineNetMinor;
+  }
+  return halfUp((net * profile.ratePercent) / 100);
 }
 
 export interface MarginLineTax {
@@ -172,7 +278,7 @@ export interface MarginLineTax {
  * dependency and a genuine cycle.
  */
 export function marginSchemeLineTax(
-  line: Pick<InvoiceLine, "qty" | "unitPriceMinor" | "taxProfileCode" | "marginPurchaseMinor">,
+  line: Pick<TaxableLine, "qty" | "unitPriceMinor" | "taxProfileCode" | "marginPurchaseMinor">,
 ): MarginLineTax {
   const profile = getProfile(line.taxProfileCode);
   if (profile.code !== "MARGIN_SCHEME") return { marginMinor: 0, taxMinor: 0, costKnown: true };
@@ -215,18 +321,20 @@ function divHalfUp(value: bigint, divisor: bigint): bigint {
  * Compute document totals from lines using EN 16931 style: VAT rounded per
  * category subtotal, not per line (§7.5).
  */
-export function computeTotals(lines: InvoiceLine[]): InvoiceTotals {
+export function computeTotals(lines: TaxableLine[]): InvoiceTotals {
   const byCategory = new Map<string, CategoryBreakdown>();
   let taxExclusiveMinor = 0;
   let marginTaxMinor = 0;
   let marginLinesWithoutCostCount = 0;
   let anyMarginLine = false;
+  let anyImportLine = false;
 
   for (const line of lines) {
     const profile = getProfile(line.taxProfileCode);
     const { lineNetMinor } = computeLine(line);
     taxExclusiveMinor += lineNetMinor;
 
+    if (profile.code === "IMPORT_GOODS") anyImportLine = true;
     const isMargin = profile.code === "MARGIN_SCHEME";
     if (isMargin) {
       anyMarginLine = true;
@@ -242,8 +350,13 @@ export function computeTotals(lines: InvoiceLine[]): InvoiceTotals {
     // Margin-scheme lines get their own subtotal. Their profile carries
     // category S at 5%, exactly the key standard-rated lines use, so sharing it
     // would fold the selling price of used goods into the standard-rated
-    // subtotal and charge 5% on the whole of it.
-    const key = isMargin ? `MARGIN:${profile.code}` : `${profile.categoryCode}:${profile.ratePercent}`;
+    // subtotal and charge 5% on the whole of it. An import of goods is the same
+    // trap one category over: it carries AE at 5% and the reverse charge
+    // carries AE at 0, so keying on the pair alone would put 5% of the customs
+    // value on the face of a document that must show none.
+    const key = STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code)
+      ? `NO_TAX_STATED:${profile.code}`
+      : `${profile.categoryCode}:${profile.ratePercent}`;
     const existing = byCategory.get(key);
     if (existing) {
       existing.taxableMinor += lineNetMinor;
@@ -255,13 +368,15 @@ export function computeTotals(lines: InvoiceLine[]): InvoiceTotals {
         // buyer is charged the price and no tax, so the breakdown on the face
         // of the invoice has to foot to nil or it contradicts itself. The 5% in
         // the profile is the rate applied to the margin behind it, and that
-        // figure is reported in `marginTaxMinor`.
+        // figure is reported in `marginTaxMinor`. An import states none for the
+        // same arithmetic reason and a different legal one — the supplier is
+        // outside UAE VAT — and its figure is `importVatMinor`.
         //
         // Which PINT AE category code a margin-scheme supply should carry is
         // not established anywhere in this codebase — the profile table above
         // says its category codes are placeholders — so the profile's own code
         // is left as it is rather than replaced with a guess.
-        ratePercent: isMargin ? 0 : profile.ratePercent,
+        ratePercent: STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code) ? 0 : profile.ratePercent,
         taxableMinor: lineNetMinor,
         vatMinor: 0,
       });
@@ -288,6 +403,9 @@ export function computeTotals(lines: InvoiceLine[]): InvoiceTotals {
     // Only on documents that have a margin-scheme line — on every other
     // document the fields would be noise that means nothing.
     ...(anyMarginLine ? { marginTaxMinor, marginLinesWithoutCostCount } : {}),
+    // Likewise: a document with no imported goods on it has no self-accounted
+    // import tax, and reporting a nought would read as a computed figure.
+    ...(anyImportLine ? { importVatMinor: importVatOnGoods(lines) } : {}),
   };
 }
 
@@ -309,16 +427,17 @@ export function recomputeLines(lines: InvoiceLine[]): InvoiceLine[] {
  * so a used-car sale on its own is a commercial invoice bearing the words the
  * scheme requires. A document that also carries an ordinary taxable line is
  * still a tax invoice for that line, with the margin line showing no tax
- * beside it.
+ * beside it. An imported line is excluded for the same reason: no tax is stated
+ * on it, because the importer owes the tax to the FTA rather than to the seller.
  */
 export function deriveDocType(
-  lines: InvoiceLine[],
+  lines: TaxableLine[],
   opts: { isCreditNote?: boolean } = {},
 ): DocType {
   if (opts.isCreditNote) return "TAX_CREDIT_NOTE";
   const anyTaxable = lines.some((l) => {
     const profile = getProfile(l.taxProfileCode);
-    return profile.isTaxable && profile.code !== "MARGIN_SCHEME";
+    return profile.isTaxable && !STATES_NO_TAX_ON_THE_DOCUMENT.has(profile.code);
   });
   return anyTaxable ? "TAX_INVOICE" : "COMMERCIAL_INVOICE";
 }

@@ -7,8 +7,13 @@ import { Figure, PageHead, Panel, ErrorNote, Loading } from "@/components/ledger
 
 interface Box { box: string; label: string; amountMinor: string; vatMinor: string | null; adjustmentMinor: string | null }
 interface Outside { taxCode: string; label: string; amountMinor: string; note: string }
+interface TaxPeriod {
+  label: string; from: string; to: string; dueOn: string;
+  matchesRequest: boolean; filedOn: string | null;
+}
 interface Ret {
   periodFrom: string; periodTo: string; currency: string;
+  taxPeriod: TaxPeriod | null;
   sales: Box[]; expenses: Box[];
   outsideTheReturn: Outside[];
   totalOutputVatMinor: string; totalInputVatMinor: string; netVatMinor: string; payable: boolean;
@@ -16,8 +21,22 @@ interface Ret {
   warnings: string[];
 }
 
-/** Quarters as the FTA runs them, plus the current month for monthly filers. */
-function periodsFor(year: number) {
+interface Choice { label: string; from: string; to: string }
+interface Periods {
+  registration: { frequency: string; firstPeriodEndMonth: number; trn: string | null } | null;
+  periods: { label: string; from: string; to: string; dueOn: string }[];
+}
+
+/**
+ * Calendar quarters and months, for an entity whose FTA tax period nobody has
+ * recorded.
+ *
+ * These are a guess and the screen says so. The FTA assigns a tax period on
+ * registration and does not give everybody the same one — a registrant on the
+ * Feb/May/Aug/Nov stagger has no calendar quarter at all — so where the
+ * registration IS recorded the picker is built from it instead.
+ */
+function calendarPeriods(year: number): Choice[] {
   const q = [
     { label: `${year} Q1`, from: `${year}-01-01`, to: `${year}-03-31` },
     { label: `${year} Q2`, from: `${year}-04-01`, to: `${year}-06-30` },
@@ -30,6 +49,12 @@ function periodsFor(year: number) {
     return { label: `${year}-${mm}`, from: `${year}-${mm}-01`, to: `${year}-${mm}-${last}` };
   });
   return [...q, ...m];
+}
+
+/** The last period that has actually ended — the one there is a return to prepare for. */
+function lastEnded(choices: Choice[], today: string): Choice {
+  const ended = choices.filter((c) => c.to < today);
+  return ended[ended.length - 1] ?? choices[0];
 }
 
 export default function VatReturnPage() {

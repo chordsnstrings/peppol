@@ -5,6 +5,7 @@ import { postBill } from "@/lib/server/ledger/ap";
 import { post, reverse } from "@/lib/server/ledger/post";
 import { vatReturn } from "@/lib/server/ledger/vat";
 import { openBooks, openFiscalYear } from "@/lib/server/ledger/setup";
+import { recordFiling, recordRegistration } from "@/lib/server/ledger/tax-periods";
 import type { Invoice, InvoiceLine, TaxProfileCode } from "@/lib/domain/types";
 
 const db = new PrismaClient();
@@ -25,6 +26,8 @@ async function wipe() {
     db.$executeRawUnsafe(`DELETE FROM "FiscalYear" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "Book" WHERE "orgId" = '${ORG}'`),
     db.$executeRawUnsafe(`DELETE FROM "DocumentSequence" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TaxFiling" WHERE "orgId" = '${ORG}'`),
+    db.$executeRawUnsafe(`DELETE FROM "TaxRegistration" WHERE "orgId" = '${ORG}'`),
   ]);
 }
 
@@ -68,10 +71,18 @@ d("VAT 201 return", () => {
   });
   afterAll(async () => { await wipe(); await db.$disconnect(); });
 
-  it("puts standard-rated sales and their tax in box 1", async () => {
+  it("puts standard-rated sales and their tax on the emirate row of box 1", async () => {
     const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-05-01", to: "2026-05-31" });
-    expect(box(r, "sales", "1").amountMinor).toBe("1000000");
-    expect(box(r, "sales", "1").vatMinor).toBe("50000");
+    // The seller is registered in Dubai, so the supply is on row 1b. The FTA
+    // splits box 1 seven ways because the tax is distributed between the
+    // emirates on that basis.
+    expect(box(r, "sales", "1b").amountMinor).toBe("1000000");
+    expect(box(r, "sales", "1b").vatMinor).toBe("50000");
+    // And on none of the other six.
+    for (const b of ["1a", "1c", "1d", "1e", "1f", "1g", "1x"]) {
+      expect(box(r, "sales", b).amountMinor).toBe("0");
+      expect(box(r, "sales", b).vatMinor).toBe("0");
+    }
   });
 
   it("puts zero-rated exports in box 4 with no tax figure at all", async () => {
@@ -192,7 +203,7 @@ d("VAT 201 return", () => {
     expect(box(r, "sales", "4").amountMinor).toBe("400000");
     expect(box(r, "sales", "4").vatMinor).toBeNull();
     // On no other box either.
-    expect(box(r, "sales", "1").amountMinor).toBe("0");
+    expect(box(r, "sales", "1b").amountMinor).toBe("0");
     expect(box(r, "sales", "3").amountMinor).toBe("0");
     expect(box(r, "sales", "5").amountMinor).toBe("0");
 
@@ -266,7 +277,7 @@ d("VAT 201 return", () => {
     });
     const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-11-01", to: "2026-11-30" });
     // Not silently folded into box 1 with the standard-rated supplies.
-    expect(box(r, "sales", "1").amountMinor).toBe("0");
+    expect(box(r, "sales", "1b").amountMinor).toBe("0");
     const w = r.warnings.find((x) => /profit margin scheme/i.test(x))!;
     expect(w).toMatch(/5\/105/);
     expect(w).toMatch(/Article 29/);
@@ -276,5 +287,202 @@ d("VAT 201 return", () => {
   it("refuses a period that ends before it starts", async () => {
     await expect(vatReturn({ orgId: ORG, entityId: ENT, from: "2026-05-31", to: "2026-05-01" }))
       .rejects.toThrow(/ends before it starts/i);
+  });
+
+  it("splits box 1 between the emirates the supplies were made in", async () => {
+    // The VAT 201 splits standard-rated supplies seven ways because the tax on
+    // them is distributed between the emirates on that basis, so this is not
+    // presentation — it decides where the money goes.
+    //
+    // April: AED 10,000 supplied from Dubai, AED 4,000 from Sharjah and
+    // AED 2,000 from an establishment whose emirate nobody recorded. Rows
+    // 1b, 1c and the unattributed row read 1,000,000, 400,000 and 200,000, and
+    // the tax on them 50,000, 20,000 and 10,000 — 80,000 in all, which is what
+    // one flat box 1 used to report on its own.
+    const april = { issueDate: "2026-04-10", supplyDate: "2026-04-10" };
+    await postInvoice({ orgId: ORG, invoice: doc("OUTBOUND", [line(1_000_000, 50_000)], april) });
+    await postInvoice({
+      orgId: ORG,
+      invoice: doc("OUTBOUND", [line(400_000, 20_000)], {
+        ...april,
+        seller: { nameEn: "Seller", address: { emirate: "SH", country: "AE" } },
+      }),
+    });
+    await postInvoice({
+      orgId: ORG,
+      invoice: doc("OUTBOUND", [line(200_000, 10_000)], { ...april, seller: { nameEn: "Seller" } }),
+    });
+
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-04-01", to: "2026-04-30" });
+    expect(box(r, "sales", "1b").label).toBe("Standard rated supplies in Dubai");
+    expect(box(r, "sales", "1b").amountMinor).toBe("1000000");
+    expect(box(r, "sales", "1b").vatMinor).toBe("50000");
+    expect(box(r, "sales", "1c").label).toBe("Standard rated supplies in Sharjah");
+    expect(box(r, "sales", "1c").amountMinor).toBe("400000");
+    expect(box(r, "sales", "1c").vatMinor).toBe("20000");
+
+    // The unattributed supplies are shown as their own row and are NOT spread
+    // across the seven. Spreading them would move real money between real
+    // emirates on the strength of an assumption.
+    expect(box(r, "sales", "1x").amountMinor).toBe("200000");
+    expect(box(r, "sales", "1x").vatMinor).toBe("10000");
+    expect(box(r, "sales", "1a").amountMinor).toBe("0");
+
+    // The split is a split: the rows still add to the whole.
+    const rows = ["1a", "1b", "1c", "1d", "1e", "1f", "1g", "1x"];
+    const supplies = rows.reduce((a, b) => a + BigInt(box(r, "sales", b).amountMinor), 0n);
+    const tax = rows.reduce((a, b) => a + BigInt(box(r, "sales", b).vatMinor!), 0n);
+    expect(supplies).toBe(1_600_000n);
+    expect(tax).toBe(80_000n);
+    expect(r.totalOutputVatMinor).toBe("80000");
+
+    const w = r.warnings.find((x) => /none of the seven rows of box 1/.test(x))!;
+    expect(w).toMatch(/200000/);
+    expect(w).toMatch(/has not been spread/i);
+  });
+
+  it("says an emirate it does not recognise is unrecognised rather than picking one", async () => {
+    // A typo that lands in Ajman is a typo that sends Ajman money.
+    await postInvoice({
+      orgId: ORG,
+      invoice: doc("OUTBOUND", [line(100_000, 5_000)], {
+        issueDate: "2026-02-09", supplyDate: "2026-02-09",
+        seller: { nameEn: "Seller", address: { emirate: "XX", country: "AE" } },
+      }),
+    });
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-02-01", to: "2026-02-28" });
+    expect(box(r, "sales", "1x").amountMinor).toBe("100000");
+    for (const b of ["1a", "1b", "1c", "1d", "1e", "1f", "1g"]) {
+      expect(box(r, "sales", b).amountMinor).toBe("0");
+    }
+    expect(r.warnings.find((x) => /XX/.test(x))).toMatch(/not an emirate/i);
+  });
+
+  it("reports imported goods in box 6 and recovers the tax in box 10", async () => {
+    // AED 5,000 of goods imported. The overseas supplier charges no UAE VAT;
+    // Article 48 of Federal Decree-Law 8/2017 puts the tax on the importer, who
+    // declares AED 250 of output tax and reclaims the same AED 250 — so the
+    // return moves by nothing and the transaction still appears on both sides.
+    // Before this the treatment had no tax code at all and the transaction could
+    // not be reported at any figure.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-12-04",
+      // Not "manual": 2000, 2100 and 1350 are control accounts and the ledger
+      // refuses a manual journal against one. This is the shape a bill posts.
+      source: "bill", memo: "Import of goods — customs declaration 12345",
+      lines: [
+        { account: "6900", debit: 500_000, taxCode: "IMPORT_GOODS" },
+        { account: "1350", debit: 25_000, taxCode: "IMPORT_INPUT_VAT" },
+        { account: "2000", credit: 500_000 },
+        { account: "2100", credit: 25_000, taxCode: "IMPORT_OUTPUT_VAT" },
+      ],
+    });
+    // And AED 1,000 of adjustment to an earlier import. Box 6 is pre-populated
+    // by the FTA from customs and cannot be edited, so a correction to it has
+    // to go in box 7 — which is what the source type on the entry says it is.
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-12-18",
+      source: "bill", sourceType: "IMPORT_ADJUSTMENT",
+      memo: "Adjustment to an earlier import",
+      lines: [
+        { account: "6900", debit: 100_000, taxCode: "IMPORT_GOODS" },
+        { account: "1350", debit: 5_000, taxCode: "IMPORT_INPUT_VAT" },
+        { account: "2000", credit: 100_000 },
+        { account: "2100", credit: 5_000, taxCode: "IMPORT_OUTPUT_VAT" },
+      ],
+    });
+
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-12-01", to: "2026-12-31" });
+    expect(box(r, "sales", "6").amountMinor).toBe("500000");
+    expect(box(r, "sales", "6").vatMinor).toBe("25000");
+    expect(box(r, "sales", "7").amountMinor).toBe("100000");
+    expect(box(r, "sales", "7").vatMinor).toBe("5000");
+    // Not in box 9 with the ordinary standard-rated expenses.
+    expect(box(r, "expenses", "9").amountMinor).toBe("0");
+    // Recovered in box 10 with the rest of the reverse-charge input tax.
+    expect(box(r, "expenses", "10").amountMinor).toBe("600000");
+    expect(box(r, "expenses", "10").vatMinor).toBe("30000");
+
+    expect(r.totalOutputVatMinor).toBe("30000");
+    expect(r.totalInputVatMinor).toBe("30000");
+    expect(r.netVatMinor).toBe("0");
+    // The point of the whole exercise: the self-reconciliation used to report
+    // that the return agreed with 2100 and 1350 while carrying no import box at
+    // all, so it confirmed a return that could not be filed.
+    expect(r.reconciliation.outputMatches).toBe(true);
+    expect(r.reconciliation.inputMatches).toBe(true);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it("warns when goods are coded as imported and nobody accounted for the tax", async () => {
+    await post({
+      orgId: ORG, entityId: ENT, entryDate: "2026-01-15", source: "bill",
+      memo: "Import with no self-accounted tax",
+      lines: [
+        { account: "6900", debit: 300_000, taxCode: "IMPORT_GOODS" },
+        { account: "2000", credit: 300_000 },
+      ],
+    });
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-01-01", to: "2026-01-31" });
+    expect(box(r, "sales", "6").amountMinor).toBe("300000");
+    expect(box(r, "sales", "6").vatMinor).toBe("0");
+    const w = r.warnings.find((x) => /coded as imported/.test(x))!;
+    expect(w).toMatch(/Article 48/);
+    expect(w).toMatch(/pre-populated/);
+  });
+
+  it("uses the registration's own tax period rather than the dates it was asked for", async () => {
+    // Registered on the FTA's February stagger: periods end in February, May,
+    // August and November. A caller asking for calendar May is asking for a
+    // period this registrant does not have — and every reminder in the product
+    // used to ask for exactly that.
+    await recordRegistration({
+      orgId: ORG, entityId: ENT, regime: "VAT",
+      trn: "100123456700003", frequency: "QUARTERLY", firstPeriodEndMonth: 2,
+      registeredOn: "2026-01-01",
+    });
+
+    const r = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-05-01", to: "2026-05-31" });
+    expect(r.taxPeriod).toEqual({
+      label: "Mar-May 2026",
+      from: "2026-03-01",
+      to: "2026-05-31",
+      dueOn: "2026-06-28",
+      matchesRequest: false,
+      filedOn: null,
+    });
+    // The figures are for the period, and the return says which period.
+    expect(r.periodFrom).toBe("2026-03-01");
+    expect(r.periodTo).toBe("2026-05-31");
+    expect(r.warnings.find((x) => /is not a tax period of this registration/.test(x)))
+      .toMatch(/Mar-May 2026/);
+
+    // Asked for the real period, it says so and says nothing more.
+    const exact = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: "2026-05-31" });
+    expect(exact.taxPeriod?.matchesRequest).toBe(true);
+    expect(exact.warnings.find((x) => /is not a tax period/.test(x))).toBeUndefined();
+    expect(exact.totalOutputVatMinor).toBe(r.totalOutputVatMinor);
+
+    // And once a filing is recorded, "is this filed" stops being an inference
+    // from whether somebody happened to close a month.
+    await recordFiling({
+      orgId: ORG, entityId: ENT, periodLabel: "Mar-May 2026",
+      filedOn: "2026-06-25", filedBy: "u-1", reference: "FTA-1", asOf: "2026-07-01",
+    });
+    const filed = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-03-01", to: "2026-05-31" });
+    expect(filed.taxPeriod?.filedOn).toBe("2026-06-25");
+  });
+
+  it("says nothing about tax periods for an entity with no registration", async () => {
+    // Every entity that existed before registrations did, which is all of them.
+    // The dates asked for are the dates computed, and the return claims nothing
+    // it cannot know.
+    await db.$executeRawUnsafe(`DELETE FROM "TaxFiling" WHERE "orgId" = '${ORG}'`);
+    await db.$executeRawUnsafe(`DELETE FROM "TaxRegistration" WHERE "orgId" = '${ORG}'`);
+    const plain = await vatReturn({ orgId: ORG, entityId: ENT, from: "2026-05-01", to: "2026-05-31" });
+    expect(plain.taxPeriod).toBeNull();
+    expect(plain.periodFrom).toBe("2026-05-01");
+    expect(plain.periodTo).toBe("2026-05-31");
+    expect(plain.warnings.find((x) => /tax period/.test(x))).toBeUndefined();
   });
 });

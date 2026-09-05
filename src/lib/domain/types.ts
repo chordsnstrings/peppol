@@ -30,7 +30,7 @@ export type ExchangeStatus =
 
 export type ReportingStatus = "NOT_REPORTED" | "SUBMITTED" | "ACCEPTED" | "REJECTED";
 
-/** Tax profile codes (seeded, system profiles). */
+/** Tax profile codes a DOCUMENT line can carry (seeded, system profiles). */
 export type TaxProfileCode =
   | "STANDARD_5"
   | "ZERO_EXPORT"
@@ -41,6 +41,24 @@ export type TaxProfileCode =
   | "DESIGNATED_ZONE"
   | "MARGIN_SCHEME";
 
+/**
+ * Treatments only a purchase can carry.
+ *
+ * Import of goods is one of them. Goods brought into the UAE are taxed at
+ * import, and Article 48 of Federal Decree-Law 8/2017 puts the tax on the
+ * importer rather than on the seller: the importer accounts for the output tax
+ * itself and recovers the same amount as input tax, which is what makes boxes
+ * 6, 7 and 10 of the VAT 201 the only place the transaction appears. Nothing an
+ * entity SELLS is ever an import of its own, so the code is kept out of
+ * `TaxProfileCode`: three screens render every member of that union in the tax
+ * dropdown of a sales document, and a code that cannot be right on the document
+ * it is offered on is a code somebody will eventually pick.
+ */
+export type PurchaseTaxProfileCode = "IMPORT_GOODS";
+
+/** Every treatment the tax computation knows, whichever side of the book raises it. */
+export type AnyTaxProfileCode = TaxProfileCode | PurchaseTaxProfileCode;
+
 export interface TaxProfile {
   code: TaxProfileCode;
   label: string;
@@ -49,6 +67,11 @@ export interface TaxProfile {
   requiresExemptionReason: boolean;
   isTaxable: boolean; // contributes VAT / forces TAX_INVOICE
   hint: string;
+}
+
+/** A profile that may be one of the purchase-only treatments. */
+export interface AnyTaxProfile extends Omit<TaxProfile, "code"> {
+  code: AnyTaxProfileCode;
 }
 
 export interface Address {
@@ -99,9 +122,22 @@ export interface InvoiceLine {
   productId?: string;
 }
 
+/**
+ * A line as the tax computation sees it: an invoice line, or a purchase line
+ * carrying a treatment only a purchase can carry.
+ *
+ * Every `InvoiceLine` is one of these, so a caller holding invoice lines needs
+ * no change; the widening exists so a bill bearing an import of goods can be
+ * totalled by the same arithmetic as everything else rather than by a second
+ * copy of it kept somewhere in the purchase ledger.
+ */
+export type TaxableLine = Omit<InvoiceLine, "taxProfileCode"> & {
+  taxProfileCode: AnyTaxProfileCode;
+};
+
 export interface CategoryBreakdown {
   categoryCode: string;
-  profileCode: TaxProfileCode;
+  profileCode: AnyTaxProfileCode;
   ratePercent: number;
   taxableMinor: number;
   vatMinor: number;
@@ -131,6 +167,17 @@ export interface InvoiceTotals {
    * alternative is a document that quietly claims nil tax on a real margin.
    */
   marginLinesWithoutCostCount?: number;
+  /**
+   * The tax the importer must account for on goods it brought into the UAE.
+   *
+   * Not part of `vatMinor` or `payableMinor`, for the same reason reverse
+   * charge is not: the overseas supplier charged nothing, so nothing is owed to
+   * them. Article 48 of Federal Decree-Law 8/2017 puts the tax on the importer,
+   * who declares it as output tax and recovers the same figure as input tax —
+   * boxes 6 and 10 of the VAT 201. Adding it to the payable would ask the
+   * business to pay its supplier the FTA's money.
+   */
+  importVatMinor?: number;
 }
 
 export interface FxInfo {

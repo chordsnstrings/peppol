@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/server/prisma";
+import { EMIRATES } from "@/lib/domain/peppol";
 import { LedgerError } from "./post";
+import { filingFor, getRegistration, taxPeriodFor } from "./tax-periods";
 
 /**
  * The FTA VAT 201 return, computed from the general ledger.
@@ -51,11 +53,40 @@ export interface OutsideTheReturn {
   note: string;
 }
 
+/**
+ * The tax period this return covers, where the entity's registration is
+ * recorded and therefore known.
+ *
+ * A return is filed for a tax period, not for a span of dates somebody chose.
+ * Until the registration existed the product could only take the caller's word
+ * for the dates, so a business on the FTA's February stagger was handed a
+ * calendar quarter and a deadline a month late by every screen that asked. This
+ * says which period the figures are actually for, and whether the dates asked
+ * for were that period.
+ */
+export interface TaxPeriodOnReturn {
+  label: string;
+  from: string;
+  to: string;
+  /** Article 64 of the Executive Regulation: the 28th day after the period ends. */
+  dueOn: string;
+  /** False where the caller asked for dates that are not this registration's period. */
+  matchesRequest: boolean;
+  /** When a filing has been recorded against the period. Null is "not recorded", not "not filed". */
+  filedOn: string | null;
+}
+
 export interface VatReturn {
   entityId: string;
   periodFrom: string;
   periodTo: string;
   currency: string;
+  /**
+   * Null where no registration is recorded — which is every entity that
+   * existed before registrations did. The figures are then exactly the dates
+   * the caller asked for, and the return says nothing it cannot know.
+   */
+  taxPeriod: TaxPeriodOnReturn | null;
   sales: VatBox[];
   expenses: VatBox[];
   /**
@@ -81,9 +112,62 @@ export interface VatReturn {
   warnings: string[];
 }
 
+/**
+ * Box 1 of the VAT 201 is seven rows, not one.
+ *
+ * The form splits standard-rated supplies between the seven emirates because
+ * the tax collected on them is distributed between the emirates on that basis —
+ * the split is not presentational, it decides where the money ends up. So the
+ * return carries the seven rows the form carries, in the order the form lists
+ * them, and each is a box in its own right.
+ *
+ * The codes are the ones an address carries (`EMIRATES` in `domain/peppol.ts`),
+ * which is what `JournalLine.taxEmirate` is stamped with when an invoice posts.
+ */
+const EMIRATE_BOXES: { box: string; code: string }[] = [
+  { box: "1a", code: "AZ" },
+  { box: "1b", code: "DU" },
+  { box: "1c", code: "SH" },
+  { box: "1d", code: "AJ" },
+  { box: "1e", code: "UQ" },
+  { box: "1f", code: "RK" },
+  { box: "1g", code: "FU" },
+];
+
+/**
+ * The row for standard-rated supplies whose emirate the ledger does not hold.
+ *
+ * There is no such box on the FTA's form, and that is the point: the figure has
+ * to go on one of the seven before the return can be filed, and nothing here
+ * knows which. Spreading it across the emirates in proportion to the rest would
+ * be arithmetic presented as a decision, and it would move real money between
+ * real emirates. So it is shown, named, and left for somebody to attribute.
+ */
+const UNATTRIBUTED_BOX = "1x";
+
+const EMIRATE_NAMES = new Map(EMIRATES.map((e) => [e.code, e.name]));
+/** The full name as well as the code, because a hand-keyed address carries either. */
+const EMIRATE_CODE_BY_NAME = new Map(EMIRATES.map((e) => [e.name.toUpperCase(), e.code]));
+
+/**
+ * Which of the seven a line's stamped emirate is, or null for the unattributed
+ * row. An unrecognised value is not silently made into one of the seven — it is
+ * reported, because a typo that lands in Ajman is a typo that sends Ajman
+ * money.
+ */
+function emirateOf(raw: string | null, unrecognised: Set<string>): string | null {
+  const value = (raw ?? "").trim();
+  if (!value) return null;
+  const upper = value.toUpperCase();
+  if (EMIRATE_NAMES.has(upper)) return upper;
+  const byName = EMIRATE_CODE_BY_NAME.get(upper);
+  if (byName) return byName;
+  unrecognised.add(value);
+  return null;
+}
+
 /** Sales treatments that belong in each box of the return. */
 const SALES_BOXES: { box: string; label: string; codes: string[] }[] = [
-  { box: "1", label: "Standard rated supplies", codes: ["STANDARD_5"] },
   { box: "3", label: "Supplies subject to the reverse charge provisions", codes: ["REVERSE_CHARGE"] },
   // Zero rated, and only zero rated. A zero-rated supply is IN the scope of UAE
   // VAT at a rate of nothing; an out-of-scope supply is not in the scope at all.
@@ -91,11 +175,6 @@ const SALES_BOXES: { box: string; label: string; codes: string[] }[] = [
   // an overstatement of the taxable supplies the business declares it made.
   { box: "4", label: "Zero rated supplies", codes: ["ZERO_EXPORT", "ZERO_OTHER"] },
   { box: "5", label: "Exempt supplies", codes: ["EXEMPT"] },
-];
-
-const EXPENSE_BOXES: { box: string; label: string; codes: string[] }[] = [
-  { box: "9", label: "Standard rated expenses", codes: ["STANDARD_5"] },
-  { box: "10", label: "Supplies subject to the reverse charge provisions", codes: ["REVERSE_CHARGE"] },
 ];
 
 /**
@@ -168,8 +247,43 @@ const OUTSIDE_THE_BOXES: { code: string; label: string; note: string }[] = [
   },
 ];
 
-const OUTPUT_TAX_CODES = ["OUTPUT_VAT", "RC_OUTPUT_VAT"];
-const INPUT_TAX_CODES = ["INPUT_VAT", "RC_INPUT_VAT"];
+/**
+ * Boxes 6 and 7 — goods imported into the UAE, and adjustments to them.
+ *
+ * Article 48 of Federal Decree-Law 8/2017 puts the tax on an import of goods on
+ * the importer rather than on the overseas seller: the importer declares the
+ * output tax itself and recovers the same amount as input tax, so it is
+ * cash-neutral where the input tax is recoverable in full. On the form box 6
+ * carries the value of the goods and the tax on them, box 7 carries the
+ * adjustments to what box 6 said, and the recovery is claimed in box 10 with
+ * the rest of the reverse-charge input tax.
+ *
+ * The FTA pre-populates box 6 from the customs declarations filed against the
+ * importer's TRN and does not let it be edited — box 7 is the only channel for
+ * a correction to it, which is why the two are separate boxes here rather than
+ * one figure. Coding an import as an ordinary reverse charge instead would
+ * double-count against that pre-populated figure; coding it as an ordinary
+ * expense leaves box 6 with no matching recovery. Neither could be patched by
+ * hand afterwards, because 2100 and 1350 refuse a manual journal.
+ *
+ * These are the tax codes an import posting carries. They are distinct from the
+ * reverse-charge pair on purpose: the two mechanisms are the same arithmetic
+ * and different boxes, and a shared code could not be told apart afterwards.
+ */
+const IMPORT_OUTPUT_TAX_CODE = "IMPORT_OUTPUT_VAT";
+const IMPORT_INPUT_TAX_CODE = "IMPORT_INPUT_VAT";
+/** The treatment stamped on the goods themselves, as `IMPORT_GOODS` in `domain/tax.ts`. */
+const IMPORT_GOODS_CODE = "IMPORT_GOODS";
+
+/**
+ * An entry stamped with this restates an earlier import rather than reporting a
+ * new one, so its figures belong in box 7 and not in box 6 — box 6 is the
+ * customs figure and is not editable.
+ */
+const IMPORT_ADJUSTMENT_SOURCE_TYPE = "IMPORT_ADJUSTMENT";
+
+const OUTPUT_TAX_CODES = ["OUTPUT_VAT", "RC_OUTPUT_VAT", IMPORT_OUTPUT_TAX_CODE];
+const INPUT_TAX_CODES = ["INPUT_VAT", "RC_INPUT_VAT", IMPORT_INPUT_TAX_CODE];
 
 export async function vatReturn(opts: {
   orgId: string;
@@ -178,12 +292,44 @@ export async function vatReturn(opts: {
   from: string;
   to: string;
 }): Promise<VatReturn> {
-  const from = new Date(opts.from);
-  const to = new Date(opts.to);
+  let from = new Date(opts.from);
+  let to = new Date(opts.to);
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
     throw new LedgerError("A return needs a valid start and end date.");
   }
   if (to < from) throw new LedgerError("The return period ends before it starts.");
+
+  /*
+   * The registration's own period wins over the caller's dates.
+   *
+   * A return covers a tax period the FTA assigned, and the dates a screen or a
+   * reminder happens to pass are at best a guess at it. Where the registration
+   * is recorded, the period containing the requested start date is the period
+   * computed — so a quarterly registrant on the February stagger gets
+   * December-to-February rather than the calendar quarter three callers used to
+   * assume, and the deadline that goes with it. Where no registration is
+   * recorded — every entity that existed before they did — the caller's dates
+   * are used exactly as given and the return claims nothing about periods.
+   */
+  const registration = await getRegistration({ orgId: opts.orgId, entityId: opts.entityId, regime: "VAT" });
+  let taxPeriod: TaxPeriodOnReturn | null = null;
+  if (registration) {
+    const period = taxPeriodFor(registration, opts.from);
+    const matchesRequest = period.from === opts.from.slice(0, 10) && period.to === opts.to.slice(0, 10);
+    if (!matchesRequest) {
+      from = new Date(period.from);
+      to = new Date(period.to);
+    }
+    const filing = await filingFor({
+      orgId: opts.orgId,
+      entityId: opts.entityId,
+      regime: "VAT",
+      periodLabel: period.label,
+    });
+    taxPeriod = { ...period, matchesRequest, filedOn: filing?.filedOn ?? null };
+  }
+  const periodFrom = taxPeriod ? taxPeriod.from : opts.from;
+  const periodTo = taxPeriod ? taxPeriod.to : opts.to;
 
   const book = await prisma.book.findFirst({
     where: { orgId: opts.orgId, entityId: opts.entityId, code: "PRIMARY" },
@@ -216,6 +362,14 @@ export async function vatReturn(opts: {
   // debit side, so both are reported as positive amounts on the return.
   const salesByCode = new Map<string, bigint>();
   const expensesByCode = new Map<string, bigint>();
+  /** Standard-rated supplies and their tax, split the way box 1 is split. */
+  const standardRatedByEmirate = new Map<string, bigint>();
+  const outputVatByEmirate = new Map<string, bigint>();
+  let unattributedSupplies = 0n;
+  let unattributedOutputVat = 0n;
+  const unrecognisedEmirates = new Set<string>();
+  /** The part of the imported goods that restates an earlier import — box 7. */
+  let importAdjustmentNet = 0n;
   let outputVat = 0n;
   let inputVat = 0n;
   const untagged: string[] = [];
@@ -224,17 +378,39 @@ export async function vatReturn(opts: {
     const code = l.taxCode;
     const amount = l.functionalAmountMinor;
 
-    if (code && OUTPUT_TAX_CODES.includes(code)) { outputVat += -amount; continue; }
+    if (code && OUTPUT_TAX_CODES.includes(code)) {
+      outputVat += -amount;
+      // Only the tax on ordinary standard-rated sales is split by emirate. The
+      // reverse-charge and import output tax belong to boxes of their own,
+      // which the form does not split.
+      if (code === "OUTPUT_VAT") {
+        const emirate = emirateOf(l.taxEmirate, unrecognisedEmirates);
+        if (emirate) outputVatByEmirate.set(emirate, (outputVatByEmirate.get(emirate) ?? 0n) + -amount);
+        else unattributedOutputVat += -amount;
+      }
+      continue;
+    }
     if (code && INPUT_TAX_CODES.includes(code)) { inputVat += amount; continue; }
 
     if (l.account.type === "INCOME") {
       if (!code) { untagged.push(`${l.account.code} on ${l.entry.entryDate.toISOString().slice(0, 10)}`); continue; }
       salesByCode.set(code, (salesByCode.get(code) ?? 0n) + -amount);
+      if (code === "STANDARD_5") {
+        const emirate = emirateOf(l.taxEmirate, unrecognisedEmirates);
+        if (emirate) {
+          standardRatedByEmirate.set(emirate, (standardRatedByEmirate.get(emirate) ?? 0n) + -amount);
+        } else {
+          unattributedSupplies += -amount;
+        }
+      }
     } else if (l.account.type === "EXPENSE" || l.account.code === "1200") {
       // Stock bought for resale is an input for VAT even though it lands on the
       // balance sheet, so inventory purchases belong in box 9 with the rest.
       if (!code) continue; // an uncoded expense is simply outside the return
       expensesByCode.set(code, (expensesByCode.get(code) ?? 0n) + amount);
+      if (code === IMPORT_GOODS_CODE && l.entry.sourceType === IMPORT_ADJUSTMENT_SOURCE_TYPE) {
+        importAdjustmentNet += amount;
+      }
     }
   }
 
@@ -248,31 +424,91 @@ export async function vatReturn(opts: {
   const capitalAssetAdjustment = chargedInputVat(lines.filter(isAdjustment));
   const inputVatOnExpenses = chargedInputVat(lines.filter((l) => !isAdjustment(l)));
 
+  /*
+   * Imports, split into the box that is pre-populated and the box that
+   * corrects it. The FTA fills box 6 from the customs declarations against the
+   * importer's TRN, so a restatement of an earlier import cannot go there and
+   * has to go in box 7 — which is exactly what the source type on the entry
+   * says the posting was.
+   */
+  const importAdjustmentLines = lines.filter(
+    (l) => l.entry.sourceType === IMPORT_ADJUSTMENT_SOURCE_TYPE,
+  );
+  const importGoodsLines = lines.filter(
+    (l) => l.entry.sourceType !== IMPORT_ADJUSTMENT_SOURCE_TYPE,
+  );
+  const importNetTotal = expensesByCode.get(IMPORT_GOODS_CODE) ?? 0n;
+  const importNet = importNetTotal - importAdjustmentNet;
+  const importOutputVat = byCode(importGoodsLines, IMPORT_OUTPUT_TAX_CODE, true);
+  const importAdjustmentOutputVat = byCode(importAdjustmentLines, IMPORT_OUTPUT_TAX_CODE, true);
+  const importInputVat = byCode(lines, IMPORT_INPUT_TAX_CODE, false);
+
   // Reverse-charge supplies carry their own tax; standard-rated sales carry the
-  // output tax the invoice charged.
-  const sales: VatBox[] = SALES_BOXES.map((b) => {
-    const amount = sum(b.codes, salesByCode);
-    return {
-      box: b.box, label: b.label, amountMinor: amount.toString(),
+  // output tax the invoice charged, split between the emirates the way the form
+  // splits it.
+  const emirateRows: VatBox[] = EMIRATE_BOXES.map((e) => ({
+    box: e.box,
+    label: `Standard rated supplies in ${EMIRATE_NAMES.get(e.code) ?? e.code}`,
+    amountMinor: (standardRatedByEmirate.get(e.code) ?? 0n).toString(),
+    vatMinor: (outputVatByEmirate.get(e.code) ?? 0n).toString(),
+    adjustmentMinor: null,
+  }));
+
+  const sales: VatBox[] = [
+    ...emirateRows,
+    {
+      box: UNATTRIBUTED_BOX,
+      label: "Standard rated supplies with no emirate recorded",
+      amountMinor: unattributedSupplies.toString(),
+      vatMinor: unattributedOutputVat.toString(),
+      adjustmentMinor: null,
+    },
+    ...SALES_BOXES.map((b) => ({
+      box: b.box,
+      label: b.label,
+      amountMinor: sum(b.codes, salesByCode).toString(),
       // Only boxes that carry tax report a VAT figure; a zero-rated box
       // reporting "0.00" reads as a computation, an empty one as a fact.
-      vatMinor: b.box === "1" ? outputVatOnSales(lines).toString() : b.box === "3" ? rcOutputVat(lines).toString() : null,
+      vatMinor: b.box === "3" ? rcOutputVat(lines).toString() : null,
       adjustmentMinor: BOXES_WITH_AN_ADJUSTMENT_COLUMN.has(b.box) ? "0" : null,
-    };
-  });
+    })),
+    {
+      box: "6",
+      label: "Goods imported into the UAE",
+      amountMinor: importNet.toString(),
+      vatMinor: importOutputVat.toString(),
+      adjustmentMinor: null,
+    },
+    {
+      box: "7",
+      label: "Adjustments to goods imported into the UAE",
+      amountMinor: importAdjustmentNet.toString(),
+      vatMinor: importAdjustmentOutputVat.toString(),
+      adjustmentMinor: null,
+    },
+  ];
 
-  const expenses: VatBox[] = EXPENSE_BOXES.map((b) => {
-    const amount = sum(b.codes, expensesByCode);
-    return {
-      box: b.box, label: b.label, amountMinor: amount.toString(),
-      vatMinor: b.box === "9" ? inputVatOnExpenses.toString() : rcInputVat(lines).toString(),
-      adjustmentMinor: !BOXES_WITH_AN_ADJUSTMENT_COLUMN.has(b.box)
-        ? null
-        : b.box === "9"
-          ? capitalAssetAdjustment.toString()
-          : "0",
-    };
-  });
+  const expenses: VatBox[] = [
+    {
+      box: "9",
+      label: "Standard rated expenses",
+      amountMinor: (expensesByCode.get("STANDARD_5") ?? 0n).toString(),
+      vatMinor: inputVatOnExpenses.toString(),
+      adjustmentMinor: capitalAssetAdjustment.toString(),
+    },
+    {
+      box: "10",
+      label: "Supplies subject to the reverse charge provisions",
+      // The imported goods appear here as well as in boxes 6 and 7, and that
+      // is not a double count: boxes 6 and 7 are the output side of the same
+      // transaction and this is where the FTA's own guidance has the importer
+      // claim the input tax back. Reverse-charge services work the same way
+      // across boxes 3 and 10.
+      amountMinor: ((expensesByCode.get("REVERSE_CHARGE") ?? 0n) + importNetTotal).toString(),
+      vatMinor: (rcInputVat(lines) + importInputVat).toString(),
+      adjustmentMinor: null,
+    },
+  ];
 
   const outsideTheReturn: OutsideTheReturn[] = OUTSIDE_THE_BOXES.map((o) => ({
     taxCode: o.code,
@@ -327,12 +563,53 @@ export async function vatReturn(opts: {
         `Work out the tax on each margin, post it, and check box 1 before you file.`,
     );
   }
+  // Box 1 is distributed between the emirates because the tax on it is, so a
+  // figure with no emirate against it is a figure that cannot be filed. Said
+  // plainly rather than spread across the seven rows in proportion to the
+  // rest: that would be arithmetic presented as a decision, and it would move
+  // real money between real emirates.
+  if (unattributedSupplies !== 0n || unattributedOutputVat !== 0n) {
+    warnings.push(
+      `${unattributedSupplies} of standard-rated supplies, bearing ${unattributedOutputVat} of output tax, carry ` +
+        `no emirate and are on none of the seven rows of box 1. The VAT 201 splits box 1 between the emirates ` +
+        `because the tax is distributed between them on that basis, so this has to be attributed to one of them ` +
+        `before the return is filed. It has not been spread across the others.`,
+    );
+  }
+  if (unrecognisedEmirates.size) {
+    warnings.push(
+      `${[...unrecognisedEmirates].sort().join(", ")} ${unrecognisedEmirates.size === 1 ? "is not an emirate" : "are not emirates"} ` +
+        `this ledger recognises, so the supplies carrying ${unrecognisedEmirates.size === 1 ? "it" : "them"} are ` +
+        `in the unattributed row rather than in one of the seven. Use the two-letter codes: ` +
+        `${EMIRATE_BOXES.map((e) => e.code).join(", ")}.`,
+    );
+  }
+  // Goods coded as an import with no self-accounted tax behind them. Under
+  // Article 48 the importer owes the output tax whether or not anybody posted
+  // it, and box 6 with a value and no tax is a box the FTA's pre-populated
+  // figure will contradict.
+  if (importNetTotal !== 0n && importOutputVat + importAdjustmentOutputVat === 0n) {
+    warnings.push(
+      `${importNetTotal} of goods are coded as imported into the UAE and no import tax has been accounted for ` +
+        `on them. Article 48 of Federal Decree-Law 8/2017 puts that tax on the importer, and box 6 is ` +
+        `pre-populated by the FTA from the customs declarations against your TRN — so a box 6 with a value and ` +
+        `no tax will not agree with theirs.`,
+    );
+  }
+  if (taxPeriod && !taxPeriod.matchesRequest) {
+    warnings.push(
+      `${opts.from} to ${opts.to} is not a tax period of this registration, so this return covers ` +
+        `${taxPeriod.label} — ${taxPeriod.from} to ${taxPeriod.to} — which is the period the FTA assigned. ` +
+        `It falls due on ${taxPeriod.dueOn}, the 28th day after it ended (Article 64 of the Executive Regulation).`,
+    );
+  }
 
   return {
     entityId: opts.entityId,
-    periodFrom: opts.from,
-    periodTo: opts.to,
+    periodFrom,
+    periodTo,
     currency: book.functionalCurrency,
+    taxPeriod,
     sales,
     expenses,
     outsideTheReturn,
@@ -358,7 +635,6 @@ const byCode = (lines: TaggedLine[], code: string, credit: boolean) =>
 const isAdjustment = (l: { entry: { sourceType: string | null } }) =>
   l.entry.sourceType !== null && ADJUSTMENT_SOURCE_TYPES.has(l.entry.sourceType);
 
-const outputVatOnSales = (l: TaggedLine[]) => byCode(l, "OUTPUT_VAT", true);
 const rcOutputVat = (l: TaggedLine[]) => byCode(l, "RC_OUTPUT_VAT", true);
 const chargedInputVat = (l: TaggedLine[]) => byCode(l, "INPUT_VAT", false);
 const rcInputVat = (l: TaggedLine[]) => byCode(l, "RC_INPUT_VAT", false);
